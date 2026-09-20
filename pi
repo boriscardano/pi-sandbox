@@ -90,9 +90,8 @@ fi
 case "${1:-}" in
     install | remove | uninstall | update | list | config | auth) ;;
     *)
-        # Each argument is examined as an argument. Matching against the
-        # flattened "$*" instead would read `pi 'what does --model do?'` as
-        # picking a model, and start the sandbox with no reachable provider.
+        # One argument at a time. Matching the flattened "$*" would read a
+        # prompt that mentions the flag as picking a model.
         chose_model=''
         for arg in "$@"; do
             case "$arg" in

@@ -269,7 +269,7 @@ def test_wrapper_passes_pi_subcommands_through_untouched(tmp_path: Path) -> None
     """Pi recognises `install` and friends only as the first argument, so the
     prepended model default would chat them at the model instead."""
 
-    _, subcommand = _run(tmp_path, "install", "npm:pi-subagents")
+    _, subcommand = _run(tmp_path, "install", "npm:example")
     _, prompt = _run(tmp_path / "b", "installed?")
 
     image = "pi-sandbox:local"
@@ -278,10 +278,16 @@ def test_wrapper_passes_pi_subcommands_through_untouched(tmp_path: Path) -> None
 
     assert subcommand_argv[subcommand_argv.index(image) + 1 :] == [
         "install",
-        "npm:pi-subagents",
+        "npm:example",
     ]
     # A word that merely looks like one is still an ordinary prompt.
-    assert "deepseek-v4.1-flash" in prompt_argv
+    assert prompt_argv[prompt_argv.index(image) + 1 :] == [
+        "--provider",
+        "opencode",
+        "--model",
+        "deepseek-v4.1-flash",
+        "installed?",
+    ]
 
 
 def test_wrapper_builds_the_image_only_when_it_is_missing(tmp_path: Path) -> None:
@@ -308,11 +314,7 @@ def test_image_installs_the_extensions_after_becoming_the_agent_user() -> None:
     state volume, leaving the agent unable to write its own Pi config."""
 
     lines = (ROOT / "Dockerfile.pi").read_text().splitlines()
-    installs = [
-        index
-        for index, line in enumerate(lines)
-        if line.lstrip().startswith(("pi install npm:", "&& pi install npm:"))
-    ]
+    installs = [index for index, line in enumerate(lines) if "pi install npm:" in line]
 
     assert installs
     assert min(installs) > lines.index("USER agent")

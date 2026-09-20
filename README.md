@@ -28,10 +28,6 @@ The first run builds the image, which takes a few minutes. After that it starts
 straight into Pi, on `deepseek-v4.1-flash` through OpenCode. Pass `--model` for
 another, for example `pi --model kimi-k3`, or any other Pi flag.
 
-Pi's own subcommands work too, against that project's sandbox rather than your
-host Pi: `install`, `remove`, `uninstall`, `update`, `list`, `config` and
-`auth`.
-
 An alias is convenient:
 
 ```sh
@@ -149,27 +145,28 @@ docker exec -it "$(docker ps -q --filter label=pi-sandbox=1 | head -1)" bash
 
 ## Extensions
 
-The image ships four Pi extensions, installed at build time and pinned in
-`Dockerfile.pi`:
+The image ships four Pi extensions, pinned in `Dockerfile.pi`:
 
 - `npm:pi-subagents`, delegation to subagents and scripted multi-agent
-  workflows: `/run`, `/subagents`, `/parallel-review`, `/council` and others.
-- `npm:@tintinweb/pi-subagents`, a separate project that happens to share the
-  base name, with a fleet view and mid-run steering, under `/agents`. Nothing
-  it registers collides, so both can be loaded at once.
+  workflows, under `/subagents`.
+- `npm:@tintinweb/pi-subagents`, a separate project with the same base name,
+  offering a fleet view and mid-run steering, under `/agents`.
 - `npm:pi-background-tasks`, durable background shell tasks and read-only
-  delegated agents: `/bg`, `/tasks`, `/jobs`, `/logs`.
+  delegated agents, under `/bg`.
 - `npm:pi-extension-manager`, an interactive manager for the above, under
   `/extensions`.
 
-They are installed into the agent's home, which seeds each project's state
-volume, so a project whose volume predates this keeps what that volume holds.
-Run `pi install npm:<package>` in it, or reset it, as under State and reset.
-`pi list` shows what a given project actually has.
+They live in the agent's home, so they reach a project through that project's
+state volume and one whose volume predates them will not have them. Pi's own
+subcommands run against that volume rather than your host Pi, so `pi list`
+shows what a project actually has and `pi install npm:<package>` adds to it.
+`install`, `remove`, `uninstall`, `update`, `list`, `config` and `auth` all
+work this way. Resetting the volume, as under State and reset, is the other
+way to pick up a change.
 
 Change the set by editing the `pi install` lines in `Dockerfile.pi` and
-rebuilding. Versions are pinned there on purpose: a rebuild should not pull
-unreviewed third-party code into a container that holds your API key.
+rebuilding. Versions are pinned there on purpose, for the reason in the
+comment beside them.
 
 ## Git
 
@@ -214,7 +211,7 @@ pins both properties.
   launch. Keeping it in its own directory, as here, avoids that.
 - A container is not a virtual machine. A container escape defeats this
   boundary. On macOS and Windows, Docker Desktop's own VM is a second layer.
-- The image is roughly 1.3 GB, mostly Pi's npm dependency tree and the four
+- The image is roughly 1.3 GB, mostly Pi's npm dependency tree and the
   extensions. It carries Node 24, Python 3.11, uv, Git, ripgrep and fd.
 
 ## Tests
@@ -227,8 +224,7 @@ The tests use a fake `docker` on `PATH`, so they neither build an image nor
 start a container. They assert the isolation properties: only the two expected
 mounts, the key forwarded by name and never by value, no privileged or host
 namespace flags, the home-directory refusal, and the two Herdr requirements
-above. They also pin that Pi's subcommands reach Pi unaltered, and that the
-extension installs in `Dockerfile.pi` come after `USER agent`.
+above.
 
 ## License
 

@@ -22,10 +22,11 @@ RUN apt-get update \
     && npm cache clean --force
 
 # Herdr, so the agent can run a fleet of Pi children inside the sandbox. The
-# binary comes from the release that herdr.dev/latest.json pins, checked
-# against that manifest's SHA-256, for the same reason the npm install above is
-# pinned: a rebuild must not pull unreviewed code into a container holding an
-# API key.
+# binary comes from the release that herdr.dev/latest.json pins, against the
+# SHA-256 that manifest carried on 2026-09-21, for the same reason the npm
+# install above is pinned: a rebuild must not pull unreviewed code into a
+# container holding an API key. Take both digests from the manifest when
+# bumping the version.
 RUN set -eu; \
     version=0.9.1; \
     case "$(dpkg --print-architecture)" in \
@@ -41,24 +42,16 @@ RUN set -eu; \
     printf '%s  %s\n' "$sha" /usr/local/bin/herdr | sha256sum --check --quiet; \
     chmod 0755 /usr/local/bin/herdr
 
-# Start the container's own Herdr server before Pi, so the agent's first herdr
-# command finds it rather than `server_not_running`. The socket lives in the
-# agent's home and no host socket is mounted, so a fleet started here reaches
-# nothing outside the container. The previous run's session is dropped first:
-# the panes it names died with the container that held them.
+# Start the container's own Herdr server before Pi: Herdr's API commands do not
+# start one, and the socket it listens on lives in the agent's home, so a fleet
+# started here reaches nothing outside the container. Pi replaces the script
+# rather than running under it, so the container's foreground process stays Pi.
 RUN printf '%s\n' \
     '#!/bin/sh' \
     'set -eu' \
     '# The herdr skill refuses to act unless this is set.' \
     'export HERDR_ENV=1' \
-    'mkdir -p "$HOME/.config/herdr"' \
-    'rm -f "$HOME/.config/herdr/session.json"' \
     'herdr server >/dev/null 2>&1 &' \
-    'waited=0' \
-    'while [ "$waited" -lt 40 ] && ! herdr workspace list >/dev/null 2>&1; do' \
-    '    waited=$((waited + 1))' \
-    '    sleep 0.25' \
-    'done' \
     'exec pi "$@"' \
     > /usr/local/bin/pi-sandbox-entrypoint \
     && chmod 0755 /usr/local/bin/pi-sandbox-entrypoint
@@ -130,7 +123,9 @@ RUN mkdir -p /home/agent/.pi/agent/skills/herdr-fleet \
     'Read the `herdr` skill for the CLI itself. Two things there do not hold' \
     'here: this session runs as the foreground process of the container' \
     'rather than in a pane, so `--current` and `$HERDR_PANE_ID` are not' \
-    'available and there is no calling pane to split. Create a workspace.' \
+    'available and there is no calling pane to split, and there are no saved' \
+    'machines, so `--machine` and `--remote` have nothing to reach. Start from' \
+    'a workspace.' \
     '' \
     'To put a child to work:' \
     '' \
@@ -142,9 +137,6 @@ RUN mkdir -p /home/agent/.pi/agent/skills/herdr-fleet \
     '3. `herdr agent prompt <name> <text> --wait` to send it work.' \
     '4. `herdr pane read <pane-id>` to read what it did.' \
     '5. `herdr pane close <pane-id>` when it is finished.' \
-    '' \
-    '`herdr --help`, and each command group run without a subcommand, are the' \
-    'authority on syntax. Prefer them to guessing.' \
     '' \
     'A child is a full Pi session, not a subagent: it has its own context and' \
     'keeps working while this session does something else. It also shares this' \

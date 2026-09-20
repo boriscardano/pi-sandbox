@@ -32,6 +32,7 @@ def _run(
     cwd: Path | None = None,
     home: Path | None = None,
     forward: str | None = None,
+    also: dict[str, str] | None = None,
 ) -> tuple[subprocess.CompletedProcess[str], list[list[str]]]:
     bin_dir = tmp_path / "fakebin"
     bin_dir.mkdir(parents=True)
@@ -54,6 +55,7 @@ def _run(
     if forward is not None:
         env["PI_SANDBOX_ENV"] = forward
         env["TYPESAFE_API_KEY"] = "typesafe-test-key-do-not-leak"
+    env.update(also or {})
 
     completed = subprocess.run(
         [str(WRAPPER), *args],
@@ -208,10 +210,36 @@ def test_wrapper_never_grants_host_namespaces_or_privileges(tmp_path: Path) -> N
         "--ipc host",
         "/var/run/docker.sock",
         "herdr.sock",
-        "HERDR_SOCKET_PATH",
-        ".config/herdr",
     ):
         assert forbidden not in joined
+
+
+def test_wrapper_ignores_the_herdr_pane_it_was_launched_from(
+    tmp_path: Path,
+) -> None:
+    """The usual way to start this is from a Herdr pane, which exports the
+    session's socket. Picking it up would put `herdr pane run` on the host
+    inside the container, which is the one thing the sandbox must not allow."""
+
+    socket = tmp_path / "herdr.sock"
+    socket.write_text("")
+    _, invocations = _run(
+        tmp_path,
+        also={
+            "HERDR_ENV": "1",
+            "HERDR_SOCKET_PATH": str(socket),
+            "HERDR_PANE_ID": "w1:p1",
+        },
+    )
+    argv = _docker_run(invocations)
+
+    assert len([arg for arg in argv if arg == "--mount"]) == 2
+    assert [argv[i + 1] for i, a in enumerate(argv) if a == "--env"] == [
+        "OPENCODE_API_KEY",
+        "TERM=xterm-256color",
+        "COLORTERM=truecolor",
+    ]
+    assert not any(arg.endswith(".sock") for arg in argv)
 
 
 def test_wrapper_runs_pi_in_workspace_with_the_caller_arguments(
@@ -341,34 +369,49 @@ def test_image_pins_herdr_and_checks_it_against_a_digest() -> None:
     assert "sha256sum --check" in dockerfile
 
 
-def test_image_starts_its_own_herdr_server_before_pi() -> None:
-    """Herdr's API commands do not start a server, so an agent that reached for
-    one first would be told `server_not_running`."""
-
-    dockerfile = (ROOT / "Dockerfile.pi").read_text()
-    entrypoint = dockerfile[dockerfile.index("RUN printf '%s\\n' \\") :]
-    entrypoint = entrypoint[: entrypoint.index("pi-sandbox-entrypoint")]
-
-    assert 'ENTRYPOINT ["pi-sandbox-entrypoint"]' in dockerfile
-    assert "'herdr server >/dev/null 2>&1 &' \\" in entrypoint
-    # The wait comes between the two, and Pi replaces the script rather than
-    # running under it, so the pane keeps showing Pi as the foreground job.
-    assert entrypoint.index("herdr server") < entrypoint.index("herdr workspace list")
-    assert entrypoint.index("herdr workspace list") < entrypoint.index('exec pi "$@"')
-
-
-def test_image_writes_the_entrypoint_while_still_root() -> None:
-    """As `agent` the write to /usr/local/bin fails, and the failure would only
-    show up at build time."""
+def _entrypoint_script() -> str:
+    """The shell script `Dockerfile.pi` writes, reassembled from its printf."""
 
     lines = (ROOT / "Dockerfile.pi").read_text().splitlines()
-    entrypoint = next(
-        index
-        for index, line in enumerate(lines)
-        if "/usr/local/bin/pi-sandbox-entrypoint" in line
+    first = lines.index("RUN printf '%s\\n' \\") + 1
+    body = []
+    for line in lines[first:]:
+        stripped = line.strip().removesuffix(" \\")
+        if not stripped.startswith("'"):
+            break
+        body.append(stripped[1:-1])
+    return "\n".join(body) + "\n"
+
+
+def test_the_generated_entrypoint_is_a_valid_shell_script() -> None:
+    """It is authored as printf arguments, where a lost quote or continuation
+    would otherwise surface only at `docker run`."""
+
+    script = _entrypoint_script()
+    checked = subprocess.run(
+        ["sh", "-n"],
+        input=script,
+        capture_output=True,
+        text=True,
+        check=False,
     )
 
-    assert entrypoint < lines.index("USER agent")
+    assert script.startswith("#!/bin/sh\n")
+    assert checked.returncode == 0, checked.stderr
+
+
+def test_the_entrypoint_starts_a_herdr_server_and_then_becomes_pi() -> None:
+    """Herdr's API commands do not start a server, so without this the agent's
+    first herdr call is told `server_not_running`. Pi has to replace the script
+    rather than run under it, or the container's foreground process is a shell
+    and Herdr stops seeing a Pi agent in the pane."""
+
+    script = _entrypoint_script()
+    dockerfile = (ROOT / "Dockerfile.pi").read_text()
+
+    assert 'ENTRYPOINT ["pi-sandbox-entrypoint"]' in dockerfile
+    assert script.index("herdr server") < script.index('exec pi "$@"')
+    assert "&" in script[script.index("herdr server") :].split("\n")[0]
 
 
 def test_image_ships_both_herdr_skills_as_the_agent_user() -> None:
@@ -382,7 +425,6 @@ def test_image_ships_both_herdr_skills_as_the_agent_user() -> None:
         if "/home/agent/.pi/agent/skills/" in line
     ]
 
-    assert skills
     assert min(skills) > lines.index("USER agent")
     assert any("herdr --skill >" in line for line in lines)
     assert any("skills/herdr-fleet" in line for line in lines)

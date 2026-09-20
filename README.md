@@ -193,13 +193,11 @@ Push from the host after reviewing the diff.
 
 Two Herdrs are involved, and they never meet.
 
-### Yours, on the host
-
-The script is named `pi` on purpose. [Herdr](https://herdr.dev) identifies a
-pane's agent from the foreground job's process arguments, so running this script
-in a pane makes it a first-class Pi agent: the agent list, idle and working
-detection, `herdr agent prompt` and Ctrl-C all behave as they do for a host
-agent.
+Yours, on the host: the script is named `pi` on purpose.
+[Herdr](https://herdr.dev) identifies a pane's agent from the foreground job's
+process arguments, so running this script in a pane makes it a first-class Pi
+agent, with the agent list, idle and working detection, `herdr agent prompt`
+and Ctrl-C all behaving as they do for a host agent.
 
 ```sh
 herdr pane split --current --direction right --cwd ~/any/project --no-focus
@@ -208,18 +206,14 @@ herdr pane run <pane-id> '/path/to/pi-sandbox/pi'
 
 For the same reason the script must not `exec docker`: that would replace the
 `pi`-named process with `docker` and Herdr would see a plain shell. `test_pi.py`
-pins both properties.
+pins both properties, and that the wrapper ignores the pane's own
+`HERDR_SOCKET_PATH`. Mounting your socket would undo the sandbox rather than
+extend it, since `herdr pane run` executes on the host, outside the container.
 
-Your own Herdr socket is not mounted, and mounting it would undo the sandbox
-rather than extend it: `herdr pane run` executes on the host, outside the
-container, so an agent holding that socket could read `~/.ssh` and everything
-else this repository exists to keep away from it.
-
-### The container's own, for the agent
-
-The image carries the `herdr` binary and the entrypoint starts a server inside
-the container before Pi. That server manages panes in the container and nothing
-else, so the agent can run a fleet of Pi children of its own:
+The container's own, for the agent: the image carries the `herdr` binary and
+the entrypoint starts a server inside the container before Pi. That server
+manages panes in the container and nothing else, so the agent can run a fleet
+of Pi children of its own.
 
 ```sh
 herdr workspace create --cwd /workspace --label review --no-focus
@@ -229,24 +223,14 @@ herdr agent prompt reviewer "Review the diff on this branch" --wait
 herdr pane read <pane-id>
 ```
 
-The provider and model flags are needed because only the host wrapper applies
-the default, and a bare `pi` in a pane has no provider configured.
+The provider and model flags are not optional: only the host wrapper applies
+the default, so a bare `pi` in a pane has no provider. Two skills in the image
+teach the agent all this, Herdr's own printed by the pinned binary and a short
+`herdr-fleet` one for what is different here. Like the extensions they live in
+the agent's home, so a project whose state volume predates this image has the
+fleet but not the instructions until you reset the volume.
 
-Two skills in the image teach the agent this: Herdr's own, printed by the
-pinned binary with `herdr --skill`, and a short `herdr-fleet` one for what is
-different here, namely that this session occupies no pane, that children need
-those flags, and that nobody is watching the panes it creates. Like the
-extensions, they live in the agent's home and so reach a project only through a
-state volume created since this image was built. The server and the binary are
-in the image, so the fleet itself works in a project with an older volume, just
-undocumented to the agent until you reset it.
-
-A child is a full Pi session rather than a subagent, with its own context and
-its own place in `herdr agent list`. It also shares the container: the same
-`/workspace`, the same API key, the same `--pids-limit 512`, and the same end
-when the container exits.
-
-You cannot see these panes from your own Herdr. To watch them:
+You cannot see these panes from your own Herdr, so ask the container:
 
 ```sh
 container=$(docker ps -q --filter label=pi-sandbox=1 | head -1)
@@ -254,13 +238,11 @@ docker exec "$container" herdr agent list
 docker exec "$container" herdr pane read <pane-id>
 ```
 
-`docker exec -it "$container" herdr` attaches a real client, which puts a Herdr
-TUI inside your own Herdr pane. It works, but the prefix key then belongs to
-two applications at once, so reading panes is usually the calmer option.
+`docker exec -it "$container" herdr` attaches a real client instead, which puts
+a Herdr TUI inside your Herdr pane and gives the prefix key two owners.
 
 The server keeps its state in `/home/agent/.config/herdr`, inside the project's
-volume. The entrypoint drops the saved session on each start, since the panes it
-names died with the container that held them.
+volume, and checks `herdr.dev` for updates on a timer like any other Herdr.
 
 ## Limitations
 
@@ -292,10 +274,9 @@ uv run --with pytest pytest
 The tests use a fake `docker` on `PATH`, so they neither build an image nor
 start a container. They assert the isolation properties: only the two expected
 mounts, the key forwarded by name and never by value, no privileged or host
-namespace flags, nothing Herdr-shaped crossing into the container, and the
-home-directory refusal. They also read `Dockerfile.pi`, for the two Herdr
-requirements above, the pinned and checksummed Herdr download, and the order
-the entrypoint and the skills depend on.
+namespace flags, the home-directory refusal, and that a Herdr pane's socket
+stays on the host. The rest read `Dockerfile.pi`, including a syntax check of
+the entrypoint it generates.
 
 ## License
 

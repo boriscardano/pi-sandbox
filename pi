@@ -6,9 +6,12 @@
 # Only that repository is mounted (at /workspace). The container gets no host
 # home directory, no SSH or cloud credentials, no Docker socket and no Herdr
 # socket: it runs a Herdr server of its own instead, so the fleet the agent can
-# start there reaches nothing on this machine. The one host secret it receives
-# is OPENCODE_API_KEY, forwarded by name so its value never lands in the
-# command line, an image layer or a file.
+# start there reaches nothing on this machine. The host secrets it receives are
+# OPENCODE_GO_API_KEY, which the default model needs, and OPENCODE_API_KEY if
+# you have one, both forwarded by name so their values never land in the
+# command line or an image layer.
+#
+#   export OPENCODE_GO_API_KEY=$(pi auth print-api-key --provider opencode-go)
 # Forward further host variables by naming them in PI_SANDBOX_ENV, for example
 # PI_SANDBOX_ENV='TYPESAFE_API_KEY OTHER_TOKEN'. Every variable you add is
 # readable by whatever runs in the container, so add only what it needs.
@@ -56,8 +59,10 @@ for name in $(printf '%s' "${PI_SANDBOX_ENV:-}" | tr ',' ' '); do
     extra_env="$extra_env --env $name"
 done
 
-if [ -z "${OPENCODE_API_KEY:-}" ]; then
-    printf '%s\n' "OPENCODE_API_KEY is required" >&2
+if [ -z "${OPENCODE_GO_API_KEY:-}" ]; then
+    printf '%s\n' "OPENCODE_GO_API_KEY is required" >&2
+    printf '%s\n' \
+        "get it with: pi auth print-api-key --provider opencode-go" >&2
     exit 2
 fi
 
@@ -84,8 +89,8 @@ if ! docker image inspect "$image" >/dev/null 2>&1; then
 fi
 
 # Default to a Chinese-hosted model through OpenCode, unless the caller picks
-# one. OpenCode Zen (provider `opencode`) is the one that authenticates with
-# OPENCODE_API_KEY, so it is the only provider reachable from this sandbox.
+# one. `deepseek-v4.1-flash` is on the opencode-go subscription and not on
+# OpenCode Zen, which is why the provider is named alongside it.
 # Pi's subcommands are recognised only as the first argument, so prepending the
 # default to `pi install npm:...` would send it to the model as a chat message
 # instead of installing anything. Leave those alone.
@@ -102,7 +107,7 @@ case "${1:-}" in
             esac
         done
         [ -n "$chose_model" ] ||
-            set -- --provider opencode --model deepseek-v4.1-flash "$@"
+            set -- --provider opencode-go --model deepseek-v4.1-flash "$@"
         ;;
 esac
 
@@ -132,6 +137,7 @@ docker run \
     --cap-drop ALL \
     --security-opt no-new-privileges \
     --pids-limit 512 \
+    --env OPENCODE_GO_API_KEY \
     --env OPENCODE_API_KEY \
     $extra_env \
     --env TERM=xterm-256color \

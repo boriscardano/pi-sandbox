@@ -1,5 +1,6 @@
 """Verify that the host Pi sandbox wrapper builds an isolating docker run."""
 
+import json
 import os
 import re
 import subprocess
@@ -7,7 +8,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).parent
 WRAPPER = ROOT / "pi"
-FAKE_KEY = "opencode-test-key-do-not-leak"
+FAKE_KEY = "opencode-go-test-key-do-not-leak"
 
 FAKE_DOCKER = """#!/bin/sh
 {
@@ -51,7 +52,7 @@ def _run(
         "PI_SANDBOX_FAKE_INSPECT": inspect_status,
     }
     if key is not None:
-        env["OPENCODE_API_KEY"] = key
+        env["OPENCODE_GO_API_KEY"] = key
     if forward is not None:
         env["PI_SANDBOX_ENV"] = forward
         env["TYPESAFE_API_KEY"] = "typesafe-test-key-do-not-leak"
@@ -97,7 +98,7 @@ def test_wrapper_fails_closed_without_the_opencode_key(tmp_path: Path) -> None:
     completed, invocations = _run(tmp_path, key=None)
 
     assert completed.returncode == 2
-    assert "OPENCODE_API_KEY is required" in completed.stderr
+    assert "OPENCODE_GO_API_KEY is required" in completed.stderr
     assert invocations == []
 
 
@@ -165,12 +166,14 @@ def test_wrapper_forwards_the_key_by_name_and_never_its_value(
     argv = _docker_run(invocations)
     output = completed.stdout + completed.stderr
 
-    assert argv[argv.index("--env") + 1] == "OPENCODE_API_KEY"
+    assert argv[argv.index("--env") + 1] == "OPENCODE_GO_API_KEY"
     assert FAKE_KEY not in " ".join(argv)
     assert FAKE_KEY not in output
     assert "--env-file" not in argv
-    # Nothing beyond the key, TERM and COLORTERM is forwarded by default.
+    # Nothing beyond the two keys, TERM and COLORTERM is forwarded by default,
+    # and an unset name is dropped by docker rather than passed empty.
     assert [argv[i + 1] for i, a in enumerate(argv) if a == "--env"] == [
+        "OPENCODE_GO_API_KEY",
         "OPENCODE_API_KEY",
         "TERM=xterm-256color",
         "COLORTERM=truecolor",
@@ -235,6 +238,7 @@ def test_wrapper_ignores_the_herdr_pane_it_was_launched_from(
 
     assert len([arg for arg in argv if arg == "--mount"]) == 2
     assert [argv[i + 1] for i, a in enumerate(argv) if a == "--env"] == [
+        "OPENCODE_GO_API_KEY",
         "OPENCODE_API_KEY",
         "TERM=xterm-256color",
         "COLORTERM=truecolor",
@@ -265,7 +269,7 @@ def test_wrapper_defaults_to_a_chinese_hosted_model(tmp_path: Path) -> None:
 
     assert argv[argv.index(image) + 1 :] == [
         "--provider",
-        "opencode",
+        "opencode-go",
         "--model",
         "deepseek-v4.1-flash",
     ]
@@ -314,7 +318,7 @@ def test_wrapper_passes_pi_subcommands_through_untouched(tmp_path: Path) -> None
     # A word that merely looks like one is still an ordinary prompt.
     assert prompt_argv[prompt_argv.index(image) + 1 :] == [
         "--provider",
-        "opencode",
+        "opencode-go",
         "--model",
         "deepseek-v4.1-flash",
         "installed?",
@@ -369,40 +373,38 @@ def test_image_pins_herdr_and_checks_it_against_a_digest() -> None:
     assert "sha256sum --check" in dockerfile
 
 
-def _generated_file(path: str) -> str:
-    """A file `Dockerfile.pi` writes with printf, reassembled from its
-    arguments. Anchored on the redirect, so it cannot pick up another block."""
+ENTRYPOINT = ROOT / "entrypoint.sh"
 
-    lines = (ROOT / "Dockerfile.pi").read_text().splitlines()
-    end = next(
-        index
-        for index, line in enumerate(lines)
-        if line.strip().removesuffix(" \\") == f"> {path}"
+
+def _run_entrypoint(tmp_path: Path, **env: str) -> tuple[Path, list[str]]:
+    """Run the entrypoint with stubs for the two programs it launches."""
+
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir(parents=True)
+    argv_log = tmp_path / "pi.argv"
+    (bin_dir / "herdr").write_text("#!/bin/sh\nexit 0\n")
+    (bin_dir / "pi").write_text(f'#!/bin/sh\nprintf "%s\\n" "$@" >{argv_log}\n')
+    for stub in bin_dir.iterdir():
+        stub.chmod(0o755)
+
+    home = tmp_path / "home"
+    home.mkdir(exist_ok=True)
+    subprocess.run(
+        ["sh", str(ENTRYPOINT), "--model", "kimi-k3"],
+        check=True,
+        env={"PATH": f"{bin_dir}:/usr/bin:/bin", "HOME": str(home), **env},
     )
-    start = next(
-        index for index in range(end, -1, -1) if "printf '%s\\n'" in lines[index]
-    )
-    body = [line.strip().removesuffix(" \\")[1:-1] for line in lines[start + 1 : end]]
-    return "\n".join(body) + "\n"
+    return home / ".pi/agent/auth.json", argv_log.read_text().split()
 
 
-ENTRYPOINT = "/usr/local/bin/pi-sandbox-entrypoint"
+def test_the_entrypoint_is_a_valid_shell_script() -> None:
+    """It runs as `/bin/sh` in the image, which is dash, not bash."""
 
-
-def test_the_generated_entrypoint_is_a_valid_shell_script() -> None:
-    """It is authored as printf arguments, where a lost quote or continuation
-    would otherwise surface only at `docker run`."""
-
-    script = _generated_file(ENTRYPOINT)
     checked = subprocess.run(
-        ["sh", "-n"],
-        input=script,
-        capture_output=True,
-        text=True,
-        check=False,
+        ["sh", "-n", str(ENTRYPOINT)], capture_output=True, text=True, check=False
     )
 
-    assert script.startswith("#!/bin/sh\n")
+    assert ENTRYPOINT.read_text().startswith("#!/bin/sh\n")
     assert checked.returncode == 0, checked.stderr
 
 
@@ -414,12 +416,12 @@ def test_the_entrypoint_starts_a_herdr_server_and_then_becomes_pi() -> None:
     the container's foreground process is a shell, which stops Herdr on the
     host from seeing a Pi agent in the pane."""
 
-    script = _generated_file(ENTRYPOINT)
+    script = ENTRYPOINT.read_text()
+    dockerfile = (ROOT / "Dockerfile.pi").read_text()
     start = script[script.index("herdr server") :].split("\n")[0]
 
-    assert (
-        'ENTRYPOINT ["pi-sandbox-entrypoint"]' in (ROOT / "Dockerfile.pi").read_text()
-    )
+    assert 'ENTRYPOINT ["pi-sandbox-entrypoint"]' in dockerfile
+    assert "COPY --chmod=0755 entrypoint.sh" in dockerfile
     assert start.rstrip().endswith(" &")
     assert script.index("herdr server") < script.index('exec pi "$@"')
     # A HERDR_SOCKET_PATH that survived would move this server's socket, and a
@@ -427,6 +429,59 @@ def test_the_entrypoint_starts_a_herdr_server_and_then_becomes_pi() -> None:
     assert script.index("unset HERDR_SOCKET_PATH HERDR_PANE_ID") < script.index(
         "herdr server"
     )
+
+
+def test_the_entrypoint_hands_the_pane_a_clean_herdr_environment(
+    tmp_path: Path,
+) -> None:
+    _, argv = _run_entrypoint(
+        tmp_path,
+        HERDR_SOCKET_PATH="/tmp/elsewhere/custom.sock",
+        HERDR_PANE_ID="hostpane:p9",
+    )
+
+    assert argv == ["--model", "kimi-k3"]
+
+
+def test_the_entrypoint_writes_the_subscription_key_where_pi_reads_it(
+    tmp_path: Path,
+) -> None:
+    """Pi reads opencode-go from auth.json, not from the environment, so the
+    forwarded key has to be written out before Pi starts."""
+
+    auth, _ = _run_entrypoint(tmp_path, OPENCODE_GO_API_KEY=FAKE_KEY)
+    written = json.loads(auth.read_text())
+
+    assert written["opencode-go"] == {"type": "api_key", "key": FAKE_KEY}
+    # It is a credential at rest in the state volume.
+    assert auth.stat().st_mode & 0o077 == 0
+
+
+def test_the_entrypoint_keeps_other_providers_the_agent_authenticated(
+    tmp_path: Path,
+) -> None:
+    """The file is in the state volume, so it outlives the container and may
+    hold providers the agent logged into itself."""
+
+    auth = tmp_path / "home/.pi/agent/auth.json"
+    auth.parent.mkdir(parents=True)
+    auth.write_text(json.dumps({"anthropic": {"type": "oauth", "access": "keep-me"}}))
+
+    _run_entrypoint(tmp_path, OPENCODE_GO_API_KEY=FAKE_KEY)
+    written = json.loads(auth.read_text())
+
+    assert written["anthropic"] == {"type": "oauth", "access": "keep-me"}
+    assert written["opencode-go"]["key"] == FAKE_KEY
+
+
+def test_the_entrypoint_runs_pi_without_a_key_too(tmp_path: Path) -> None:
+    """The wrapper requires the key, but the image is also used directly, and
+    an absent key must not stop Pi from starting."""
+
+    auth, argv = _run_entrypoint(tmp_path)
+
+    assert not auth.exists()
+    assert argv == ["--model", "kimi-k3"]
 
 
 def test_image_ships_both_herdr_skills_as_the_agent_user() -> None:

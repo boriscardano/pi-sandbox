@@ -4,7 +4,8 @@ Run the [Pi coding agent](https://pi.dev) in a Docker container that can see one
 project and nothing else on your machine. Intended for untrusted or
 lightly-trusted models, such as Chinese-hosted ones reached through OpenCode.
 
-One shell script and one Dockerfile. Nothing to install or configure.
+One shell script, one Dockerfile and one skill file. Nothing to install or
+configure.
 
 ## Requirements
 
@@ -53,10 +54,10 @@ Mounted:
 - a per-project Docker volume at `/home/agent` for Pi's own state.
 
 Not mounted, and unreachable: your home directory, `~/.ssh`, `~/.aws`,
-`~/.config`, the system keychain, every other project, the Docker socket, and
-`~/.pi` on the host, which holds Pi's provider OAuth tokens. The script refuses
-to start if the directory it would mount is your home directory, contains it,
-or is `/`.
+`~/.config`, the system keychain, every other project, the Docker socket, your
+Herdr socket, and `~/.pi` on the host, which holds Pi's provider OAuth tokens.
+The script refuses to start if the directory it would mount is your home
+directory, contains it, or is `/`.
 
 The container runs as non-root (`agent`, uid 1001) with `--cap-drop ALL`,
 `--security-opt no-new-privileges` and `--pids-limit 512`. No `--privileged`,
@@ -159,7 +160,8 @@ The image ships four Pi extensions, pinned in `Dockerfile.pi`:
 The subagent and background-task extensions let the agent start work that
 keeps running while you are not watching the pane, with the same key and the
 same open network as the foreground session, and sharing its `--pids-limit`.
-Everything still dies with the container.
+The Herdr fleet below is a fourth way to do that, with whole Pi sessions
+instead of subagents. Everything still dies with the container.
 
 They live in the agent's home, so they reach a project through that project's
 state volume and one whose volume predates them will not have them. Pi's own
@@ -190,11 +192,13 @@ Push from the host after reviewing the diff.
 
 ## Herdr
 
-The script is named `pi` on purpose. [Herdr](https://herdr.dev) identifies a
-pane's agent from the foreground job's process arguments, so running this script
-in a pane makes it a first-class Pi agent: the agent list, idle and working
-detection, `herdr agent prompt` and Ctrl-C all behave as they do for a host
-agent.
+Two Herdrs are involved, and they never meet.
+
+Yours, on the host: the script is named `pi` on purpose.
+[Herdr](https://herdr.dev) identifies a pane's agent from the foreground job's
+process arguments, so running this script in a pane makes it a first-class Pi
+agent, with the agent list, idle and working detection, `herdr agent prompt`
+and Ctrl-C all behaving as they do for a host agent.
 
 ```sh
 herdr pane split --current --direction right --cwd ~/any/project --no-focus
@@ -203,7 +207,45 @@ herdr pane run <pane-id> '/path/to/pi-sandbox/pi'
 
 For the same reason the script must not `exec docker`: that would replace the
 `pi`-named process with `docker` and Herdr would see a plain shell. `test_pi.py`
-pins both properties.
+pins both properties, and that the wrapper ignores the pane's own
+`HERDR_SOCKET_PATH`. Mounting your socket would undo the sandbox rather than
+extend it, since `herdr pane run` executes on the host, outside the container.
+
+The container's own, for the agent: the image carries the `herdr` binary and
+the entrypoint starts a server inside the container before Pi. That server
+manages panes in the container and nothing else, so the agent can run a fleet
+of Pi children of its own.
+
+```sh
+herdr workspace create --cwd /workspace --label review --no-focus
+herdr agent start reviewer --kind pi --pane <pane-id> \
+    -- --provider opencode --model deepseek-v4.1-flash
+herdr agent prompt reviewer "Review the diff on this branch" --wait
+herdr pane read <pane-id>
+```
+
+The provider and model flags are not optional: only the host wrapper applies
+the default, so a bare `pi` in the sandbox has no provider it can authenticate.
+Two skills in the image teach the agent all this: Herdr's own, printed by the
+pinned binary at build time, and `herdr-fleet.md` from this repository, which
+covers what is different here, including telling a child agent not to start a
+fleet of its own. Like the extensions they live in the agent's home, so a
+project whose state volume predates this image has the fleet but not the
+instructions until you reset the volume.
+
+You cannot see these panes from your own Herdr, so ask the container:
+
+```sh
+container=$(docker ps -q --filter label=pi-sandbox=1 | head -1)
+docker exec "$container" herdr agent list
+docker exec "$container" herdr pane read <pane-id>
+```
+
+`docker exec -it "$container" herdr` attaches a real client instead, which puts
+a Herdr TUI inside your Herdr pane and gives the prefix key two owners.
+
+The server keeps its state in `/home/agent/.config/herdr`, inside the project's
+volume, and checks `herdr.dev` for updates on a timer like any other Herdr.
 
 ## Limitations
 
@@ -219,8 +261,16 @@ pins both properties.
   launch. Keeping it in its own directory, as here, avoids that.
 - A container is not a virtual machine. A container escape defeats this
   boundary. On macOS and Windows, Docker Desktop's own VM is a second layer.
+- The agent can start other agents, through the extensions or the Herdr server
+  in the container, and they spend the same key on work nobody is watching.
+  That is the point of the feature, and also the cost of it. A child can start
+  children of its own: the skill tells it not to, and nothing enforces that.
+  Measured, a Pi session costs about fifteen of the container's 512 processes
+  and a few hundred megabytes, and `docker run` sets no memory limit, so a
+  runaway fleet reaches the machine's memory before it reaches `--pids-limit`.
 - The image is roughly 1.3 GB, mostly Pi's npm dependency tree and the
-  extensions. It carries Node 24, Python 3.11, uv, Git, ripgrep and fd.
+  extensions. It carries Node 24, Python 3.11, uv, Git, ripgrep, fd and the
+  23 MB Herdr binary.
 
 ## Tests
 
@@ -231,8 +281,9 @@ uv run --with pytest pytest
 The tests use a fake `docker` on `PATH`, so they neither build an image nor
 start a container. They assert the isolation properties: only the two expected
 mounts, the key forwarded by name and never by value, no privileged or host
-namespace flags, the home-directory refusal, and the two Herdr requirements
-above.
+namespace flags, the home-directory refusal, and that a Herdr pane's socket
+stays on the host. The rest read `Dockerfile.pi`, including a syntax check of
+the entrypoint it generates.
 
 ## License
 

@@ -5,8 +5,10 @@
 #
 # Only that repository is mounted (at /workspace). The container gets no host
 # home directory, no SSH or cloud credentials, no Docker socket and no Herdr
-# socket. The one host secret it receives is OPENCODE_API_KEY, forwarded by
-# name so its value never lands in the command line, an image layer or a file.
+# socket: it runs a Herdr server of its own instead, so the fleet the agent can
+# start there reaches nothing on this machine. The one host secret it receives
+# is OPENCODE_API_KEY, forwarded by name so its value never lands in the
+# command line, an image layer or a file.
 # Forward further host variables by naming them in PI_SANDBOX_ENV, for example
 # PI_SANDBOX_ENV='TYPESAFE_API_KEY OTHER_TOKEN'. Every variable you add is
 # readable by whatever runs in the container, so add only what it needs.

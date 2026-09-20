@@ -18,8 +18,48 @@ RUN apt-get update \
     && curl -LsSf https://astral.sh/uv/install.sh \
         | env UV_VERSION=0.12.17 UV_INSTALL_DIR=/usr/local/bin sh \
     && npm install --global --ignore-scripts \
-        @earendil-works/pi-coding-agent@0.86.0 \
+        @earendil-works/pi-coding-agent@0.86.1 \
     && npm cache clean --force
+
+# Herdr, so the agent can run a fleet of Pi children inside the sandbox. The
+# binary comes from the release that herdr.dev/latest.json pins, against the
+# SHA-256 that manifest carried on 2026-09-21, for the same reason the npm
+# install above is pinned: a rebuild must not pull unreviewed code into a
+# container holding an API key. Take both digests from the manifest when
+# bumping the version.
+RUN set -eu; \
+    version=0.9.1; \
+    case "$(dpkg --print-architecture)" in \
+        amd64) target=linux-x86_64; \
+            sha=2a02fed16beb651ef006e1d43f048f652ca4dc58ad053cd2d44450563d5c54b7 ;; \
+        arm64) target=linux-aarch64; \
+            sha=f4ccf4de745f2cb9a39a983e9ba3703dad50ec2a58dea83026ceab721bbd8d9e ;; \
+        *) printf 'no herdr release for %s\n' "$(dpkg --print-architecture)" >&2; \
+            exit 1 ;; \
+    esac; \
+    curl -LsSf -o /usr/local/bin/herdr \
+        "https://github.com/herdrdev/herdr/releases/download/v$version/herdr-$target"; \
+    printf '%s  %s\n' "$sha" /usr/local/bin/herdr | sha256sum --check --quiet; \
+    chmod 0755 /usr/local/bin/herdr
+
+# Start the container's own Herdr server before Pi: Herdr's API commands do not
+# start one, and the socket it listens on lives in the agent's home, so a fleet
+# started here reaches nothing outside the container. Pi replaces the script
+# rather than running under it, so the container's foreground process stays Pi.
+# The inherited HERDR_* variables go first. The wrapper does not forward them,
+# but PI_SANDBOX_ENV would take the names, and a HERDR_SOCKET_PATH from the
+# host pane would move this server's socket while a stray HERDR_PANE_ID would
+# make Pi read itself as one of its own children.
+RUN printf '%s\n' \
+    '#!/bin/sh' \
+    'set -eu' \
+    'unset HERDR_SOCKET_PATH HERDR_PANE_ID HERDR_TAB_ID HERDR_WORKSPACE_ID' \
+    '# The herdr skill refuses to act unless this is set.' \
+    'export HERDR_ENV=1' \
+    'herdr server >/dev/null 2>&1 &' \
+    'exec pi "$@"' \
+    > /usr/local/bin/pi-sandbox-entrypoint \
+    && chmod 0755 /usr/local/bin/pi-sandbox-entrypoint
 
 # The bind-mounted checkout is owned by the host user, so Git needs /workspace
 # declared safe. Commits get a sandbox identity rather than the host's, which
@@ -59,5 +99,18 @@ RUN export npm_config_ignore_scripts=true \
     && pi install npm:pi-extension-manager@0.8.2 \
     && npm cache clean --force
 
+# Herdr's own agent skill, printed by the pinned binary so it describes the
+# version installed rather than a copy that drifts from it. It covers the CLI:
+# IDs, agent states, and how to read a JSON response. The skill beside it
+# covers what is different about this sandbox.
+RUN mkdir -p /home/agent/.pi/agent/skills/herdr \
+    && herdr --skill > /home/agent/.pi/agent/skills/herdr/SKILL.md
+
+# What the fleet is, since a model that cannot see the topology will not invent
+# it. Beside Herdr's own skill and owned by the user that reads it, like the
+# extensions, so it seeds the same state volume they do.
+COPY --chown=agent:agent herdr-fleet.md \
+    /home/agent/.pi/agent/skills/herdr-fleet/SKILL.md
+
 WORKDIR /workspace
-ENTRYPOINT ["pi"]
+ENTRYPOINT ["pi-sandbox-entrypoint"]

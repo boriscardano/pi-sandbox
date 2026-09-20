@@ -1,6 +1,7 @@
 """Verify that the host Pi sandbox wrapper builds an isolating docker run."""
 
 import os
+import re
 import subprocess
 from pathlib import Path
 
@@ -31,6 +32,7 @@ def _run(
     cwd: Path | None = None,
     home: Path | None = None,
     forward: str | None = None,
+    also: dict[str, str] | None = None,
 ) -> tuple[subprocess.CompletedProcess[str], list[list[str]]]:
     bin_dir = tmp_path / "fakebin"
     bin_dir.mkdir(parents=True)
@@ -53,6 +55,7 @@ def _run(
     if forward is not None:
         env["PI_SANDBOX_ENV"] = forward
         env["TYPESAFE_API_KEY"] = "typesafe-test-key-do-not-leak"
+    env.update(also or {})
 
     completed = subprocess.run(
         [str(WRAPPER), *args],
@@ -211,6 +214,34 @@ def test_wrapper_never_grants_host_namespaces_or_privileges(tmp_path: Path) -> N
         assert forbidden not in joined
 
 
+def test_wrapper_ignores_the_herdr_pane_it_was_launched_from(
+    tmp_path: Path,
+) -> None:
+    """The usual way to start this is from a Herdr pane, which exports the
+    session's socket. Picking it up would put `herdr pane run` on the host
+    inside the container, which is the one thing the sandbox must not allow."""
+
+    socket = tmp_path / "herdr.sock"
+    socket.write_text("")
+    _, invocations = _run(
+        tmp_path,
+        also={
+            "HERDR_ENV": "1",
+            "HERDR_SOCKET_PATH": str(socket),
+            "HERDR_PANE_ID": "w1:p1",
+        },
+    )
+    argv = _docker_run(invocations)
+
+    assert len([arg for arg in argv if arg == "--mount"]) == 2
+    assert [argv[i + 1] for i, a in enumerate(argv) if a == "--env"] == [
+        "OPENCODE_API_KEY",
+        "TERM=xterm-256color",
+        "COLORTERM=truecolor",
+    ]
+    assert not any(arg.endswith(".sock") for arg in argv)
+
+
 def test_wrapper_runs_pi_in_workspace_with_the_caller_arguments(
     tmp_path: Path,
 ) -> None:
@@ -322,3 +353,108 @@ def test_image_installs_the_extensions_after_becoming_the_agent_user() -> None:
 
     assert installs
     assert min(installs) > lines.index("USER agent")
+
+
+def test_image_pins_herdr_and_checks_it_against_a_digest() -> None:
+    """An unpinned or unverified download would put unreviewed code in a
+    container that holds the API key."""
+
+    dockerfile = (ROOT / "Dockerfile.pi").read_text()
+
+    digests = re.findall(r"target=(linux-\S+); \\\n\s+sha=([0-9a-f]{64})", dockerfile)
+
+    assert sorted(target for target, _ in digests) == ["linux-aarch64", "linux-x86_64"]
+    assert len({digest for _, digest in digests}) == 2
+    assert "releases/download/v$version/herdr-$target" in dockerfile
+    assert "sha256sum --check" in dockerfile
+
+
+def _generated_file(path: str) -> str:
+    """A file `Dockerfile.pi` writes with printf, reassembled from its
+    arguments. Anchored on the redirect, so it cannot pick up another block."""
+
+    lines = (ROOT / "Dockerfile.pi").read_text().splitlines()
+    end = next(
+        index
+        for index, line in enumerate(lines)
+        if line.strip().removesuffix(" \\") == f"> {path}"
+    )
+    start = next(
+        index for index in range(end, -1, -1) if "printf '%s\\n'" in lines[index]
+    )
+    body = [line.strip().removesuffix(" \\")[1:-1] for line in lines[start + 1 : end]]
+    return "\n".join(body) + "\n"
+
+
+ENTRYPOINT = "/usr/local/bin/pi-sandbox-entrypoint"
+
+
+def test_the_generated_entrypoint_is_a_valid_shell_script() -> None:
+    """It is authored as printf arguments, where a lost quote or continuation
+    would otherwise surface only at `docker run`."""
+
+    script = _generated_file(ENTRYPOINT)
+    checked = subprocess.run(
+        ["sh", "-n"],
+        input=script,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert script.startswith("#!/bin/sh\n")
+    assert checked.returncode == 0, checked.stderr
+
+
+def test_the_entrypoint_starts_a_herdr_server_and_then_becomes_pi() -> None:
+    """Herdr's API commands do not start a server, so without this the agent's
+    first herdr call is told `server_not_running`. The server has to be
+    backgrounded and Pi has to replace the script: a server left in the
+    foreground means Pi never starts at all, and running Pi as a child means
+    the container's foreground process is a shell, which stops Herdr on the
+    host from seeing a Pi agent in the pane."""
+
+    script = _generated_file(ENTRYPOINT)
+    start = script[script.index("herdr server") :].split("\n")[0]
+
+    assert (
+        'ENTRYPOINT ["pi-sandbox-entrypoint"]' in (ROOT / "Dockerfile.pi").read_text()
+    )
+    assert start.rstrip().endswith(" &")
+    assert script.index("herdr server") < script.index('exec pi "$@"')
+    # A HERDR_SOCKET_PATH that survived would move this server's socket, and a
+    # HERDR_PANE_ID would make Pi read itself as one of its own children.
+    assert script.index("unset HERDR_SOCKET_PATH HERDR_PANE_ID") < script.index(
+        "herdr server"
+    )
+
+
+def test_image_ships_both_herdr_skills_as_the_agent_user() -> None:
+    """Herdr's own skill for the CLI, and ours for what is different here. They
+    land in the home directory, so they follow the extensions' ownership rule,
+    and the copied one has to arrive owned by the user that reads it."""
+
+    lines = (ROOT / "Dockerfile.pi").read_text().splitlines()
+    skills = [
+        index
+        for index, line in enumerate(lines)
+        if "/home/agent/.pi/agent/skills/" in line
+    ]
+
+    assert min(skills) > lines.index("USER agent")
+    assert any("herdr --skill >" in line for line in lines)
+    assert any(
+        line.startswith("COPY --chown=agent:agent herdr-fleet.md") for line in lines
+    )
+
+
+def test_the_fleet_skill_tells_a_child_not_to_start_its_own_fleet() -> None:
+    """Children load the same global skills directory, so the file has to be
+    true for them too. A pane Herdr creates has HERDR_PANE_ID set; the
+    container's foreground Pi does not."""
+
+    skill = (ROOT / "herdr-fleet.md").read_text()
+
+    assert skill.startswith("---\nname: herdr-fleet\n")
+    assert "HERDR_PANE_ID" in skill.split("## ")[1]
+    assert "do not start a fleet of your" in skill

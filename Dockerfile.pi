@@ -18,8 +18,50 @@ RUN apt-get update \
     && curl -LsSf https://astral.sh/uv/install.sh \
         | env UV_VERSION=0.12.17 UV_INSTALL_DIR=/usr/local/bin sh \
     && npm install --global --ignore-scripts \
-        @earendil-works/pi-coding-agent@0.86.0 \
+        @earendil-works/pi-coding-agent@0.86.1 \
     && npm cache clean --force
+
+# Herdr, so the agent can run a fleet of Pi children inside the sandbox. The
+# binary comes from the release that herdr.dev/latest.json pins, checked
+# against that manifest's SHA-256, for the same reason the npm install above is
+# pinned: a rebuild must not pull unreviewed code into a container holding an
+# API key.
+RUN set -eu; \
+    version=0.9.1; \
+    case "$(dpkg --print-architecture)" in \
+        amd64) target=linux-x86_64; \
+            sha=2a02fed16beb651ef006e1d43f048f652ca4dc58ad053cd2d44450563d5c54b7 ;; \
+        arm64) target=linux-aarch64; \
+            sha=f4ccf4de745f2cb9a39a983e9ba3703dad50ec2a58dea83026ceab721bbd8d9e ;; \
+        *) printf 'no herdr release for %s\n' "$(dpkg --print-architecture)" >&2; \
+            exit 1 ;; \
+    esac; \
+    curl -LsSf -o /usr/local/bin/herdr \
+        "https://github.com/herdrdev/herdr/releases/download/v$version/herdr-$target"; \
+    printf '%s  %s\n' "$sha" /usr/local/bin/herdr | sha256sum --check --quiet; \
+    chmod 0755 /usr/local/bin/herdr
+
+# Start the container's own Herdr server before Pi, so the agent's first herdr
+# command finds it rather than `server_not_running`. The socket lives in the
+# agent's home and no host socket is mounted, so a fleet started here reaches
+# nothing outside the container. The previous run's session is dropped first:
+# the panes it names died with the container that held them.
+RUN printf '%s\n' \
+    '#!/bin/sh' \
+    'set -eu' \
+    '# The herdr skill refuses to act unless this is set.' \
+    'export HERDR_ENV=1' \
+    'mkdir -p "$HOME/.config/herdr"' \
+    'rm -f "$HOME/.config/herdr/session.json"' \
+    'herdr server >/dev/null 2>&1 &' \
+    'waited=0' \
+    'while [ "$waited" -lt 40 ] && ! herdr workspace list >/dev/null 2>&1; do' \
+    '    waited=$((waited + 1))' \
+    '    sleep 0.25' \
+    'done' \
+    'exec pi "$@"' \
+    > /usr/local/bin/pi-sandbox-entrypoint \
+    && chmod 0755 /usr/local/bin/pi-sandbox-entrypoint
 
 # The bind-mounted checkout is owned by the host user, so Git needs /workspace
 # declared safe. Commits get a sandbox identity rather than the host's, which
@@ -59,5 +101,58 @@ RUN export npm_config_ignore_scripts=true \
     && pi install npm:pi-extension-manager@0.8.2 \
     && npm cache clean --force
 
+# Herdr's own agent skill, printed by the pinned binary so it describes the
+# version installed rather than a copy that drifts from it. It covers the CLI:
+# IDs, agent states, and how to read a JSON response. The skill beside it
+# covers what is different about this sandbox.
+RUN mkdir -p /home/agent/.pi/agent/skills/herdr \
+    && herdr --skill > /home/agent/.pi/agent/skills/herdr/SKILL.md
+
+# What the fleet is, in Pi's global skills directory: a model that cannot see
+# the topology will not invent it. Written as `agent`, beside the extensions,
+# so it seeds the same state volume they do.
+RUN mkdir -p /home/agent/.pi/agent/skills/herdr-fleet \
+    && printf '%s\n' \
+    '---' \
+    'name: herdr-fleet' \
+    'description: Start and steer other Pi agents as children of this session,' \
+    '  through the Herdr server running in this sandbox. Use when work splits' \
+    '  into parts worth running at the same time, or when a second agent should' \
+    '  review what this one did.' \
+    '---' \
+    '' \
+    '# Fleet' \
+    '' \
+    'This container runs its own Herdr server. It manages panes in this' \
+    'container only and reaches nothing on the host, so there is no other' \
+    'session to inspect and no human watching the panes.' \
+    '' \
+    'Read the `herdr` skill for the CLI itself. Two things there do not hold' \
+    'here: this session runs as the foreground process of the container' \
+    'rather than in a pane, so `--current` and `$HERDR_PANE_ID` are not' \
+    'available and there is no calling pane to split. Create a workspace.' \
+    '' \
+    'To put a child to work:' \
+    '' \
+    '1. `herdr workspace create --cwd /workspace --label <name> --no-focus`,' \
+    '   and take `.result.root_pane.pane_id` from the JSON it prints.' \
+    '2. `herdr agent start <name> --kind pi --pane <pane-id> -- --provider' \
+    '   opencode --model deepseek-v4.1-flash`. Both flags are required: a bare' \
+    '   `pi` in a pane here has no provider configured and will fail.' \
+    '3. `herdr agent prompt <name> <text> --wait` to send it work.' \
+    '4. `herdr pane read <pane-id>` to read what it did.' \
+    '5. `herdr pane close <pane-id>` when it is finished.' \
+    '' \
+    '`herdr --help`, and each command group run without a subcommand, are the' \
+    'authority on syntax. Prefer them to guessing.' \
+    '' \
+    'A child is a full Pi session, not a subagent: it has its own context and' \
+    'keeps working while this session does something else. It also shares this' \
+    'container, meaning the same `/workspace` checkout, the same API key, the' \
+    'same process limit, and the same fate when the container exits. Two or' \
+    'three at a time is plenty. Close what you finish with, and tell the user' \
+    'what the fleet did, since they cannot see these panes.' \
+    > /home/agent/.pi/agent/skills/herdr-fleet/SKILL.md
+
 WORKDIR /workspace
-ENTRYPOINT ["pi"]
+ENTRYPOINT ["pi-sandbox-entrypoint"]

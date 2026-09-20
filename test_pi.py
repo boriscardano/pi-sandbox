@@ -1,6 +1,7 @@
 """Verify that the host Pi sandbox wrapper builds an isolating docker run."""
 
 import os
+import re
 import subprocess
 from pathlib import Path
 
@@ -207,6 +208,8 @@ def test_wrapper_never_grants_host_namespaces_or_privileges(tmp_path: Path) -> N
         "--ipc host",
         "/var/run/docker.sock",
         "herdr.sock",
+        "HERDR_SOCKET_PATH",
+        ".config/herdr",
     ):
         assert forbidden not in joined
 
@@ -322,3 +325,64 @@ def test_image_installs_the_extensions_after_becoming_the_agent_user() -> None:
 
     assert installs
     assert min(installs) > lines.index("USER agent")
+
+
+def test_image_pins_herdr_and_checks_it_against_a_digest() -> None:
+    """An unpinned or unverified download would put unreviewed code in a
+    container that holds the API key."""
+
+    dockerfile = (ROOT / "Dockerfile.pi").read_text()
+
+    digests = re.findall(r"target=(linux-\S+); \\\n\s+sha=([0-9a-f]{64})", dockerfile)
+
+    assert sorted(target for target, _ in digests) == ["linux-aarch64", "linux-x86_64"]
+    assert len({digest for _, digest in digests}) == 2
+    assert "releases/download/v$version/herdr-$target" in dockerfile
+    assert "sha256sum --check" in dockerfile
+
+
+def test_image_starts_its_own_herdr_server_before_pi() -> None:
+    """Herdr's API commands do not start a server, so an agent that reached for
+    one first would be told `server_not_running`."""
+
+    dockerfile = (ROOT / "Dockerfile.pi").read_text()
+    entrypoint = dockerfile[dockerfile.index("RUN printf '%s\\n' \\") :]
+    entrypoint = entrypoint[: entrypoint.index("pi-sandbox-entrypoint")]
+
+    assert 'ENTRYPOINT ["pi-sandbox-entrypoint"]' in dockerfile
+    assert "'herdr server >/dev/null 2>&1 &' \\" in entrypoint
+    # The wait comes between the two, and Pi replaces the script rather than
+    # running under it, so the pane keeps showing Pi as the foreground job.
+    assert entrypoint.index("herdr server") < entrypoint.index("herdr workspace list")
+    assert entrypoint.index("herdr workspace list") < entrypoint.index('exec pi "$@"')
+
+
+def test_image_writes_the_entrypoint_while_still_root() -> None:
+    """As `agent` the write to /usr/local/bin fails, and the failure would only
+    show up at build time."""
+
+    lines = (ROOT / "Dockerfile.pi").read_text().splitlines()
+    entrypoint = next(
+        index
+        for index, line in enumerate(lines)
+        if "/usr/local/bin/pi-sandbox-entrypoint" in line
+    )
+
+    assert entrypoint < lines.index("USER agent")
+
+
+def test_image_ships_both_herdr_skills_as_the_agent_user() -> None:
+    """Herdr's own skill for the CLI, and ours for what is different here. They
+    land in the home directory, so they follow the extensions' ownership rule."""
+
+    lines = (ROOT / "Dockerfile.pi").read_text().splitlines()
+    skills = [
+        index
+        for index, line in enumerate(lines)
+        if "/home/agent/.pi/agent/skills/" in line
+    ]
+
+    assert skills
+    assert min(skills) > lines.index("USER agent")
+    assert any("herdr --skill >" in line for line in lines)
+    assert any("skills/herdr-fleet" in line for line in lines)

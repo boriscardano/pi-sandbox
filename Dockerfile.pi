@@ -45,5 +45,19 @@ ENV UV_PROJECT_ENVIRONMENT=/home/agent/workspace-venv \
 ENV PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/home/agent/.local/bin:/home/agent/.cargo/bin
 
 USER agent
+
+# Extensions. Installed as `agent`, so the files land in /home/agent owned by
+# the user that will read them.
+# Pinned and with lifecycle scripts off, like the npm install above: a rebuild
+# must not pull unreviewed third-party code into a sandbox holding an API key.
+# `pi install` has no --ignore-scripts flag, so npm reads it from the
+# environment, exported rather than ENV to leave the agent's own npm alone.
+RUN export npm_config_ignore_scripts=true \
+    && pi install npm:pi-subagents@0.70.0 \
+    && pi install npm:@tintinweb/pi-subagents@0.19.0 \
+    && pi install npm:pi-background-tasks@2.5.0 \
+    && pi install npm:pi-extension-manager@0.8.2 \
+    && npm cache clean --force
+
 WORKDIR /workspace
 ENTRYPOINT ["pi"]

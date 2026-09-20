@@ -143,6 +143,39 @@ left behind. To get a shell in a running sandbox:
 docker exec -it "$(docker ps -q --filter label=pi-sandbox=1 | head -1)" bash
 ```
 
+## Extensions
+
+The image ships four Pi extensions, pinned in `Dockerfile.pi`:
+
+- `npm:pi-subagents`, delegation to subagents and scripted multi-agent
+  workflows, under `/subagents`.
+- `npm:@tintinweb/pi-subagents`, a separate project with the same base name,
+  offering a fleet view and mid-run steering, under `/agents`.
+- `npm:pi-background-tasks`, durable background shell tasks and read-only
+  delegated agents, under `/bg`.
+- `npm:pi-extension-manager`, an interactive manager for the above, under
+  `/extensions`.
+
+The subagent and background-task extensions let the agent start work that
+keeps running while you are not watching the pane, with the same key and the
+same open network as the foreground session, and sharing its `--pids-limit`.
+Everything still dies with the container.
+
+They live in the agent's home, so they reach a project through that project's
+state volume and one whose volume predates them will not have them. Pi's own
+subcommands run against that volume rather than your host Pi, so `pi list`
+shows what a project actually has and `pi install npm:<package>@<version>`
+adds to it. Pin the version there too, for the reason below. `install`,
+`remove`, `uninstall`, `list`, `config` and `auth` all work this way. So does
+`pi update --extensions`, but bare `pi update` targets Pi itself, which lives
+outside the volume in a root-owned directory the agent cannot write.
+Resetting the volume, as under State and reset, is the other way to pick up a
+change.
+
+Change the set by editing the `pi install` lines in `Dockerfile.pi` and
+rebuilding. Versions are pinned there on purpose, for the reason in the
+comment beside them.
+
 ## Git
 
 `git status`, `diff`, `add` and `commit` work in `/workspace`, and write
@@ -186,8 +219,8 @@ pins both properties.
   launch. Keeping it in its own directory, as here, avoids that.
 - A container is not a virtual machine. A container escape defeats this
   boundary. On macOS and Windows, Docker Desktop's own VM is a second layer.
-- The image is roughly 1.2 GB, mostly Pi's npm dependency tree. It carries
-  Node 24, Python 3.11, uv, Git, ripgrep and fd.
+- The image is roughly 1.3 GB, mostly Pi's npm dependency tree and the
+  extensions. It carries Node 24, Python 3.11, uv, Git, ripgrep and fd.
 
 ## Tests
 

@@ -254,6 +254,42 @@ def test_wrapper_keeps_a_model_the_caller_asked_for(tmp_path: Path) -> None:
     assert "deepseek-v4.1-flash" in other_argv
 
 
+def test_wrapper_reads_model_as_a_flag_not_as_text(tmp_path: Path) -> None:
+    """Matching the flattened arguments would read a prompt that mentions the
+    flag as picking a model, and leave no provider the sandbox can reach."""
+
+    _, asking = _run(tmp_path, "what does --model do?")
+    _, after_ddash = _run(tmp_path / "b", "--", "--model", "foo")
+
+    for invocations in (asking, after_ddash):
+        assert "deepseek-v4.1-flash" in _docker_run(invocations)
+
+
+def test_wrapper_passes_pi_subcommands_through_untouched(tmp_path: Path) -> None:
+    """Pi recognises `install` and friends only as the first argument, so the
+    prepended model default would chat them at the model instead."""
+
+    _, subcommand = _run(tmp_path, "install", "npm:example")
+    _, prompt = _run(tmp_path / "b", "installed?")
+
+    image = "pi-sandbox:local"
+    subcommand_argv = _docker_run(subcommand)
+    prompt_argv = _docker_run(prompt)
+
+    assert subcommand_argv[subcommand_argv.index(image) + 1 :] == [
+        "install",
+        "npm:example",
+    ]
+    # A word that merely looks like one is still an ordinary prompt.
+    assert prompt_argv[prompt_argv.index(image) + 1 :] == [
+        "--provider",
+        "opencode",
+        "--model",
+        "deepseek-v4.1-flash",
+        "installed?",
+    ]
+
+
 def test_wrapper_builds_the_image_only_when_it_is_missing(tmp_path: Path) -> None:
     _, present = _run(tmp_path)
     _, missing = _run(tmp_path / "missing", inspect_status="1")
@@ -271,3 +307,18 @@ def test_wrapper_stays_in_the_process_tree_so_herdr_can_identify_pi(
     _run(tmp_path)
 
     assert "/pi" in _docker_run_parent(tmp_path / "docker.log")
+
+
+def test_image_installs_the_extensions_after_becoming_the_agent_user() -> None:
+    """Above `USER agent` they land root-owned in the layer that seeds the
+    state volume, leaving the agent unable to write its own Pi config."""
+
+    lines = (ROOT / "Dockerfile.pi").read_text().splitlines()
+    installs = [
+        index
+        for index, line in enumerate(lines)
+        if line.strip().startswith("&& pi install npm:")
+    ]
+
+    assert installs
+    assert min(installs) > lines.index("USER agent")

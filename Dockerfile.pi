@@ -46,9 +46,14 @@ RUN set -eu; \
 # start one, and the socket it listens on lives in the agent's home, so a fleet
 # started here reaches nothing outside the container. Pi replaces the script
 # rather than running under it, so the container's foreground process stays Pi.
+# The inherited HERDR_* variables go first. The wrapper does not forward them,
+# but PI_SANDBOX_ENV would take the names, and a HERDR_SOCKET_PATH from the
+# host pane would move this server's socket while a stray HERDR_PANE_ID would
+# make Pi read itself as one of its own children.
 RUN printf '%s\n' \
     '#!/bin/sh' \
     'set -eu' \
+    'unset HERDR_SOCKET_PATH HERDR_PANE_ID HERDR_TAB_ID HERDR_WORKSPACE_ID' \
     '# The herdr skill refuses to act unless this is set.' \
     'export HERDR_ENV=1' \
     'herdr server >/dev/null 2>&1 &' \

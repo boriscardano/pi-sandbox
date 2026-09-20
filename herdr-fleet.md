@@ -42,8 +42,8 @@ Create a workspace and read its pane id. The container has `python3` and no
         python3 -c "import json,sys;print(json.load(sys.stdin)['result']['root_pane']['pane_id'])")
 
 Start Pi in that pane. Everything after the bare `--` goes to Pi, and both
-flags are needed, because a bare `pi` here has no working provider: only
-`OPENCODE_API_KEY` is set, so only OpenCode Zen can authenticate.
+flags are needed, because a bare `pi` here has no working provider: this
+sandbox is given `OPENCODE_API_KEY`, so OpenCode Zen is what authenticates.
 
     herdr agent start reviewer --kind pi --pane "$pane" \
         -- --provider opencode --model deepseek-v4.1-flash
@@ -61,7 +61,10 @@ authority on syntax.
 
 A child is a full Pi session, not a subagent: it has its own context and keeps
 working while you do something else. It also shares this container, meaning the
-same `/workspace` checkout, the same API key, the same 512-process limit, and
-the same end when the container exits. Two or three at a time is plenty. Close
+same `/workspace` checkout, the same API key and the same end when the
+container exits. It is not cheap: a Pi session costs around fifteen of the
+container's 512 processes and a few hundred megabytes, and the container has no
+memory limit of its own, so a dozen children will exhaust the machine long
+before the process limit stops them. Two or three at a time is plenty. Close
 what you finish with, and tell the user what the fleet did, since they cannot
 see these panes.

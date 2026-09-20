@@ -422,6 +422,11 @@ def test_the_entrypoint_starts_a_herdr_server_and_then_becomes_pi() -> None:
     )
     assert start.rstrip().endswith(" &")
     assert script.index("herdr server") < script.index('exec pi "$@"')
+    # A HERDR_SOCKET_PATH that survived would move this server's socket, and a
+    # HERDR_PANE_ID would make Pi read itself as one of its own children.
+    assert script.index("unset HERDR_SOCKET_PATH HERDR_PANE_ID") < script.index(
+        "herdr server"
+    )
 
 
 def test_image_ships_both_herdr_skills_as_the_agent_user() -> None:

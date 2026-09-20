@@ -263,7 +263,11 @@ volume, and checks `herdr.dev` for updates on a timer like any other Herdr.
   boundary. On macOS and Windows, Docker Desktop's own VM is a second layer.
 - The agent can start other agents, through the extensions or the Herdr server
   in the container, and they spend the same key on work nobody is watching.
-  That is the point of the feature, and also the cost of it.
+  That is the point of the feature, and also the cost of it. A child can start
+  children of its own: the skill tells it not to, and nothing enforces that.
+  Measured, a Pi session costs about fifteen of the container's 512 processes
+  and a few hundred megabytes, and `docker run` sets no memory limit, so a
+  runaway fleet reaches the machine's memory before it reaches `--pids-limit`.
 - The image is roughly 1.3 GB, mostly Pi's npm dependency tree and the
   extensions. It carries Node 24, Python 3.11, uv, Git, ripgrep, fd and the
   23 MB Herdr binary.

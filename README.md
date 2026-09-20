@@ -301,10 +301,12 @@ uv run --with pytest pytest
 
 The tests use a fake `docker` on `PATH`, so they neither build an image nor
 start a container. They assert the isolation properties: only the two expected
-mounts, the key forwarded by name and never by value, no privileged or host
-namespace flags, the home-directory refusal, and that a Herdr pane's socket
-stays on the host. The rest read `Dockerfile.pi`, including a syntax check of
-the entrypoint it generates.
+mounts, the keys forwarded by name and never by value, the sandboxing flags
+present and no privileged or host namespace flags, the home-directory refusal,
+and that a Herdr pane's socket stays on the host. The rest read `Dockerfile.pi`
+or run `entrypoint.sh` against stub binaries and a throwaway home, for the
+default model, where the subscription key is written, and what happens when the
+agent has ruined the file it is written to.
 
 ## License
 

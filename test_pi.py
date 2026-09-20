@@ -201,6 +201,18 @@ def test_wrapper_rejects_a_bogus_variable_name(tmp_path: Path) -> None:
     assert spaced_calls == []
 
 
+def test_wrapper_keeps_the_container_unprivileged(tmp_path: Path) -> None:
+    """Asserted rather than assumed: dropping one of these costs nothing that
+    the rest of the suite would notice."""
+
+    _, invocations = _run(tmp_path)
+    argv = _docker_run(invocations)
+
+    assert argv[argv.index("--cap-drop") + 1] == "ALL"
+    assert argv[argv.index("--security-opt") + 1] == "no-new-privileges"
+    assert argv[argv.index("--pids-limit") + 1] == "512"
+
+
 def test_wrapper_never_grants_host_namespaces_or_privileges(tmp_path: Path) -> None:
     _, invocations = _run(tmp_path)
     joined = " ".join(_docker_run(invocations))
@@ -627,6 +639,23 @@ def test_the_entrypoint_keeps_the_old_auth_file_when_the_write_fails(
     assert json.loads(auth.read_text()) == {
         "anthropic": {"type": "oauth", "access": "keep-me"}
     }
+
+
+def test_the_entrypoint_clears_a_half_written_file_from_a_killed_run(
+    tmp_path: Path,
+) -> None:
+    """The container is killed rather than stopped, so the file it renames
+    from can be left behind. Without the unlink, every later run would fail to
+    create it and quietly lose the key."""
+
+    agent_dir = tmp_path / "home/.pi/agent"
+    agent_dir.mkdir(parents=True)
+    (agent_dir / "auth.json.new").write_text("half a file")
+
+    started = _run_entrypoint(tmp_path, OPENCODE_GO_API_KEY=FAKE_KEY)
+
+    assert json.loads(started.auth.read_text())["opencode-go"]["key"] == FAKE_KEY
+    assert not (agent_dir / "auth.json.new").exists()
 
 
 def test_the_entrypoint_does_not_write_the_key_through_a_symlink(

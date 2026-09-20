@@ -46,15 +46,20 @@ ENV PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/home/agen
 
 USER agent
 
-# Extensions, installed as `agent` so the files land in /home/agent with the
-# right ownership. Docker seeds a fresh state volume from this image layer, so
-# a new project starts with them already installed. A volume that already
-# exists keeps what it has: run `pi install` inside that sandbox, or delete the
-# volume, to pick up a change here.
-RUN pi install npm:pi-subagents \
-    && pi install npm:@tintinweb/pi-subagents \
-    && pi install npm:pi-background-tasks \
-    && pi install npm:pi-extension-manager \
+# Extensions. Installed as `agent`, so the files land in /home/agent owned by
+# the user that will read them, and Docker seeds a fresh state volume from this
+# layer. An existing volume keeps what it has: `pi install` inside that sandbox,
+# or delete the volume, to pick up a change here.
+# Pinned and with lifecycle scripts off, like the pi install above: a rebuild
+# must not pull unreviewed third-party code into a sandbox holding an API key.
+# `pi install` does not pass --ignore-scripts, so npm gets it from the
+# environment, exported here only so the agent's own npm is left alone.
+# npm's cache is ~7 MB per package and would otherwise seed every volume.
+RUN export npm_config_ignore_scripts=true \
+    && pi install npm:pi-subagents@0.70.0 \
+    && pi install npm:@tintinweb/pi-subagents@0.19.0 \
+    && pi install npm:pi-background-tasks@2.5.0 \
+    && pi install npm:pi-extension-manager@0.8.2 \
     && npm cache clean --force
 
 WORKDIR /workspace

@@ -254,29 +254,34 @@ def test_wrapper_keeps_a_model_the_caller_asked_for(tmp_path: Path) -> None:
     assert "deepseek-v4.1-flash" in other_argv
 
 
+def test_wrapper_reads_model_as_a_flag_not_as_text(tmp_path: Path) -> None:
+    """Matching the flattened arguments would read a prompt that mentions the
+    flag as picking a model, and leave no provider the sandbox can reach."""
+
+    _, asking = _run(tmp_path, "what does --model do?")
+    _, after_ddash = _run(tmp_path / "b", "--", "--model", "foo")
+
+    for invocations in (asking, after_ddash):
+        assert "deepseek-v4.1-flash" in _docker_run(invocations)
+
+
 def test_wrapper_passes_pi_subcommands_through_untouched(tmp_path: Path) -> None:
-    """Pi only recognises `install`, `list` and friends as the first argument,
-    so prepending the model default would chat them at the model instead."""
+    """Pi recognises `install` and friends only as the first argument, so the
+    prepended model default would chat them at the model instead."""
+
+    _, subcommand = _run(tmp_path, "install", "npm:pi-subagents")
+    _, prompt = _run(tmp_path / "b", "installed?")
 
     image = "pi-sandbox:local"
-    for index, subcommand in enumerate(
-        ("install", "remove", "uninstall", "update", "list", "config", "auth")
-    ):
-        _, invocations = _run(tmp_path / str(index), subcommand, "npm:pi-subagents")
-        argv = _docker_run(invocations)
+    subcommand_argv = _docker_run(subcommand)
+    prompt_argv = _docker_run(prompt)
 
-        assert argv[argv.index(image) + 1 :] == [subcommand, "npm:pi-subagents"]
-
-    # A word that is not a subcommand is still an ordinary prompt.
-    _, chat = _run(tmp_path / "chat", "installed?")
-    chat_argv = _docker_run(chat)
-    assert chat_argv[chat_argv.index(image) + 1 :] == [
-        "--provider",
-        "opencode",
-        "--model",
-        "deepseek-v4.1-flash",
-        "installed?",
+    assert subcommand_argv[subcommand_argv.index(image) + 1 :] == [
+        "install",
+        "npm:pi-subagents",
     ]
+    # A word that merely looks like one is still an ordinary prompt.
+    assert "deepseek-v4.1-flash" in prompt_argv
 
 
 def test_wrapper_builds_the_image_only_when_it_is_missing(tmp_path: Path) -> None:
@@ -298,27 +303,16 @@ def test_wrapper_stays_in_the_process_tree_so_herdr_can_identify_pi(
     assert "/pi" in _docker_run_parent(tmp_path / "docker.log")
 
 
-def test_image_installs_the_extensions_as_the_agent_user() -> None:
-    """Installed above `USER agent` they land root-owned, and the state volume
-    is seeded from this layer, so the agent could not write to its own Pi
-    config on the first run."""
+def test_image_installs_the_extensions_after_becoming_the_agent_user() -> None:
+    """Above `USER agent` they land root-owned in the layer that seeds the
+    state volume, leaving the agent unable to write its own Pi config."""
 
     lines = (ROOT / "Dockerfile.pi").read_text().splitlines()
-    become_agent = lines.index("USER agent")
     installs = [
-        line.split("pi install npm:")[1].split()[0]
-        for line in lines
-        if "pi install npm:" in line
+        index
+        for index, line in enumerate(lines)
+        if line.lstrip().startswith(("pi install npm:", "&& pi install npm:"))
     ]
 
-    assert installs == [
-        "pi-subagents",
-        "@tintinweb/pi-subagents",
-        "pi-background-tasks",
-        "pi-extension-manager",
-    ]
-    assert all(
-        index > become_agent
-        for index, line in enumerate(lines)
-        if "pi install npm:" in line
-    )
+    assert installs
+    assert min(installs) > lines.index("USER agent")

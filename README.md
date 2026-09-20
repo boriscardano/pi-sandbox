@@ -29,8 +29,8 @@ straight into Pi, on `deepseek-v4.1-flash` through OpenCode. Pass `--model` for
 another, for example `pi --model kimi-k3`, or any other Pi flag.
 
 Pi's own subcommands work too, against that project's sandbox rather than your
-host Pi: `pi list`, `pi install`, `pi remove`, `pi update`, `pi config` and
-`pi auth`.
+host Pi: `install`, `remove`, `uninstall`, `update`, `list`, `config` and
+`auth`.
 
 An alias is convenient:
 
@@ -149,42 +149,27 @@ docker exec -it "$(docker ps -q --filter label=pi-sandbox=1 | head -1)" bash
 
 ## Extensions
 
-The image ships four Pi extensions, installed with `pi install` at build time
-into `/home/agent/.pi`:
+The image ships four Pi extensions, installed at build time and pinned in
+`Dockerfile.pi`:
 
-| Package | Adds |
-| --- | --- |
-| `npm:pi-subagents` | delegation to subagents and scripted multi-agent workflows: `/run`, `/subagents`, `/parallel-review`, `/council` and others |
-| `npm:@tintinweb/pi-subagents` | a second, independent take on subagents, with a fleet view and mid-run steering, under `/agents` |
-| `npm:pi-background-tasks` | durable background shell tasks and read-only delegated agents: `/bg`, `/tasks`, `/jobs`, `/logs` |
-| `npm:pi-extension-manager` | an interactive manager for the above, under `/extensions` |
+- `npm:pi-subagents`, delegation to subagents and scripted multi-agent
+  workflows: `/run`, `/subagents`, `/parallel-review`, `/council` and others.
+- `npm:@tintinweb/pi-subagents`, a separate project that happens to share the
+  base name, with a fleet view and mid-run steering, under `/agents`. Nothing
+  it registers collides, so both can be loaded at once.
+- `npm:pi-background-tasks`, durable background shell tasks and read-only
+  delegated agents: `/bg`, `/tasks`, `/jobs`, `/logs`.
+- `npm:pi-extension-manager`, an interactive manager for the above, under
+  `/extensions`.
 
-The two subagent packages are different projects that happen to share a name.
-They register 27 and 1 command respectively and no name collides, so both can
-be loaded at once. Verified on this image: all four load, register their
-widgets and contribute 41 commands between them.
-
-Because `/home/agent` is a Docker volume, this works through Docker seeding a
-*fresh* volume from the image. A project whose volume already exists keeps
-whatever that volume holds. To bring an existing project up to date, either
-install into that volume, one `pi install` per package:
-
-```sh
-cd ~/that/project
-/path/to/pi-sandbox/pi install npm:pi-subagents
-/path/to/pi-sandbox/pi list            # what that project actually has
-```
-
-or discard its Pi state, which also discards its sessions:
-
-```sh
-docker volume rm pi-sandbox-<project>-<hash>
-```
+They are installed into the agent's home, which seeds each project's state
+volume, so a project whose volume predates this keeps what that volume holds.
+Run `pi install npm:<package>` in it, or reset it, as under State and reset.
+`pi list` shows what a given project actually has.
 
 Change the set by editing the `pi install` lines in `Dockerfile.pi` and
-rebuilding. `test_pi.py` pins the list and pins that the installs run after
-`USER agent`, since installing as root would leave the agent unable to write
-its own Pi config on the first run.
+rebuilding. Versions are pinned there on purpose: a rebuild should not pull
+unreviewed third-party code into a container that holds your API key.
 
 ## Git
 
@@ -229,9 +214,8 @@ pins both properties.
   launch. Keeping it in its own directory, as here, avoids that.
 - A container is not a virtual machine. A container escape defeats this
   boundary. On macOS and Windows, Docker Desktop's own VM is a second layer.
-- The image is roughly 1.3 GB, mostly Pi's npm dependency tree, of which the
-  four extensions are 61 MB. It carries Node 24, Python 3.11, uv, Git, ripgrep
-  and fd.
+- The image is roughly 1.3 GB, mostly Pi's npm dependency tree and the four
+  extensions. It carries Node 24, Python 3.11, uv, Git, ripgrep and fd.
 
 ## Tests
 
@@ -244,8 +228,7 @@ start a container. They assert the isolation properties: only the two expected
 mounts, the key forwarded by name and never by value, no privileged or host
 namespace flags, the home-directory refusal, and the two Herdr requirements
 above. They also pin that Pi's subcommands reach Pi unaltered, and that the
-extensions in `Dockerfile.pi` are the expected four and are installed after
-`USER agent`.
+extension installs in `Dockerfile.pi` come after `USER agent`.
 
 ## License
 

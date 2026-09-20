@@ -90,10 +90,18 @@ fi
 case "${1:-}" in
     install | remove | uninstall | update | list | config | auth) ;;
     *)
-        case " $* " in
-            *" --model "* | *" --model="*) ;;
-            *) set -- --provider opencode --model deepseek-v4.1-flash "$@" ;;
-        esac
+        # Each argument is examined as an argument. Matching against the
+        # flattened "$*" instead would read `pi 'what does --model do?'` as
+        # picking a model, and start the sandbox with no reachable provider.
+        chose_model=''
+        for arg in "$@"; do
+            case "$arg" in
+                --) break ;;  # everything after this is a message, not a flag
+                --model | --model=*) chose_model=1 ;;
+            esac
+        done
+        [ -n "$chose_model" ] ||
+            set -- --provider opencode --model deepseek-v4.1-flash "$@"
         ;;
 esac
 

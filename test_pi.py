@@ -314,7 +314,11 @@ def test_image_installs_the_extensions_after_becoming_the_agent_user() -> None:
     state volume, leaving the agent unable to write its own Pi config."""
 
     lines = (ROOT / "Dockerfile.pi").read_text().splitlines()
-    installs = [index for index, line in enumerate(lines) if "pi install npm:" in line]
+    installs = [
+        index
+        for index, line in enumerate(lines)
+        if line.strip().startswith("&& pi install npm:")
+    ]
 
     assert installs
     assert min(installs) > lines.index("USER agent")

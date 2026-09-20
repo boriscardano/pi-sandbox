@@ -3,6 +3,7 @@
 import json
 import os
 import re
+import shutil
 import subprocess
 from pathlib import Path
 from typing import NamedTuple
@@ -319,6 +320,24 @@ def test_wrapper_leaves_a_provider_the_caller_named_alone(tmp_path: Path) -> Non
     ]
 
 
+def test_wrapper_names_the_model_even_when_the_provider_is_given(
+    tmp_path: Path,
+) -> None:
+    """Observed: with both keys forwarded, `--provider opencode-go` on its own
+    answered from Zen, because Pi resolves the model it picks against every
+    provider it can authenticate."""
+
+    _, invocations = _run(tmp_path, "--provider", "opencode-go")
+    argv = _docker_run(invocations)
+
+    assert argv[argv.index("pi-sandbox:local") + 1 :] == [
+        "--model",
+        "deepseek-v4.1-flash",
+        "--provider",
+        "opencode-go",
+    ]
+
+
 def test_wrapper_reads_model_as_a_flag_not_as_text(tmp_path: Path) -> None:
     """Matching the flattened arguments would read a prompt that mentions the
     flag as picking a model, and leave no provider the sandbox can reach."""
@@ -371,7 +390,7 @@ def test_wrapper_stays_in_the_process_tree_so_herdr_can_identify_pi(
 
     _run(tmp_path)
 
-    assert "/pi" in _docker_run_parent(tmp_path / "docker.log")
+    assert str(WRAPPER) in _docker_run_parent(tmp_path / "docker.log")
 
 
 def test_image_installs_the_extensions_after_becoming_the_agent_user() -> None:
@@ -410,6 +429,7 @@ class _Entrypoint(NamedTuple):
     auth: Path
     argv: list[str]
     env: dict[str, str]
+    stderr: str
 
 
 def _run_entrypoint(tmp_path: Path, **env: str) -> _Entrypoint:
@@ -429,7 +449,7 @@ def _run_entrypoint(tmp_path: Path, **env: str) -> _Entrypoint:
     home = tmp_path / "home"
     home.mkdir(exist_ok=True)
     completed = subprocess.run(
-        ["sh", str(ENTRYPOINT), "--model", "kimi-k3"],
+        [shutil.which("dash") or "sh", str(ENTRYPOINT), "--model", "kimi-k3"],
         check=True,
         capture_output=True,
         text=True,
@@ -439,6 +459,7 @@ def _run_entrypoint(tmp_path: Path, **env: str) -> _Entrypoint:
     # Whatever it does, it must not print the key on the way.
     assert FAKE_KEY not in completed.stdout + completed.stderr
     return _Entrypoint(
+        stderr=completed.stderr,
         auth=home / ".pi/agent/auth.json",
         argv=argv_log.read_text().split(),
         env=dict(
@@ -450,10 +471,15 @@ def _run_entrypoint(tmp_path: Path, **env: str) -> _Entrypoint:
 
 
 def test_the_entrypoint_is_a_valid_shell_script() -> None:
-    """It runs as `/bin/sh` in the image, which is dash, not bash."""
+    """It runs as `/bin/sh` in the image, which is dash. On macOS `sh` is bash,
+    which accepts bashisms the image would reject, so use dash where it is
+    installed."""
 
     checked = subprocess.run(
-        ["sh", "-n", str(ENTRYPOINT)], capture_output=True, text=True, check=False
+        [shutil.which("dash") or "sh", "-n", str(ENTRYPOINT)],
+        capture_output=True,
+        text=True,
+        check=False,
     )
 
     assert ENTRYPOINT.read_text().startswith("#!/bin/sh\n")
@@ -491,6 +517,8 @@ def test_the_entrypoint_hands_pi_a_clean_herdr_environment(tmp_path: Path) -> No
         tmp_path,
         HERDR_SOCKET_PATH="/tmp/elsewhere/custom.sock",
         HERDR_PANE_ID="hostpane:p9",
+        HERDR_TAB_ID="hostpane:t1",
+        HERDR_WORKSPACE_ID="hostpane",
     )
 
     assert started.argv == ["--model", "kimi-k3"]
@@ -558,6 +586,47 @@ def test_the_entrypoint_survives_an_auth_file_the_agent_ruined(
 
         assert started.argv == ["--model", "kimi-k3"]
         assert json.loads(auth.read_text())["opencode-go"]["key"] == FAKE_KEY
+
+
+def test_the_entrypoint_starts_pi_even_when_it_cannot_write_the_key(
+    tmp_path: Path,
+) -> None:
+    """The agent owns its home between runs. `mkdir auth.json` there, or a
+    directory it made unwritable, must cost it the key rather than the
+    session, which `set -eu` would otherwise turn into a sandbox that never
+    starts again until the volume is deleted."""
+
+    agent_dir = tmp_path / "home/.pi/agent"
+    agent_dir.mkdir(parents=True)
+    (agent_dir / "auth.json").mkdir()
+
+    started = _run_entrypoint(tmp_path, OPENCODE_GO_API_KEY=FAKE_KEY)
+
+    assert started.argv == ["--model", "kimi-k3"]
+    assert "could not write" in started.stderr
+
+
+def test_the_entrypoint_keeps_the_old_auth_file_when_the_write_fails(
+    tmp_path: Path,
+) -> None:
+    """It is renamed into place, so a failed write cannot destroy the
+    providers the agent authenticated itself."""
+
+    agent_dir = tmp_path / "home/.pi/agent"
+    agent_dir.mkdir(parents=True)
+    auth = agent_dir / "auth.json"
+    auth.write_text(json.dumps({"anthropic": {"type": "oauth", "access": "keep-me"}}))
+    agent_dir.chmod(0o500)
+
+    try:
+        started = _run_entrypoint(tmp_path, OPENCODE_GO_API_KEY=FAKE_KEY)
+    finally:
+        agent_dir.chmod(0o700)
+
+    assert started.argv == ["--model", "kimi-k3"]
+    assert json.loads(auth.read_text()) == {
+        "anthropic": {"type": "oauth", "access": "keep-me"}
+    }
 
 
 def test_the_entrypoint_does_not_write_the_key_through_a_symlink(

@@ -15,6 +15,9 @@ Docker, and the opencode-go subscription key exported in your shell:
 export OPENCODE_GO_API_KEY=$(pi auth print-api-key --provider opencode-go)
 ```
 
+The wrapper requires it even when you mean to use a model from somewhere else,
+since it is what the default needs.
+
 Developed and verified on macOS with Docker Desktop. It should work on Windows
 with Docker Desktop for the same reason: both map bind-mount ownership to the
 container user, so the agent can write to `/workspace`. On native Linux there

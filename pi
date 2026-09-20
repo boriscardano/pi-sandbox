@@ -122,6 +122,11 @@ case "${1:-}" in
                 --provider | --provider=*) chose_provider=1 ;;
             esac
         done
+        # Both are supplied, because naming one and leaving the other to Pi
+        # resolves against every provider it can authenticate: with a Zen key
+        # forwarded as well, `--provider opencode-go` alone was observed
+        # answering from Zen instead. Naming another provider without a model
+        # is the caller's to get right.
         [ -n "$chose_model" ] || set -- --model deepseek-v4.1-flash "$@"
         [ -n "$chose_provider" ] || set -- --provider opencode-go "$@"
         ;;

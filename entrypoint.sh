@@ -18,14 +18,19 @@ unset HERDR_SOCKET_PATH HERDR_PANE_ID HERDR_TAB_ID HERDR_WORKSPACE_ID
 # volume, so it outlives the container: `docker volume rm` is what removes it.
 #
 # The file is the agent's own between runs, so nothing in it is trusted: bad
-# JSON is replaced rather than allowed to abort this script, and the old file
-# is removed instead of written through, which would follow a symlink and
-# would leave a mode the umask cannot correct.
-if [ -n "${OPENCODE_GO_API_KEY:-}" ]; then
-    mkdir -p "$HOME/.pi/agent"
-    python3 -c 'import json, os, pathlib
+# JSON is replaced rather than allowed to stop the write, and the new file is
+# renamed over the old one, which is atomic, replaces a symlink instead of
+# following it, and cannot leave a mode the umask would not have set.
+#
+# The whole thing is best effort. Pi is what this container is for, and a home
+# directory the agent has ruined must cost it the subscription key, not the
+# session: `set -e` would otherwise turn `mkdir ~/.pi/agent/auth.json` into a
+# sandbox that never starts again until the volume is deleted.
+if [ -n "${OPENCODE_GO_API_KEY:-}" ] && ! (
+    mkdir -p "$HOME/.pi/agent" && python3 -c 'import json, os, pathlib
 
-path = pathlib.Path.home() / ".pi/agent/auth.json"
+directory = pathlib.Path(os.environ["HOME"]) / ".pi/agent"
+path = directory / "auth.json"
 try:
     auth = json.loads(path.read_text())
 except Exception:
@@ -35,10 +40,14 @@ if not isinstance(auth, dict):
 
 auth["opencode-go"] = {"type": "api_key", "key": os.environ["OPENCODE_GO_API_KEY"]}
 
-path.unlink(missing_ok=True)
-with os.fdopen(os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "w") as f:
+pending = directory / "auth.json.new"
+pending.unlink(missing_ok=True)
+with os.fdopen(os.open(pending, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "w") as f:
     json.dump(auth, f, indent=2)
+os.replace(pending, path)
 '
+); then
+    printf '%s\n' "pi-sandbox: could not write the subscription key to auth.json" >&2
 fi
 
 # Herdr's API commands do not start a server, so the agent's first one would be

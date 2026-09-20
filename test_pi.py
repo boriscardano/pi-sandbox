@@ -5,6 +5,7 @@ import os
 import re
 import subprocess
 from pathlib import Path
+from typing import NamedTuple
 
 ROOT = Path(__file__).parent
 WRAPPER = ROOT / "pi"
@@ -405,25 +406,47 @@ def test_image_pins_herdr_and_checks_it_against_a_digest() -> None:
 ENTRYPOINT = ROOT / "entrypoint.sh"
 
 
-def _run_entrypoint(tmp_path: Path, **env: str) -> tuple[Path, list[str]]:
+class _Entrypoint(NamedTuple):
+    auth: Path
+    argv: list[str]
+    env: dict[str, str]
+
+
+def _run_entrypoint(tmp_path: Path, **env: str) -> _Entrypoint:
     """Run the entrypoint with stubs for the two programs it launches."""
 
     bin_dir = tmp_path / "bin"
-    bin_dir.mkdir(parents=True)
+    bin_dir.mkdir(parents=True, exist_ok=True)
     argv_log = tmp_path / "pi.argv"
+    env_log = tmp_path / "pi.env"
     (bin_dir / "herdr").write_text("#!/bin/sh\nexit 0\n")
-    (bin_dir / "pi").write_text(f'#!/bin/sh\nprintf "%s\\n" "$@" >{argv_log}\n')
+    (bin_dir / "pi").write_text(
+        f'#!/bin/sh\nprintf "%s\\n" "$@" >{argv_log}\nenv >{env_log}\n'
+    )
     for stub in bin_dir.iterdir():
         stub.chmod(0o755)
 
     home = tmp_path / "home"
     home.mkdir(exist_ok=True)
-    subprocess.run(
+    completed = subprocess.run(
         ["sh", str(ENTRYPOINT), "--model", "kimi-k3"],
         check=True,
+        capture_output=True,
+        text=True,
         env={"PATH": f"{bin_dir}:/usr/bin:/bin", "HOME": str(home), **env},
     )
-    return home / ".pi/agent/auth.json", argv_log.read_text().split()
+
+    # Whatever it does, it must not print the key on the way.
+    assert FAKE_KEY not in completed.stdout + completed.stderr
+    return _Entrypoint(
+        auth=home / ".pi/agent/auth.json",
+        argv=argv_log.read_text().split(),
+        env=dict(
+            line.split("=", 1)
+            for line in env_log.read_text().splitlines()
+            if "=" in line
+        ),
+    )
 
 
 def test_the_entrypoint_is_a_valid_shell_script() -> None:
@@ -460,16 +483,19 @@ def test_the_entrypoint_starts_a_herdr_server_and_then_becomes_pi() -> None:
     )
 
 
-def test_the_entrypoint_hands_the_pane_a_clean_herdr_environment(
-    tmp_path: Path,
-) -> None:
-    _, argv = _run_entrypoint(
+def test_the_entrypoint_hands_pi_a_clean_herdr_environment(tmp_path: Path) -> None:
+    """Read from Pi's own environment, since a variable that survived would
+    point its herdr calls at the host pane's socket."""
+
+    started = _run_entrypoint(
         tmp_path,
         HERDR_SOCKET_PATH="/tmp/elsewhere/custom.sock",
         HERDR_PANE_ID="hostpane:p9",
     )
 
-    assert argv == ["--model", "kimi-k3"]
+    assert started.argv == ["--model", "kimi-k3"]
+    assert started.env["HERDR_ENV"] == "1"
+    assert [name for name in started.env if name.startswith("HERDR_")] == ["HERDR_ENV"]
 
 
 def test_the_entrypoint_writes_the_subscription_key_where_pi_reads_it(
@@ -478,12 +504,12 @@ def test_the_entrypoint_writes_the_subscription_key_where_pi_reads_it(
     """Pi reads opencode-go from auth.json, not from the environment, so the
     forwarded key has to be written out before Pi starts."""
 
-    auth, _ = _run_entrypoint(tmp_path, OPENCODE_GO_API_KEY=FAKE_KEY)
-    written = json.loads(auth.read_text())
+    started = _run_entrypoint(tmp_path, OPENCODE_GO_API_KEY=FAKE_KEY)
+    written = json.loads(started.auth.read_text())
 
     assert written["opencode-go"] == {"type": "api_key", "key": FAKE_KEY}
     # It is a credential at rest in the state volume.
-    assert auth.stat().st_mode & 0o077 == 0
+    assert started.auth.stat().st_mode & 0o077 == 0
 
 
 def test_the_entrypoint_keeps_other_providers_the_agent_authenticated(
@@ -495,22 +521,62 @@ def test_the_entrypoint_keeps_other_providers_the_agent_authenticated(
     auth = tmp_path / "home/.pi/agent/auth.json"
     auth.parent.mkdir(parents=True)
     auth.write_text(json.dumps({"anthropic": {"type": "oauth", "access": "keep-me"}}))
+    auth.chmod(0o644)
 
     _run_entrypoint(tmp_path, OPENCODE_GO_API_KEY=FAKE_KEY)
     written = json.loads(auth.read_text())
 
     assert written["anthropic"] == {"type": "oauth", "access": "keep-me"}
     assert written["opencode-go"]["key"] == FAKE_KEY
+    # A mode the file already had, which umask alone would not have corrected.
+    assert auth.stat().st_mode & 0o077 == 0
 
 
 def test_the_entrypoint_runs_pi_without_a_key_too(tmp_path: Path) -> None:
     """The wrapper requires the key, but the image is also used directly, and
     an absent key must not stop Pi from starting."""
 
-    auth, argv = _run_entrypoint(tmp_path)
+    started = _run_entrypoint(tmp_path)
 
-    assert not auth.exists()
-    assert argv == ["--model", "kimi-k3"]
+    assert not started.auth.exists()
+    assert started.argv == ["--model", "kimi-k3"]
+
+
+def test_the_entrypoint_survives_an_auth_file_the_agent_ruined(
+    tmp_path: Path,
+) -> None:
+    """That file is the agent's own between runs. Letting a parse error out of
+    the entrypoint would let it wedge the sandbox shut with a one-byte write,
+    recoverable only by deleting the project's volume."""
+
+    auth = tmp_path / "home/.pi/agent/auth.json"
+    auth.parent.mkdir(parents=True)
+
+    for ruined in ("not json at all", "[]", '"a string"'):
+        auth.write_text(ruined)
+        started = _run_entrypoint(tmp_path, OPENCODE_GO_API_KEY=FAKE_KEY)
+
+        assert started.argv == ["--model", "kimi-k3"]
+        assert json.loads(auth.read_text())["opencode-go"]["key"] == FAKE_KEY
+
+
+def test_the_entrypoint_does_not_write_the_key_through_a_symlink(
+    tmp_path: Path,
+) -> None:
+    """`/workspace` is the host's real checkout, and a symlink left in the
+    volume would put the key there."""
+
+    auth = tmp_path / "home/.pi/agent/auth.json"
+    auth.parent.mkdir(parents=True)
+    elsewhere = tmp_path / "workspace-file"
+    elsewhere.write_text("")
+    auth.symlink_to(elsewhere)
+
+    _run_entrypoint(tmp_path, OPENCODE_GO_API_KEY=FAKE_KEY)
+
+    assert elsewhere.read_text() == ""
+    assert not auth.is_symlink()
+    assert json.loads(auth.read_text())["opencode-go"]["key"] == FAKE_KEY
 
 
 def test_image_ships_both_herdr_skills_as_the_agent_user() -> None:

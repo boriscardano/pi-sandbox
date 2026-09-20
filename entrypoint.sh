@@ -16,18 +16,29 @@ unset HERDR_SOCKET_PATH HERDR_PANE_ID HERDR_TAB_ID HERDR_WORKSPACE_ID
 # environment, so the key arrives as a variable and is written out here, with
 # any other provider the agent authenticated left alone. It lands in the state
 # volume, so it outlives the container: `docker volume rm` is what removes it.
+#
+# The file is the agent's own between runs, so nothing in it is trusted: bad
+# JSON is replaced rather than allowed to abort this script, and the old file
+# is removed instead of written through, which would follow a symlink and
+# would leave a mode the umask cannot correct.
 if [ -n "${OPENCODE_GO_API_KEY:-}" ]; then
     mkdir -p "$HOME/.pi/agent"
-    (
-        umask 077
-        python3 -c 'import json, os, pathlib
+    python3 -c 'import json, os, pathlib
 
 path = pathlib.Path.home() / ".pi/agent/auth.json"
-auth = json.loads(path.read_text()) if path.exists() else {}
+try:
+    auth = json.loads(path.read_text())
+except Exception:
+    auth = {}
+if not isinstance(auth, dict):
+    auth = {}
+
 auth["opencode-go"] = {"type": "api_key", "key": os.environ["OPENCODE_GO_API_KEY"]}
-path.write_text(json.dumps(auth, indent=2))
+
+path.unlink(missing_ok=True)
+with os.fdopen(os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "w") as f:
+    json.dump(auth, f, indent=2)
 '
-    )
 fi
 
 # Herdr's API commands do not start a server, so the agent's first one would be

@@ -276,6 +276,9 @@ def test_wrapper_defaults_to_a_chinese_hosted_model(tmp_path: Path) -> None:
 
 
 def test_wrapper_keeps_a_model_the_caller_asked_for(tmp_path: Path) -> None:
+    """The provider still comes along: `--model kimi-k3` alone is ambiguous
+    across the providers Pi knows, and it refuses to run rather than guess."""
+
     _, chosen = _run(tmp_path, "--model", "kimi-k3")
     _, other_flag = _run(tmp_path / "b", "--models", "glm-5.3,kimi-k3")
 
@@ -283,10 +286,36 @@ def test_wrapper_keeps_a_model_the_caller_asked_for(tmp_path: Path) -> None:
     chosen_argv = _docker_run(chosen)
     other_argv = _docker_run(other_flag)
 
-    assert chosen_argv[chosen_argv.index(image) + 1 :] == ["--model", "kimi-k3"]
-    assert "deepseek-v4.1-flash" not in " ".join(chosen_argv)
+    assert chosen_argv[chosen_argv.index(image) + 1 :] == [
+        "--provider",
+        "opencode-go",
+        "--model",
+        "kimi-k3",
+    ]
     # --models is a different flag, so the default model still applies.
-    assert "deepseek-v4.1-flash" in other_argv
+    assert "deepseek-v4.1-flash" in " ".join(other_argv)
+
+
+def test_wrapper_leaves_a_provider_the_caller_named_alone(tmp_path: Path) -> None:
+    """Adding the flag to a `provider/model` string overrides it, and Pi then
+    sends the rest of the name to the wrong API as a custom model id."""
+
+    _, slashed = _run(tmp_path, "--model", "opencode/glm-5.3")
+    _, joined = _run(tmp_path / "b", "--model=opencode/glm-5.3")
+    _, explicit = _run(tmp_path / "c", "--provider", "opencode", "--model", "kimi-k3")
+
+    image = "pi-sandbox:local"
+    for invocations in (slashed, joined):
+        argv = _docker_run(invocations)
+        assert "opencode-go" not in " ".join(argv)
+
+    explicit_argv = _docker_run(explicit)
+    assert explicit_argv[explicit_argv.index(image) + 1 :] == [
+        "--provider",
+        "opencode",
+        "--model",
+        "kimi-k3",
+    ]
 
 
 def test_wrapper_reads_model_as_a_flag_not_as_text(tmp_path: Path) -> None:

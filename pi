@@ -99,15 +99,31 @@ case "${1:-}" in
     *)
         # One argument at a time. Matching the flattened "$*" would read a
         # prompt that mentions the flag as picking a model.
+        #
+        # The two are tracked apart because `--model kimi-k3` on its own is
+        # ambiguous across the providers Pi knows and it refuses to run, so the
+        # provider is still supplied. A `provider/model` string picks its own
+        # provider, and adding the flag as well would override it and send the
+        # rest of the name to the wrong API.
         chose_model=''
+        chose_provider=''
+        model_next=''
         for arg in "$@"; do
+            if [ -n "$model_next" ]; then
+                model_next=''
+                case "$arg" in */*) chose_provider=1 ;; esac
+                continue
+            fi
             case "$arg" in
                 --) break ;;  # everything after this is a message, not a flag
-                --model | --model=*) chose_model=1 ;;
+                --model) chose_model=1; model_next=1 ;;
+                --model=*/*) chose_model=1; chose_provider=1 ;;
+                --model=*) chose_model=1 ;;
+                --provider | --provider=*) chose_provider=1 ;;
             esac
         done
-        [ -n "$chose_model" ] ||
-            set -- --provider opencode-go --model deepseek-v4.1-flash "$@"
+        [ -n "$chose_model" ] || set -- --model deepseek-v4.1-flash "$@"
+        [ -n "$chose_provider" ] || set -- --provider opencode-go "$@"
         ;;
 esac
 

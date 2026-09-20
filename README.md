@@ -31,8 +31,9 @@ cd ~/any/project
 
 The first run builds the image, which takes a few minutes. After that it starts
 straight into Pi, on `deepseek-v4.1-flash` from the opencode-go subscription.
-Pass `--model` for another, for example `pi --model kimi-k3`, or any other Pi
-flag.
+Pass `--model` for another on that subscription, for example `pi --model
+kimi-k3`, or name a provider yourself with `--provider` or a `provider/model`
+string. Any other Pi flag goes straight through.
 
 An alias is convenient:
 

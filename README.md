@@ -4,7 +4,8 @@ Run the [Pi coding agent](https://pi.dev) in a Docker container that can see one
 project and nothing else on your machine. Intended for untrusted or
 lightly-trusted models, such as Chinese-hosted ones reached through OpenCode.
 
-One shell script and one Dockerfile. Nothing to install or configure.
+One shell script, one Dockerfile and one skill file. Nothing to install or
+configure.
 
 ## Requirements
 
@@ -224,11 +225,13 @@ herdr pane read <pane-id>
 ```
 
 The provider and model flags are not optional: only the host wrapper applies
-the default, so a bare `pi` in a pane has no provider. Two skills in the image
-teach the agent all this, Herdr's own printed by the pinned binary and a short
-`herdr-fleet` one for what is different here. Like the extensions they live in
-the agent's home, so a project whose state volume predates this image has the
-fleet but not the instructions until you reset the volume.
+the default, so a bare `pi` in the sandbox has no provider it can authenticate.
+Two skills in the image teach the agent all this: Herdr's own, printed by the
+pinned binary at build time, and `herdr-fleet.md` from this repository, which
+covers what is different here, including telling a child agent not to start a
+fleet of its own. Like the extensions they live in the agent's home, so a
+project whose state volume predates this image has the fleet but not the
+instructions until you reset the volume.
 
 You cannot see these panes from your own Herdr, so ask the container:
 

@@ -101,50 +101,11 @@ RUN export npm_config_ignore_scripts=true \
 RUN mkdir -p /home/agent/.pi/agent/skills/herdr \
     && herdr --skill > /home/agent/.pi/agent/skills/herdr/SKILL.md
 
-# What the fleet is, in Pi's global skills directory: a model that cannot see
-# the topology will not invent it. Written as `agent`, beside the extensions,
-# so it seeds the same state volume they do.
-RUN mkdir -p /home/agent/.pi/agent/skills/herdr-fleet \
-    && printf '%s\n' \
-    '---' \
-    'name: herdr-fleet' \
-    'description: Start and steer other Pi agents as children of this session,' \
-    '  through the Herdr server running in this sandbox. Use when work splits' \
-    '  into parts worth running at the same time, or when a second agent should' \
-    '  review what this one did.' \
-    '---' \
-    '' \
-    '# Fleet' \
-    '' \
-    'This container runs its own Herdr server. It manages panes in this' \
-    'container only and reaches nothing on the host, so there is no other' \
-    'session to inspect and no human watching the panes.' \
-    '' \
-    'Read the `herdr` skill for the CLI itself. Two things there do not hold' \
-    'here: this session runs as the foreground process of the container' \
-    'rather than in a pane, so `--current` and `$HERDR_PANE_ID` are not' \
-    'available and there is no calling pane to split, and there are no saved' \
-    'machines, so `--machine` and `--remote` have nothing to reach. Start from' \
-    'a workspace.' \
-    '' \
-    'To put a child to work:' \
-    '' \
-    '1. `herdr workspace create --cwd /workspace --label <name> --no-focus`,' \
-    '   and take `.result.root_pane.pane_id` from the JSON it prints.' \
-    '2. `herdr agent start <name> --kind pi --pane <pane-id> -- --provider' \
-    '   opencode --model deepseek-v4.1-flash`. Both flags are required: a bare' \
-    '   `pi` in a pane here has no provider configured and will fail.' \
-    '3. `herdr agent prompt <name> <text> --wait` to send it work.' \
-    '4. `herdr pane read <pane-id>` to read what it did.' \
-    '5. `herdr pane close <pane-id>` when it is finished.' \
-    '' \
-    'A child is a full Pi session, not a subagent: it has its own context and' \
-    'keeps working while this session does something else. It also shares this' \
-    'container, meaning the same `/workspace` checkout, the same API key, the' \
-    'same process limit, and the same fate when the container exits. Two or' \
-    'three at a time is plenty. Close what you finish with, and tell the user' \
-    'what the fleet did, since they cannot see these panes.' \
-    > /home/agent/.pi/agent/skills/herdr-fleet/SKILL.md
+# What the fleet is, since a model that cannot see the topology will not invent
+# it. Beside Herdr's own skill and owned by the user that reads it, like the
+# extensions, so it seeds the same state volume they do.
+COPY --chown=agent:agent herdr-fleet.md \
+    /home/agent/.pi/agent/skills/herdr-fleet/SKILL.md
 
 WORKDIR /workspace
 ENTRYPOINT ["pi-sandbox-entrypoint"]

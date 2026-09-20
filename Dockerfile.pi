@@ -45,5 +45,17 @@ ENV UV_PROJECT_ENVIRONMENT=/home/agent/workspace-venv \
 ENV PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/home/agent/.local/bin:/home/agent/.cargo/bin
 
 USER agent
+
+# Extensions, installed as `agent` so the files land in /home/agent with the
+# right ownership. Docker seeds a fresh state volume from this image layer, so
+# a new project starts with them already installed. A volume that already
+# exists keeps what it has: run `pi install` inside that sandbox, or delete the
+# volume, to pick up a change here.
+RUN pi install npm:pi-subagents \
+    && pi install npm:@tintinweb/pi-subagents \
+    && pi install npm:pi-background-tasks \
+    && pi install npm:pi-extension-manager \
+    && npm cache clean --force
+
 WORKDIR /workspace
 ENTRYPOINT ["pi"]

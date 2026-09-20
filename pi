@@ -13,6 +13,7 @@
 #
 # The script is named `pi` on purpose: Herdr identifies a pane's agent from the
 # launched program's name, so this shows up as a real Pi agent in Herdr.
+# shellcheck disable=SC1007  # `CDPATH= cd` is a deliberate prefix assignment
 set -eu
 
 image=pi-sandbox:local
@@ -61,7 +62,18 @@ fi
 # One state volume per project, so sessions and `pi --resume` stay separate.
 # Inside the container every project is /workspace, which would otherwise make
 # them share one session history.
-project_tag=$(printf '%s' "$project" | shasum | cut -c1-8)
+# shasum first, sha1sum as the fallback where shasum is absent. Keep this
+# order: changing the digest would rename every existing volume and orphan the
+# state in it.
+if command -v shasum >/dev/null 2>&1; then
+    project_hash=shasum
+elif command -v sha1sum >/dev/null 2>&1; then
+    project_hash=sha1sum
+else
+    printf '%s\n' "need shasum or sha1sum to name the state volume" >&2
+    exit 2
+fi
+project_tag=$(printf '%s' "$project" | "$project_hash" | cut -c1-8)
 state_volume=pi-sandbox-$(basename "$project" | tr -c 'A-Za-z0-9_.-' '-')-$project_tag
 
 if ! docker image inspect "$image" >/dev/null 2>&1; then

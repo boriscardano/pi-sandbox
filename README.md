@@ -10,6 +10,13 @@ One shell script and one Dockerfile. Nothing to install or configure.
 
 Docker, and `OPENCODE_API_KEY` exported in your shell.
 
+Developed and verified on macOS with Docker Desktop. It should work on Windows
+with Docker Desktop for the same reason: both map bind-mount ownership to the
+container user, so the agent can write to `/workspace`. On native Linux there
+is no such mapping, the mounted files keep their host UID, and the container
+user (1001) would find `/workspace` read-only. Linux needs UID handling that
+this script does not yet do, so treat it as unsupported for now.
+
 ## Use
 
 ```sh

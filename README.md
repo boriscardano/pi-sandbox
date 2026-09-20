@@ -4,12 +4,19 @@ Run the [Pi coding agent](https://pi.dev) in a Docker container that can see one
 project and nothing else on your machine. Intended for untrusted or
 lightly-trusted models, such as Chinese-hosted ones reached through OpenCode.
 
-One shell script, one Dockerfile and one skill file. Nothing to install or
-configure.
+One shell script, one Dockerfile, an entrypoint and a skill file. Nothing to
+install or configure.
 
 ## Requirements
 
-Docker, and `OPENCODE_API_KEY` exported in your shell.
+Docker, and the opencode-go subscription key exported in your shell:
+
+```sh
+export OPENCODE_GO_API_KEY=$(pi auth print-api-key --provider opencode-go)
+```
+
+The wrapper requires it even when you mean to use a model from somewhere else,
+since it is what the default needs.
 
 Developed and verified on macOS with Docker Desktop. It should work on Windows
 with Docker Desktop for the same reason: both map bind-mount ownership to the
@@ -26,8 +33,10 @@ cd ~/any/project
 ```
 
 The first run builds the image, which takes a few minutes. After that it starts
-straight into Pi, on `deepseek-v4.1-flash` through OpenCode. Pass `--model` for
-another, for example `pi --model kimi-k3`, or any other Pi flag.
+straight into Pi, on `deepseek-v4.1-flash` from the opencode-go subscription.
+Pass `--model` for another on that subscription, for example `pi --model
+kimi-k3`, or name a provider yourself with `--provider` or a `provider/model`
+string. Any other Pi flag goes straight through.
 
 An alias is convenient:
 
@@ -64,22 +73,32 @@ The container runs as non-root (`agent`, uid 1001) with `--cap-drop ALL`,
 and no host PID, IPC or network namespace. Outbound networking is on, since the
 agent has to reach the model API. No port is published.
 
-## The API key
+## The API keys
 
-`OPENCODE_API_KEY` is forwarded by name:
+Both are forwarded by name, never by value:
 
 ```sh
+--env OPENCODE_GO_API_KEY
 --env OPENCODE_API_KEY
 ```
 
-Docker takes the value from your environment at run time, so it is never
-written into the image, the command line, or any file in this repository.
-Nothing else from your environment is passed in: the container starts from a
-clean environment and gets only this key, `TERM` and `COLORTERM`.
+Docker takes the values from your environment at run time, so they are never
+written into the image, the command line, or any file in this repository. A
+name whose variable is unset is dropped rather than passed empty, so the second
+one is optional. Nothing else from your environment is passed in: the container
+starts from a clean environment and gets these, `TERM` and `COLORTERM`.
 
-Only OpenCode Zen (provider `opencode`) works in the sandbox, because it is the
-provider that authenticates from this variable. Providers that read
-`~/.pi/agent/auth.json`, including `opencode-go`, cannot work here by design.
+`OPENCODE_GO_API_KEY` is the one the default model needs, since
+`deepseek-v4.1-flash` is on the opencode-go subscription and not on OpenCode
+Zen. Pi reads that provider from `~/.pi/agent/auth.json` rather than from the
+environment, so the entrypoint writes the forwarded key there, mode 0600,
+leaving any other provider in the file alone. Set `OPENCODE_API_KEY` as well if
+you want the models that are on Zen instead.
+
+That file is in the state volume, so unlike the environment the key outlives
+the container. `docker volume rm` is what removes it, as under State and reset.
+Providers that need an OAuth flow still cannot work here: nothing mounts your
+host `~/.pi`, and the sandbox has no browser to complete one.
 
 ### Forwarding other variables
 
@@ -219,13 +238,14 @@ of Pi children of its own.
 ```sh
 herdr workspace create --cwd /workspace --label review --no-focus
 herdr agent start reviewer --kind pi --pane <pane-id> \
-    -- --provider opencode --model deepseek-v4.1-flash
+    -- --provider opencode-go --model deepseek-v4.1-flash
 herdr agent prompt reviewer "Review the diff on this branch" --wait
 herdr pane read <pane-id>
 ```
 
 The provider and model flags are not optional: only the host wrapper applies
-the default, so a bare `pi` in the sandbox has no provider it can authenticate.
+the default, and `deepseek-v4.1-flash` is on the opencode-go subscription
+rather than on OpenCode Zen, so the provider has to be named with it.
 Two skills in the image teach the agent all this: Herdr's own, printed by the
 pinned binary at build time, and `herdr-fleet.md` from this repository, which
 covers what is different here, including telling a child agent not to start a
@@ -249,10 +269,11 @@ volume, and checks `herdr.dev` for updates on a timer like any other Herdr.
 
 ## Limitations
 
-- The key is inside the container. Anything running there can read
-  `OPENCODE_API_KEY` and, since outbound network is open, send it elsewhere.
-  This is inherent to running the agent in the container rather than proxying
-  its traffic. Use a key you are willing to rotate.
+- The keys are inside the container, in the environment and, for the
+  subscription, in `auth.json` in the state volume. Anything running there can
+  read them and, since outbound network is open, send them elsewhere. This is
+  inherent to running the agent in the container rather than proxying its
+  traffic. Use keys you are willing to rotate.
 - The mounted project is fully readable and writable by the agent. Only launch
   it from a project whose contents you are willing to send to the model
   provider, and keep a remote you can restore from.
@@ -280,10 +301,12 @@ uv run --with pytest pytest
 
 The tests use a fake `docker` on `PATH`, so they neither build an image nor
 start a container. They assert the isolation properties: only the two expected
-mounts, the key forwarded by name and never by value, no privileged or host
-namespace flags, the home-directory refusal, and that a Herdr pane's socket
-stays on the host. The rest read `Dockerfile.pi`, including a syntax check of
-the entrypoint it generates.
+mounts, the keys forwarded by name and never by value, the sandboxing flags
+present and no privileged or host namespace flags, the home-directory refusal,
+and that a Herdr pane's socket stays on the host. The rest read `Dockerfile.pi`
+or run `entrypoint.sh` against stub binaries and a throwaway home, for the
+default model, where the subscription key is written, and what happens when the
+agent has ruined the file it is written to.
 
 ## License
 

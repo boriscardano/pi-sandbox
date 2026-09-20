@@ -42,24 +42,10 @@ RUN set -eu; \
     printf '%s  %s\n' "$sha" /usr/local/bin/herdr | sha256sum --check --quiet; \
     chmod 0755 /usr/local/bin/herdr
 
-# Start the container's own Herdr server before Pi: Herdr's API commands do not
-# start one, and the socket it listens on lives in the agent's home, so a fleet
-# started here reaches nothing outside the container. Pi replaces the script
-# rather than running under it, so the container's foreground process stays Pi.
-# The inherited HERDR_* variables go first. The wrapper does not forward them,
-# but PI_SANDBOX_ENV would take the names, and a HERDR_SOCKET_PATH from the
-# host pane would move this server's socket while a stray HERDR_PANE_ID would
-# make Pi read itself as one of its own children.
-RUN printf '%s\n' \
-    '#!/bin/sh' \
-    'set -eu' \
-    'unset HERDR_SOCKET_PATH HERDR_PANE_ID HERDR_TAB_ID HERDR_WORKSPACE_ID' \
-    '# The herdr skill refuses to act unless this is set.' \
-    'export HERDR_ENV=1' \
-    'herdr server >/dev/null 2>&1 &' \
-    'exec pi "$@"' \
-    > /usr/local/bin/pi-sandbox-entrypoint \
-    && chmod 0755 /usr/local/bin/pi-sandbox-entrypoint
+# The entrypoint, which starts this container's own Herdr server and writes the
+# subscription key Pi expects in auth.json before becoming Pi. Copied in while
+# still root, since /usr/local/bin is not writable by the agent.
+COPY --chmod=0755 entrypoint.sh /usr/local/bin/pi-sandbox-entrypoint
 
 # The bind-mounted checkout is owned by the host user, so Git needs /workspace
 # declared safe. Commits get a sandbox identity rather than the host's, which

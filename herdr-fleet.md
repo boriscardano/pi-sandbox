@@ -42,11 +42,13 @@ Create a workspace and read its pane id. The container has `python3` and no
         python3 -c "import json,sys;print(json.load(sys.stdin)['result']['root_pane']['pane_id'])")
 
 Start Pi in that pane. Everything after the bare `--` goes to Pi, and both
-flags are needed, because a bare `pi` here has no working provider: this
-sandbox is given `OPENCODE_API_KEY`, so OpenCode Zen is what authenticates.
+flags are needed: the sandbox authenticates opencode-go but not the provider
+Pi defaults to, and naming only one of the two lets Pi resolve the other
+against everything it can authenticate, which has answered from the wrong
+provider before.
 
     herdr agent start reviewer --kind pi --pane "$pane" \
-        -- --provider opencode --model deepseek-v4.1-flash
+        -- --provider opencode-go --model deepseek-v4.1-flash
 
 Then drive it by name, with a timeout, since a wait without one never returns:
 

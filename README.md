@@ -102,8 +102,32 @@ cannot overwrite a macOS or Windows virtualenv in the mounted checkout.
 
 ```sh
 docker volume ls --filter name=pi-sandbox-     # list
+docker system df -v | grep pi-sandbox-         # sizes
 docker volume rm pi-sandbox-<project>-<hash>   # reset one project
 ```
+
+### What an agent installs
+
+Whether a tool survives the container exiting depends only on where it writes.
+
+Kept, because it lands in the volume under `/home/agent`: `rustup` and
+`cargo install`, `uv tool install`, `pip install --user`, npm's cache, and Pi's
+own sessions. `~/.local/bin` and `~/.cargo/bin` are on `PATH`, so these are
+found again on the next run rather than reinstalled.
+
+Lost, because `--rm` deletes the container's writable layer: anything in
+`/usr/local`, `/usr/bin` or `/opt`, and anything in `/tmp`. The agent cannot
+install system packages at all, since it is not root and there is no `sudo`, so
+`apt-get install` fails. Put anything system-level in `Dockerfile.pi` instead.
+
+These volumes grow. A project whose agent installed a Rust toolchain reached
+2.6 GB.
+
+### Careful with a repo where a build writes into the checkout
+
+Build output under `/workspace`, such as Cargo's `target/`, is written into
+your real checkout, not the volume, and will be Linux binaries sitting next to
+your host build artifacts.
 
 Containers run with `--rm` and carry the label `pi-sandbox=1`, so nothing is
 left behind. To get a shell in a running sandbox:

@@ -38,6 +38,12 @@ ENV HOME=/home/agent
 ENV UV_PROJECT_ENVIRONMENT=/home/agent/workspace-venv \
     UV_CACHE_DIR=/home/agent/uv-cache
 
+# Put the state volume's bin directories on PATH so tools the agent installs
+# into its home (rustup, cargo install, uv tool install, pip --user) are still
+# found on the next run instead of being reinstalled. Appended rather than
+# prepended, so nothing in the volume can shadow a system binary.
+ENV PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/home/agent/.local/bin:/home/agent/.cargo/bin
+
 USER agent
 WORKDIR /workspace
 ENTRYPOINT ["pi"]

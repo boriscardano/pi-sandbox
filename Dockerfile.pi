@@ -1,0 +1,43 @@
+# Sandbox image for running Pi against Chinese-hosted models via OpenCode.
+# The repository is bind-mounted at /workspace by bin/pi, never copied in, so
+# this image stays valid across commits and holds no project state.
+FROM node@sha256:0e0ff40c39bc087845bfb27465a0df4ea419520094bc35842ff83dd8cbe6f9b6
+
+RUN apt-get update \
+    && apt-get install --yes --no-install-recommends \
+        ca-certificates \
+        curl \
+        fd-find \
+        git \
+        less \
+        procps \
+        python3 \
+        python3-venv \
+        ripgrep \
+    && rm -rf /var/lib/apt/lists/* \
+    && curl -LsSf https://astral.sh/uv/install.sh \
+        | env UV_VERSION=0.12.17 UV_INSTALL_DIR=/usr/local/bin sh \
+    && npm install --global --ignore-scripts \
+        @earendil-works/pi-coding-agent@0.86.0 \
+    && npm cache clean --force
+
+# The bind-mounted checkout is owned by the host user, so Git needs /workspace
+# declared safe. Commits get a sandbox identity rather than the host's, which
+# keeps host Git configuration and credentials out of the container.
+RUN git config --system --add safe.directory /workspace \
+    && git config --system user.name 'Pi Sandbox' \
+    && git config --system user.email 'pi-sandbox@localhost'
+
+# Own the home directory in the image layer so the first run of the named state
+# volume inherits that ownership instead of coming back root-owned.
+RUN useradd --create-home --shell /bin/bash agent
+ENV HOME=/home/agent
+
+# Keep uv's virtualenv out of /workspace: the host checkout carries a macOS
+# .venv that a Linux `uv sync` would otherwise overwrite.
+ENV UV_PROJECT_ENVIRONMENT=/home/agent/workspace-venv \
+    UV_CACHE_DIR=/home/agent/uv-cache
+
+USER agent
+WORKDIR /workspace
+ENTRYPOINT ["pi"]

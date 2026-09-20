@@ -1,0 +1,112 @@
+#!/bin/sh
+# Run Pi in a Docker sandbox against whatever repository you are standing in.
+#
+#   cd ~/any/project && /path/to/pi-sandbox/pi
+#
+# Only that repository is mounted (at /workspace). The container gets no host
+# home directory, no SSH or cloud credentials, no Docker socket and no Herdr
+# socket. The one host secret it receives is OPENCODE_API_KEY, forwarded by
+# name so its value never lands in the command line, an image layer or a file.
+# Forward further host variables by naming them in PI_SANDBOX_ENV, for example
+# PI_SANDBOX_ENV='TYPESAFE_API_KEY OTHER_TOKEN'. Every variable you add is
+# readable by whatever runs in the container, so add only what it needs.
+#
+# The script is named `pi` on purpose: Herdr identifies a pane's agent from the
+# launched program's name, so this shows up as a real Pi agent in Herdr.
+set -eu
+
+image=pi-sandbox:local
+script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+dockerfile=$script_dir/Dockerfile.pi
+
+# The repository to mount: the git root when there is one, else the cwd. This
+# is what makes the script work for any project instead of one checkout.
+if project=$(git rev-parse --show-toplevel 2>/dev/null) && [ -n "$project" ]; then
+    :
+else
+    project=$(pwd)
+fi
+project=$(CDPATH= cd -- "$project" && pwd)
+
+# Refuse the mounts that would defeat the point: the whole disk, or a home
+# directory carrying ~/.ssh, ~/.aws and every other project.
+case "$project" in
+    /) printf '%s\n' "refusing to mount the whole filesystem" >&2; exit 2 ;;
+esac
+if [ "$project" = "${HOME%/}" ] || case "${HOME%/}/" in "$project"/*) true ;; *) false ;; esac; then
+    printf '%s\n' "refusing to mount $project: it contains your home directory" >&2
+    exit 2
+fi
+
+# Extra host variables to forward, by name only. Names are validated so a
+# stray value cannot smuggle in another docker flag.
+extra_env=''
+for name in $(printf '%s' "${PI_SANDBOX_ENV:-}" | tr ',' ' '); do
+    case "$name" in
+        [A-Za-z_]*) ;;
+        *) printf '%s\n' "PI_SANDBOX_ENV: invalid variable name: $name" >&2; exit 2 ;;
+    esac
+    if [ -n "$(printf '%s' "$name" | tr -d 'A-Za-z0-9_')" ]; then
+        printf '%s\n' "PI_SANDBOX_ENV: invalid variable name: $name" >&2
+        exit 2
+    fi
+    extra_env="$extra_env --env $name"
+done
+
+if [ -z "${OPENCODE_API_KEY:-}" ]; then
+    printf '%s\n' "OPENCODE_API_KEY is required" >&2
+    exit 2
+fi
+
+# One state volume per project, so sessions and `pi --resume` stay separate.
+# Inside the container every project is /workspace, which would otherwise make
+# them share one session history.
+project_tag=$(printf '%s' "$project" | shasum | cut -c1-8)
+state_volume=pi-sandbox-$(basename "$project" | tr -c 'A-Za-z0-9_.-' '-')-$project_tag
+
+if ! docker image inspect "$image" >/dev/null 2>&1; then
+    printf '%s\n' "building $image (first run only)" >&2
+    docker build --file "$dockerfile" --tag "$image" "$(dirname -- "$dockerfile")"
+fi
+
+# Default to a Chinese-hosted model through OpenCode, unless the caller picks
+# one. OpenCode Zen (provider `opencode`) is the one that authenticates with
+# OPENCODE_API_KEY, so it is the only provider reachable from this sandbox.
+case " $* " in
+    *" --model "* | *" --model="*) ;;
+    *) set -- --provider opencode --model deepseek-v4.1-flash "$@" ;;
+esac
+
+# Allocate a TTY only when there is one, so the same wrapper serves a Herdr
+# pane and a non-interactive check. Unquoted on purpose: these are two words.
+tty_flags=--interactive
+if [ -t 0 ] && [ -t 1 ]; then
+    tty_flags="--interactive --tty"
+fi
+
+# Deliberately NOT `exec`: Herdr identifies a pane's agent from the foreground
+# job's process arguments, and exec would replace this `pi`-named process with
+# `docker`, leaving Herdr to see a plain shell.
+# `trap : INT` lets Ctrl-C reach Pi inside the container instead of killing the
+# wrapper out from under it. A handler (not '') is used so docker still gets
+# SIGINT's default disposition.
+trap : INT
+
+# shellcheck disable=SC2086
+docker run \
+    --rm \
+    --init \
+    $tty_flags \
+    --label pi-sandbox=1 \
+    --hostname pi-sandbox \
+    --workdir /workspace \
+    --cap-drop ALL \
+    --security-opt no-new-privileges \
+    --pids-limit 512 \
+    --env OPENCODE_API_KEY \
+    $extra_env \
+    --env TERM=xterm-256color \
+    --env COLORTERM=truecolor \
+    --mount "type=bind,source=$project,target=/workspace" \
+    --mount "type=volume,source=$state_volume,target=/home/agent" \
+    "$image" "$@"

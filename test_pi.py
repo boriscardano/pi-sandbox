@@ -52,6 +52,7 @@ def _run(
     also: dict[str, str] | None = None,
     agent: str | None = None,
     run_status: str = "0",
+    wrapper: Path | None = None,
 ) -> tuple[subprocess.CompletedProcess[str], list[list[str]]]:
     bin_dir = tmp_path / "fakebin"
     bin_dir.mkdir(parents=True)
@@ -80,7 +81,7 @@ def _run(
     env.update(also or {})
 
     completed = subprocess.run(
-        [str(WRAPPER), *args],
+        [str(wrapper or WRAPPER), *args],
         capture_output=True,
         text=True,
         cwd=project,
@@ -108,6 +109,25 @@ def _docker_run(invocations: list[list[str]]) -> list[str]:
         if argv and argv[0] == "run":
             return argv
     raise AssertionError(f"no docker run invocation in {invocations}")
+
+
+def _image(argv: list[str]) -> str:
+    """The image is the argument right after the last --mount value."""
+
+    last_mount = max(index for index, arg in enumerate(argv) if arg == "--mount")
+    return argv[last_mount + 2]
+
+
+def _wrapper_with_inputs(directory: Path) -> Path:
+    """Copy the wrapper and the files it hashes into a fresh directory, so a
+    test can edit one input without touching the checkout."""
+
+    directory.mkdir(parents=True, exist_ok=True)
+    for name in ("pi", "Dockerfile.pi", "entrypoint.sh", "herdr-fleet.md"):
+        shutil.copy(ROOT / name, directory / name)
+    wrapper = directory / "pi"
+    wrapper.chmod(0o755)
+    return wrapper
 
 
 def test_wrapper_is_named_pi_so_herdr_identifies_the_pane_agent() -> None:
@@ -498,8 +518,8 @@ def test_wrapper_runs_pi_in_workspace_with_the_caller_arguments(
     argv = _docker_run(invocations)
 
     assert argv[argv.index("--workdir") + 1] == "/workspace"
-    assert argv[-3:] == [
-        "pi-sandbox:local",
+    image = _image(argv)
+    assert argv[argv.index(image) + 1 :] == [
         "--model",
         "opencode/glm-5.3",
     ]
@@ -510,7 +530,7 @@ def test_wrapper_runs_pi_in_workspace_with_the_caller_arguments(
 def test_wrapper_defaults_to_a_chinese_hosted_model(tmp_path: Path) -> None:
     _, invocations = _run(tmp_path)
     argv = _docker_run(invocations)
-    image = "pi-sandbox:local"
+    image = _image(argv)
 
     assert argv[argv.index(image) + 1 :] == [
         "--provider",
@@ -527,9 +547,9 @@ def test_wrapper_keeps_a_model_the_caller_asked_for(tmp_path: Path) -> None:
     _, chosen = _run(tmp_path, "--model", "kimi-k3")
     _, other_flag = _run(tmp_path / "b", "--models", "glm-5.3,kimi-k3")
 
-    image = "pi-sandbox:local"
     chosen_argv = _docker_run(chosen)
     other_argv = _docker_run(other_flag)
+    image = _image(chosen_argv)
 
     assert chosen_argv[chosen_argv.index(image) + 1 :] == [
         "--provider",
@@ -549,12 +569,12 @@ def test_wrapper_leaves_a_provider_the_caller_named_alone(tmp_path: Path) -> Non
     _, joined = _run(tmp_path / "b", "--model=opencode/glm-5.3")
     _, explicit = _run(tmp_path / "c", "--provider", "opencode", "--model", "kimi-k3")
 
-    image = "pi-sandbox:local"
     for invocations in (slashed, joined):
         argv = _docker_run(invocations)
         assert "opencode-go" not in " ".join(argv)
 
     explicit_argv = _docker_run(explicit)
+    image = _image(explicit_argv)
     assert explicit_argv[explicit_argv.index(image) + 1 :] == [
         "--provider",
         "opencode",
@@ -572,8 +592,9 @@ def test_wrapper_names_the_model_even_when_the_provider_is_given(
 
     _, invocations = _run(tmp_path, "--provider", "opencode-go")
     argv = _docker_run(invocations)
+    image = _image(argv)
 
-    assert argv[argv.index("pi-sandbox:local") + 1 :] == [
+    assert argv[argv.index(image) + 1 :] == [
         "--model",
         "deepseek-v4.1-flash",
         "--provider",
@@ -599,16 +620,17 @@ def test_wrapper_passes_pi_subcommands_through_untouched(tmp_path: Path) -> None
     _, subcommand = _run(tmp_path, "install", "npm:example")
     _, prompt = _run(tmp_path / "b", "installed?")
 
-    image = "pi-sandbox:local"
     subcommand_argv = _docker_run(subcommand)
     prompt_argv = _docker_run(prompt)
+    subcommand_image = _image(subcommand_argv)
+    prompt_image = _image(prompt_argv)
 
-    assert subcommand_argv[subcommand_argv.index(image) + 1 :] == [
+    assert subcommand_argv[subcommand_argv.index(subcommand_image) + 1 :] == [
         "install",
         "npm:example",
     ]
     # A word that merely looks like one is still an ordinary prompt.
-    assert prompt_argv[prompt_argv.index(image) + 1 :] == [
+    assert prompt_argv[prompt_argv.index(prompt_image) + 1 :] == [
         "--provider",
         "opencode-go",
         "--model",
@@ -624,6 +646,42 @@ def test_wrapper_builds_the_image_only_when_it_is_missing(tmp_path: Path) -> Non
     assert [argv[0] for argv in present] == ["image", "run"]
     assert [argv[0] for argv in missing] == ["image", "build", "run"]
     assert any(arg.endswith("/Dockerfile.pi") for arg in missing[1])
+
+
+def test_wrapper_tags_the_image_by_content_and_uses_it_for_inspect_and_run(
+    tmp_path: Path,
+) -> None:
+    _, invocations = _run(tmp_path, inspect_status="1")
+
+    assert [argv[0] for argv in invocations] == ["image", "build", "run"]
+    inspected = invocations[0][2]
+    built = invocations[1][invocations[1].index("--tag") + 1]
+    ran = _image(invocations[2])
+
+    assert re.fullmatch(r"pi-sandbox:[0-9a-f]{12}", inspected)
+    assert inspected == built == ran
+
+
+def test_wrapper_changes_the_image_tag_when_a_build_input_changes(
+    tmp_path: Path,
+) -> None:
+    """A pull that touches the Dockerfile, the entrypoint or the fleet skill
+    has to produce a tag that does not exist yet, or the build-if-missing
+    check keeps running the image built from the old files."""
+
+    def tag(directory: Path, changed: str | None = None) -> str:
+        wrapper = _wrapper_with_inputs(directory)
+        if changed is not None:
+            with (directory / changed).open("a") as handle:
+                handle.write("\nchanged by the test\n")
+        _, invocations = _run(directory, wrapper=wrapper)
+        return _image(_docker_run(invocations))
+
+    unchanged = tag(tmp_path / "unchanged")
+    # Names and mtimes are not hashed, so the same contents give the same tag.
+    assert tag(tmp_path / "again") == unchanged
+    for name in ("Dockerfile.pi", "entrypoint.sh", "herdr-fleet.md"):
+        assert tag(tmp_path / name.replace(".", "-"), changed=name) != unchanged
 
 
 def test_wrapper_stays_in_the_process_tree_so_herdr_can_identify_pi(

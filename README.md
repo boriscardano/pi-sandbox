@@ -47,11 +47,11 @@ alias pis='/path/to/pi-sandbox/pi'
 Do not put the script on your `PATH` as `pi`, or it will shadow a host Pi
 install for every project.
 
-Rebuild after editing the Dockerfile:
-
-```sh
-docker build --file Dockerfile.pi --tag pi-sandbox:local .
-```
+Edits to `Dockerfile.pi`, `entrypoint.sh` or `herdr-fleet.md` rebuild
+automatically on the next launch. The image is tagged by the contents of those
+files, so a changed file produces a tag that does not exist yet and the wrapper
+builds it before starting. Each build leaves the older images behind. Remove
+them with `docker image prune --filter label=pi-sandbox.image=1`.
 
 ## What the container can and cannot see
 

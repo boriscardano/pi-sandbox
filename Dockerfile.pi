@@ -3,6 +3,11 @@
 # this image stays valid across commits and holds no project state.
 FROM node@sha256:0e0ff40c39bc087845bfb27465a0df4ea419520094bc35842ff83dd8cbe6f9b6
 
+# The wrapper tags each build by the contents of its inputs, so older images
+# accumulate. This one line is what `docker image prune --filter
+# label=pi-sandbox.image=1` targets.
+LABEL pi-sandbox.image=1
+
 RUN apt-get update \
     && apt-get install --yes --no-install-recommends \
         ca-certificates \

@@ -39,6 +39,13 @@ NESTED_GIT = (
     "mkdir -p sub/.git && printf '[core]\\n\\tfsmonitor = true\\n' > sub/.git/config"
 )
 
+# Simulates a rebase the agent can plant. `exec` lines in the todo run when the
+# host continues the rebase this makes git report.
+PLANTED_REBASE = (
+    "mkdir -p .git/rebase-merge && "
+    "printf 'exec true\\n' > .git/rebase-merge/git-rebase-todo"
+)
+
 
 def _run(
     tmp_path: Path,
@@ -256,10 +263,61 @@ def test_wrapper_mounts_git_config_and_hooks_read_only(tmp_path: Path) -> None:
     assert mounts[3] == (
         f"type=bind,source={repo}/.git/hooks,target=/workspace/.git/hooks,readonly"
     )
+    assert mounts[4] == (
+        f"type=bind,source={repo}/.git/worktrees,"
+        "target=/workspace/.git/worktrees,readonly"
+    )
     # A fresh repository has no modules, and the state volume is still last.
-    assert len(mounts) == 5
-    assert mounts[4].startswith("type=volume,source=pi-sandbox-")
-    assert mounts[4].endswith(",target=/home/agent")
+    assert len(mounts) == 6
+    assert mounts[5].startswith("type=volume,source=pi-sandbox-")
+    assert mounts[5].endswith(",target=/home/agent")
+
+
+def test_wrapper_mounts_git_worktrees_read_only(tmp_path: Path) -> None:
+    """A linked worktree keeps its git directory at .git/worktrees/<name>,
+    where `commondir`, `gitdir` and `config.worktree` can redirect the host's
+    Git at a config the agent wrote, so the whole directory is read-only."""
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "--quiet", str(repo)], check=True)
+
+    _, invocations = _run(tmp_path / "a", cwd=repo)
+    argv = _docker_run(invocations)
+    mounts = [argv[index + 1] for index, arg in enumerate(argv) if arg == "--mount"]
+
+    worktrees = (
+        f"type=bind,source={repo}/.git/worktrees,"
+        "target=/workspace/.git/worktrees,readonly"
+    )
+    assert worktrees in mounts
+    # Layered over .git and before the state volume, like the hooks.
+    assert mounts.index(worktrees) > mounts.index(
+        f"type=bind,source={repo}/.git,target=/workspace/.git"
+    )
+    assert mounts.index(worktrees) < mounts.index(
+        next(mount for mount in mounts if mount.startswith("type=volume"))
+    )
+
+
+def test_wrapper_creates_a_missing_git_worktrees_directory(tmp_path: Path) -> None:
+    """Skipping the mount because the directory is absent would leave the
+    agent free to create it and point the host's Git at a config it wrote,
+    the same as a missing hooks directory."""
+
+    project = tmp_path / "project"
+    (project / ".git").mkdir(parents=True)
+    (project / ".git/config").write_text("[core]\n\trepositoryformatversion = 0\n")
+
+    _, invocations = _run(tmp_path, cwd=project)
+    argv = _docker_run(invocations)
+    mounts = [argv[index + 1] for index, arg in enumerate(argv) if arg == "--mount"]
+
+    assert (project / ".git/worktrees").is_dir()
+    assert (
+        f"type=bind,source={project}/.git/worktrees,"
+        "target=/workspace/.git/worktrees,readonly"
+    ) in mounts
 
 
 def test_wrapper_mounts_dot_git_itself_so_it_cannot_be_replaced(
@@ -450,7 +508,11 @@ def test_wrapper_keeps_a_project_path_with_a_space_in_one_mount(
     assert (
         f"type=bind,source={repo}/.git/config,target=/workspace/.git/config,readonly"
     ) in mounts
-    assert len(mounts) == 5
+    assert (
+        f"type=bind,source={repo}/.git/worktrees,"
+        "target=/workspace/.git/worktrees,readonly"
+    ) in mounts
+    assert len(mounts) == 6
     assert all("target=" in mount for mount in mounts)
 
 
@@ -563,6 +625,56 @@ def test_wrapper_keeps_docker_status_through_the_nested_git_check(
     assert "nested git metadata" in warning.stderr
     assert quiet.returncode == 7
     assert "nested git metadata" not in quiet.stderr
+
+
+def test_wrapper_warns_about_a_git_operation_left_in_progress(
+    tmp_path: Path,
+) -> None:
+    """A planted rebase makes the host's git report one in progress, and
+    `git rebase --continue` then runs the `exec` lines its todo holds. An
+    empty rebase-merge directory cannot be mounted over, because git would
+    read the empty directory as a rebase in progress, so the wrapper names it
+    at exit instead."""
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "--quiet", str(repo)], check=True)
+
+    completed, _ = _run(tmp_path / "run", cwd=repo, agent=PLANTED_REBASE)
+
+    assert completed.returncode == 0
+    assert "git operation in progress" in completed.stderr
+    assert str(repo / ".git/rebase-merge") in completed.stderr
+    assert "abort" in completed.stderr
+
+
+def test_wrapper_warns_about_a_planted_merge_or_cherry_pick(
+    tmp_path: Path,
+) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "--quiet", str(repo)], check=True)
+
+    completed, _ = _run(
+        tmp_path / "run",
+        cwd=repo,
+        agent="touch .git/MERGE_HEAD .git/CHERRY_PICK_HEAD",
+    )
+
+    assert completed.returncode == 0
+    assert str(repo / ".git/MERGE_HEAD") in completed.stderr
+    assert str(repo / ".git/CHERRY_PICK_HEAD") in completed.stderr
+
+
+def test_wrapper_stays_quiet_about_a_clean_git_state(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "--quiet", str(repo)], check=True)
+
+    completed, _ = _run(tmp_path / "run", cwd=repo)
+
+    assert completed.returncode == 0
+    assert "git operation in progress" not in completed.stderr
 
 
 def test_wrapper_gives_each_project_its_own_state_volume(tmp_path: Path) -> None:
@@ -1007,6 +1119,20 @@ def test_image_pins_uv_to_a_digest_instead_of_piping_install_sh() -> None:
     )
     assert "/uv /uvx /usr/local/bin/" in dockerfile
     assert "install.sh" not in dockerfile
+
+
+def test_image_pins_the_node_base_image_by_tag_and_digest() -> None:
+    """A digest with no tag gives Dependabot no version to compare, so it
+    never proposes an update. The tag in front of the same digest keeps the
+    pin and lets the version move."""
+
+    dockerfile = (ROOT / "Dockerfile.pi").read_text()
+
+    assert re.search(
+        r"^FROM node:[^@\s]+@sha256:[0-9a-f]{64}$",
+        dockerfile,
+        re.MULTILINE,
+    )
 
 
 ENTRYPOINT = ROOT / "entrypoint.sh"

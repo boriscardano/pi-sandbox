@@ -51,20 +51,25 @@ jobs:
       - name: The agent can write /workspace but not .git/config
         run: |
           image=$(docker images --format '{{.Repository}}:{{.Tag}}' | grep -m1 '^pi-sandbox:')
-          # The same mounts the wrapper builds, in the same order: the project,
-          # then .git over it, then its config and hooks read-only. `--entrypoint
-          # sh` skips the entrypoint, which would exec Pi.
+          # The mounts that make the sandbox, in the same order: the project,
+          # then .git over it, then its config, hooks and worktrees read-only.
+          # `--entrypoint sh` skips the entrypoint, which would exec Pi.
           docker run --rm --entrypoint sh \
             --mount "type=bind,source=/tmp/proj,target=/workspace" \
             --mount "type=bind,source=/tmp/proj/.git,target=/workspace/.git" \
             --mount "type=bind,source=/tmp/proj/.git/config,target=/workspace/.git/config,readonly" \
             --mount "type=bind,source=/tmp/proj/.git/hooks,target=/workspace/.git/hooks,readonly" \
+            --mount "type=bind,source=/tmp/proj/.git/worktrees,target=/workspace/.git/worktrees,readonly" \
             "$image" -c '
               set -eu
               touch /workspace/pi-sandbox-write-test
               rm /workspace/pi-sandbox-write-test
               if printf x >> /workspace/.git/config 2>/dev/null; then
                 echo ".git/config is writable, the sandbox is broken" >&2
+                exit 1
+              fi
+              if printf x >> /workspace/.git/worktrees/x 2>/dev/null; then
+                echo ".git/worktrees is writable, the sandbox is broken" >&2
                 exit 1
               fi
             '

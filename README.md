@@ -74,8 +74,8 @@ Mounted:
 - inside a Git repository, `.git` itself is bind-mounted over the project, so
   it cannot be renamed away, and the parts of it that can name a command are
   then mounted read-only inside it: `.git/config`, `.git/config.worktree` when
-  `extensions.worktreeConfig` is on, `.git/hooks` and, when it exists,
-  `.git/modules`.
+  `extensions.worktreeConfig` is on, `.git/hooks`, `.git/worktrees` and, when
+  it exists, `.git/modules`.
 
 Not mounted, and unreachable: your home directory, `~/.ssh`, `~/.aws`,
 `~/.config`, the system keychain, every other project, the Docker socket, your
@@ -224,16 +224,21 @@ because the mounted files belong to the host user, and commits use the identity
 with `git -c user.name=... -c user.email=...`.
 
 `.git` itself is bind-mounted over the project, and then `.git/config`,
-`.git/config.worktree` when `extensions.worktreeConfig` is on, `.git/hooks`
-and, when the repository has them, `.git/modules` are mounted read-only inside
-it. The hooks directory is created first if it is missing, and the worktree
-config is created empty when Git would read it and it is not there. A symlink
-at `.git/config.worktree`, which Git and the mount would both follow, is
-refused rather than mounted.
+`.git/config.worktree` when `extensions.worktreeConfig` is on, `.git/hooks`,
+`.git/worktrees` and, when the repository has them, `.git/modules` are mounted
+read-only inside it. The hooks directory and the worktrees directory are
+created first if they are missing, and the worktree config is created empty
+when Git would read it and it is not there. A symlink at
+`.git/config.worktree`, which Git and the mount would both follow, is refused
+rather than mounted.
 Git runs commands named in those places, through `core.fsmonitor`,
 `core.pager`, `core.hooksPath` and `filter.<name>.clean`, so leaving them
 writable would let the agent leave a command behind that you run yourself with
-the next `git status`.
+the next `git status`. A linked worktree keeps its git directory at
+`.git/worktrees/<name>`, and `commondir`, `gitdir` and `config.worktree` there
+redirect Git to the config and hooks it reads, so the whole directory is
+read-only too. `git worktree add` therefore fails in the sandbox, which costs
+nothing because the paths in those files are host paths.
 
 Mounting `.git` matters on its own. Read-only mounts on the files inside it do
 not stop `mv .git .git-old`, which succeeds while `.git` is still an ordinary
@@ -260,6 +265,16 @@ warns, and deletes nothing.
 
 No credentials are mounted, so `git push` fails inside the sandbox by design.
 Push from the host after reviewing the diff.
+
+A planted rebase, merge or cherry-pick is not prevented either. The agent can
+write `.git/rebase-merge/git-rebase-todo` with `exec` lines in it, or the
+files the other backends read, so the next host `git status` reports an
+operation in progress and `git rebase --continue` would run what the file
+names. An empty directory there cannot be blocked, because Git reads the empty
+directory as a rebase in progress, so the wrapper warns instead: at exit it
+names `.git/rebase-merge`, `.git/rebase-apply`, `.git/sequencer`,
+`.git/MERGE_HEAD` or `.git/CHERRY_PICK_HEAD` when its ctime is newer than the
+marker. Inspect those and abort the operation rather than continuing it.
 
 ## Herdr
 
@@ -333,10 +348,11 @@ volume, and checks `herdr.dev` for updates on a timer like any other Herdr.
   write `.envrc` for direnv, a `Makefile`, `package.json` scripts, editor task
   files and the code itself, all of which your host may execute later. Review
   the diff before running anything from a checkout the agent has touched.
-- Nested repositories the agent creates inside the project are detected at
-  exit, not prevented. The check runs after `docker run` returns, so it does
-  not run at all if the wrapper itself is killed, and anything it finds has
-  already been written to your checkout. It also warns rather than fixing.
+- Nested repositories, and the rebase, merge or cherry-pick state the agent
+  can plant in `.git`, are detected at exit, not prevented. The checks run
+  after `docker run` returns, so they do not run at all if the wrapper itself
+  is killed, and anything they find has already been written to your checkout.
+  They warn rather than fixing.
 - If the script lives inside the project it mounts, the agent can edit the
   script that defines its own sandbox, which would take effect on the next
   launch. Keeping it in its own directory, as here, avoids that.

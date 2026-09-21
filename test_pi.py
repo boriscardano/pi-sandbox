@@ -851,6 +851,22 @@ def test_image_pins_herdr_and_checks_it_against_a_digest() -> None:
     assert "sha256sum --check" in dockerfile
 
 
+def test_image_pins_uv_to_a_digest_instead_of_piping_install_sh() -> None:
+    """An install script piped into a shell runs whatever the network returns
+    at build time, which must not happen in a container that holds the API
+    key. uv's official distroless image comes pinned by the digest of its
+    multi-arch index instead."""
+
+    dockerfile = (ROOT / "Dockerfile.pi").read_text()
+
+    assert re.search(
+        r"COPY --from=ghcr\.io/astral-sh/uv:[^@\s]+@sha256:[0-9a-f]{64}",
+        dockerfile,
+    )
+    assert "/uv /uvx /usr/local/bin/" in dockerfile
+    assert "install.sh" not in dockerfile
+
+
 ENTRYPOINT = ROOT / "entrypoint.sh"
 
 

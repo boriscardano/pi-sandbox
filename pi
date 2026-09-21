@@ -126,9 +126,25 @@ for link in .git .git/config .git/hooks .git/modules .git/worktrees .git/config.
     fi
 done
 
+# `.git/config.worktree` is created with `: >` below and then bind-mounted as
+# a file. `set -C` does not save that write from a FIFO, which dash opens and
+# blocks on waiting for a reader, and Docker cannot mount a directory or a
+# socket as a file either, so refuse anything there that is not an ordinary
+# file. A symlink was caught above, and `[ -e ]` follows one, so a dangling
+# link cannot slip past this.
+if [ -e "$project/.git/config.worktree" ] && [ ! -f "$project/.git/config.worktree" ]; then
+    printf '%s\n' "refusing to run: $project/.git/config.worktree is not a regular file, which this script would create or mount as one, so inspect and remove it" >&2
+    exit 2
+fi
+
 # Extra host variables to forward, by name only. Names are validated so a
-# stray value cannot smuggle in another docker flag.
+# stray value cannot smuggle in another docker flag. The command substitution
+# is word-split and would also be pathname-expanded, so `set -f` stops a value
+# like `*` from being replaced by the project's filenames: without it, a glob
+# could forward a variable the caller never named, which the README says
+# cannot happen.
 extra_env=''
+set -f
 for name in $(printf '%s' "${PI_SANDBOX_ENV:-}" | tr ',' ' '); do
     case "$name" in
         [A-Za-z_]*) ;;
@@ -140,6 +156,7 @@ for name in $(printf '%s' "${PI_SANDBOX_ENV:-}" | tr ',' ' '); do
     fi
     extra_env="$extra_env --env $name"
 done
+set +f
 
 # One state volume per project, so sessions and `pi --resume` stay separate.
 # Inside the container every project is /workspace, which would otherwise make
@@ -277,22 +294,27 @@ if [ -d "$project/.git" ]; then
     # cannot work in the sandbox anyway: the paths in those files are host
     # paths.
     mkdir -p "$project/.git/worktrees"
-    # Submodule configs carry the same hook and filter keys as .git/config.
-    if [ -d "$project/.git/modules" ]; then
-        set -- --mount "type=bind,source=$project/.git/modules,target=/workspace/.git/modules,readonly" "$@"
-    fi
+    # Submodule configs carry the same hook and filter keys as .git/config,
+    # and a git directory the agent builds at .git/modules/<name> is one the
+    # host's Git reaches through the submodule's `.git` file and can run a
+    # command from. Created first for the same reason as the hooks, so a
+    # missing directory cannot be left for the agent to fill: the protected
+    # `.git` is pruned at exit, so nothing there would be reported.
+    mkdir -p "$project/.git/modules"
+    set -- --mount "type=bind,source=$project/.git/modules,target=/workspace/.git/modules,readonly" "$@"
     set -- --mount "type=bind,source=$project/.git/worktrees,target=/workspace/.git/worktrees,readonly" "$@"
     set -- --mount "type=bind,source=$project/.git/hooks,target=/workspace/.git/hooks,readonly" "$@"
     # `git sparse-checkout init --cone` sets extensions.worktreeConfig, and git
     # then reads .git/config.worktree, which can name a command through
     # core.fsmonitor just as .git/config can. It is writable through the .git
-    # mount above unless it is covered too. A symlink there is refused above
-    # with the other git paths. `set -C` creates the file only when it is
-    # missing, without writing through a link.
-    if [ "$(git -C "$project" config --type=bool --get extensions.worktreeConfig 2>/dev/null)" = true ]; then
-        (set -C; : > "$project/.git/config.worktree") 2>/dev/null || true
-        set -- --mount "type=bind,source=$project/.git/config.worktree,target=/workspace/.git/config.worktree,readonly" "$@"
-    fi
+    # mount above unless it is covered too, so it gets the hooks' treatment
+    # whether or not the extension is on. Git ignores an empty config.worktree
+    # while it is off, so creating it changes nothing for the host. `set -C`
+    # creates the file only when it is missing and refuses an existing one, so
+    # a real config.worktree is not truncated. A non-regular file there was
+    # refused above, before this write could block on a FIFO.
+    (set -C; : > "$project/.git/config.worktree") 2>/dev/null || true
+    set -- --mount "type=bind,source=$project/.git/config.worktree,target=/workspace/.git/config.worktree,readonly" "$@"
     set -- --mount "type=bind,source=$project/.git/config,target=/workspace/.git/config,readonly" "$@"
     set -- --mount "type=bind,source=$project/.git,target=/workspace/.git" "$@"
 fi

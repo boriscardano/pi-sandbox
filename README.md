@@ -75,9 +75,8 @@ Mounted:
 - a per-project Docker volume at `/home/agent` for Pi's own state.
 - inside a Git repository, `.git` itself is bind-mounted over the project, so
   it cannot be renamed away, and the parts of it that can name a command are
-  then mounted read-only inside it: `.git/config`, `.git/config.worktree` when
-  `extensions.worktreeConfig` is on, `.git/hooks`, `.git/worktrees` and, when
-  it exists, `.git/modules`.
+  then mounted read-only inside it: `.git/config`, `.git/config.worktree`,
+  `.git/hooks`, `.git/worktrees` and `.git/modules`.
 
 Not mounted, and unreachable: your home directory, `~/.ssh`, `~/.aws`,
 `~/.config`, the system keychain, every other project, the Docker socket, your
@@ -226,14 +225,18 @@ because the mounted files belong to the host user, and commits use the identity
 with `git -c user.name=... -c user.email=...`.
 
 `.git` itself is bind-mounted over the project, and then `.git/config`,
-`.git/config.worktree` when `extensions.worktreeConfig` is on, `.git/hooks`,
-`.git/worktrees` and, when the repository has them, `.git/modules` are mounted
-read-only inside it. The hooks directory and the worktrees directory are
-created first if they are missing, and the worktree config is created empty
-when Git would read it and it is not there. A symlink at `.git` or at any of
-those five paths is refused before the wrapper creates or mounts anything,
-because Git, the mount and the `mkdir` would all follow it outside the project.
-Git runs commands named in those places, through `core.fsmonitor`,
+`.git/config.worktree`, `.git/hooks`, `.git/worktrees` and `.git/modules` are
+mounted read-only inside it. The hooks, worktrees and modules directories are
+created first if they are missing, and so is the worktree config, as an empty
+file. Git ignores an empty `.git/config.worktree` while
+`extensions.worktreeConfig` is off, which is the default, so creating it
+changes nothing for the host, and an existing one is left untouched. A symlink
+at `.git` or at any of those five paths is refused before the wrapper creates
+or mounts anything, because Git, the mount and the `mkdir` would all follow it
+outside the project. A `.git/config.worktree` that exists but is not an
+ordinary file, such as a FIFO, is refused for the same reason: creating or
+mounting it as a file would block or fail. Git runs
+commands named in those places, through `core.fsmonitor`,
 `core.pager`, `core.hooksPath` and `filter.<name>.clean`, so leaving them
 writable would let the agent leave a command behind that you run yourself with
 the next `git status`. A linked worktree keeps its git directory at
@@ -355,11 +358,6 @@ volume, and checks `herdr.dev` for updates on a timer like any other Herdr.
   after `docker run` returns, so they do not run at all if the wrapper itself
   is killed, and anything they find has already been written to your checkout.
   They warn rather than fixing.
-- A planted `.git` can also make the next launch hang rather than start. The
-  wrapper reads `.git/config` with git before it mounts anything, and an
-  `include.path` naming a FIFO, or a `config.worktree` that is a FIFO while
-  `extensions.worktreeConfig` is on, blocks that read. It fails closed, so no
-  container starts, and the file is in your checkout to remove.
 - If the script lives inside the project it mounts, the agent can edit the
   script that defines its own sandbox, which would take effect on the next
   launch. Keeping it in its own directory, as here, avoids that.

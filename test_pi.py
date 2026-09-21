@@ -330,9 +330,10 @@ def test_wrapper_ignores_a_dot_git_file_that_redirects_the_worktree(
 
 
 def test_wrapper_mounts_git_config_and_hooks_read_only(tmp_path: Path) -> None:
-    """A writable .git/config or hook is a command the host runs the next time
-    the owner touches the checkout: `git status` and `git commit` honour
-    core.fsmonitor, core.pager, core.hooksPath and filter.<name>.clean."""
+    """A writable .git/config, config.worktree or hook is a command the host
+    runs the next time the owner touches the checkout: `git status` and `git
+    commit` honour core.fsmonitor, core.pager, core.hooksPath and
+    filter.<name>.clean."""
 
     repo = tmp_path / "repo"
     repo.mkdir()
@@ -348,16 +349,24 @@ def test_wrapper_mounts_git_config_and_hooks_read_only(tmp_path: Path) -> None:
         f"type=bind,source={repo}/.git/config,target=/workspace/.git/config,readonly"
     )
     assert mounts[3] == (
-        f"type=bind,source={repo}/.git/hooks,target=/workspace/.git/hooks,readonly"
+        f"type=bind,source={repo}/.git/config.worktree,"
+        "target=/workspace/.git/config.worktree,readonly"
     )
     assert mounts[4] == (
+        f"type=bind,source={repo}/.git/hooks,target=/workspace/.git/hooks,readonly"
+    )
+    assert mounts[5] == (
         f"type=bind,source={repo}/.git/worktrees,"
         "target=/workspace/.git/worktrees,readonly"
     )
-    # A fresh repository has no modules, and the state volume is still last.
-    assert len(mounts) == 6
-    assert mounts[5].startswith("type=volume,source=pi-sandbox-")
-    assert mounts[5].endswith(",target=/home/agent")
+    assert mounts[6] == (
+        f"type=bind,source={repo}/.git/modules,target=/workspace/.git/modules,readonly"
+    )
+    # A fresh repository has no modules, they are created empty, and the
+    # state volume is still last.
+    assert len(mounts) == 8
+    assert mounts[7].startswith("type=volume,source=pi-sandbox-")
+    assert mounts[7].endswith(",target=/home/agent")
 
 
 def test_wrapper_mounts_git_worktrees_read_only(tmp_path: Path) -> None:
@@ -428,7 +437,8 @@ def test_wrapper_mounts_dot_git_itself_so_it_cannot_be_replaced(
     assert mounts[1] == f"type=bind,source={repo}/.git,target=/workspace/.git"
     assert "readonly" not in mounts[1]
     assert mounts[2].endswith(",target=/workspace/.git/config,readonly")
-    assert mounts[3].endswith(",target=/workspace/.git/hooks,readonly")
+    assert mounts[3].endswith(",target=/workspace/.git/config.worktree,readonly")
+    assert mounts[4].endswith(",target=/workspace/.git/hooks,readonly")
 
 
 def test_wrapper_creates_a_missing_git_hooks_directory(tmp_path: Path) -> None:
@@ -449,58 +459,47 @@ def test_wrapper_creates_a_missing_git_hooks_directory(tmp_path: Path) -> None:
     ) in mounts
 
 
-def test_wrapper_mounts_git_modules_only_when_present(tmp_path: Path) -> None:
-    """Submodule configs carry the same keys, so they get the same treatment,
-    and a repository without the directory gets no mount that would fail."""
-
-    with_modules = tmp_path / "with-modules"
-    without = tmp_path / "without"
-    for repo in (with_modules, without):
-        repo.mkdir()
-        subprocess.run(["git", "init", "--quiet", str(repo)], check=True)
-    (with_modules / ".git/modules").mkdir()
-
-    _, present = _run(tmp_path / "a", cwd=with_modules)
-    _, absent = _run(tmp_path / "b", cwd=without)
-    present_argv = _docker_run(present)
-    absent_argv = _docker_run(absent)
-    present_mounts = [
-        present_argv[index + 1]
-        for index, arg in enumerate(present_argv)
-        if arg == "--mount"
-    ]
-    absent_mounts = [
-        absent_argv[index + 1]
-        for index, arg in enumerate(absent_argv)
-        if arg == "--mount"
-    ]
-
-    modules = (
-        f"type=bind,source={with_modules}/.git/modules,"
-        "target=/workspace/.git/modules,readonly"
-    )
-    assert modules in present_mounts
-    # Layered over .git and under the state volume, like the other read-only
-    # parts.
-    assert present_mounts.index(modules) < present_mounts.index(
-        next(mount for mount in present_mounts if mount.startswith("type=volume"))
-    )
-    assert not any(".git/modules" in mount for mount in absent_mounts)
-
-
-def test_wrapper_mounts_config_worktree_read_only_when_git_reads_it(
-    tmp_path: Path,
-) -> None:
-    """`git sparse-checkout init --cone` sets extensions.worktreeConfig, and
-    git then reads .git/config.worktree, which names a command through
-    core.fsmonitor just as .git/config does. It is writable through the .git
-    mount unless it is covered too, so the host would run what the agent put
-    there."""
+def test_wrapper_mounts_git_modules_read_only(tmp_path: Path) -> None:
+    """A `core.fsmonitor` or hook planted at .git/modules/<name>/config runs
+    when the host's Git reaches that git directory through the submodule's
+    `.git` file. The protected `.git` is pruned at exit, so nothing there is
+    reported, and a missing directory can no longer be left for the agent to
+    fill: it is created and mounted read-only like the hooks."""
 
     repo = tmp_path / "repo"
     repo.mkdir()
     subprocess.run(["git", "init", "--quiet", str(repo)], check=True)
-    subprocess.run(["git", "sparse-checkout", "init", "--cone"], cwd=repo, check=True)
+
+    _, invocations = _run(tmp_path / "a", cwd=repo)
+    argv = _docker_run(invocations)
+    mounts = [argv[index + 1] for index, arg in enumerate(argv) if arg == "--mount"]
+
+    modules = (
+        f"type=bind,source={repo}/.git/modules,target=/workspace/.git/modules,readonly"
+    )
+    assert (repo / ".git/modules").is_dir()
+    assert modules in mounts
+    # Layered over .git and under the state volume, like the other read-only
+    # parts.
+    assert mounts.index(modules) > mounts.index(
+        f"type=bind,source={repo}/.git,target=/workspace/.git"
+    )
+    assert mounts.index(modules) < mounts.index(
+        next(mount for mount in mounts if mount.startswith("type=volume"))
+    )
+
+
+def test_wrapper_mounts_config_worktree_read_only(tmp_path: Path) -> None:
+    """`git sparse-checkout init --cone` sets extensions.worktreeConfig, and
+    git then reads .git/config.worktree, which names a command through
+    core.fsmonitor just as .git/config does. It is writable through the .git
+    mount unless it is covered too, so it is created empty when missing and
+    mounted read-only like the hooks, whether or not the extension is on. Git
+    ignores the empty file while it is off, so the host sees no change."""
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "--quiet", str(repo)], check=True)
 
     _, invocations = _run(tmp_path / "a", cwd=repo)
     argv = _docker_run(invocations)
@@ -516,6 +515,28 @@ def test_wrapper_mounts_config_worktree_read_only_when_git_reads_it(
         f"type=bind,source={repo}/.git,target=/workspace/.git"
     )
     assert (repo / ".git/config.worktree").is_file()
+    assert (repo / ".git/config.worktree").read_text() == ""
+
+
+def test_wrapper_keeps_an_existing_config_worktree(tmp_path: Path) -> None:
+    """`set -C` must create the file only when it is missing: truncating a
+    config.worktree git really reads would drop the host's own settings."""
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "--quiet", str(repo)], check=True)
+    subprocess.run(["git", "sparse-checkout", "init", "--cone"], cwd=repo, check=True)
+    (repo / ".git/config.worktree").write_text("[core]\n\tsparseCheckout = true\n")
+
+    _, invocations = _run(tmp_path / "a", cwd=repo)
+
+    assert (
+        f"type=bind,source={repo}/.git/config.worktree,"
+        "target=/workspace/.git/config.worktree,readonly"
+    ) in _docker_run(invocations)
+    assert (repo / ".git/config.worktree").read_text() == (
+        "[core]\n\tsparseCheckout = true\n"
+    )
 
 
 def test_wrapper_refuses_a_config_worktree_symlink(tmp_path: Path) -> None:
@@ -525,8 +546,6 @@ def test_wrapper_refuses_a_config_worktree_symlink(tmp_path: Path) -> None:
     repo = tmp_path / "repo"
     repo.mkdir()
     subprocess.run(["git", "init", "--quiet", str(repo)], check=True)
-    subprocess.run(["git", "sparse-checkout", "init", "--cone"], cwd=repo, check=True)
-    (repo / ".git/config.worktree").unlink()
     (repo / ".git/config.worktree").symlink_to(repo / "evil")
 
     completed, invocations = _run(tmp_path / "a", cwd=repo)
@@ -534,6 +553,24 @@ def test_wrapper_refuses_a_config_worktree_symlink(tmp_path: Path) -> None:
     assert completed.returncode == 2
     assert "symlink" in completed.stderr
     assert not any(argv[0] == "run" for argv in invocations)
+
+
+def test_wrapper_refuses_a_non_regular_config_worktree(tmp_path: Path) -> None:
+    """Creating the file with `: >` blocks on a FIFO, which dash opens and
+    waits on for a reader, so a non-regular file there is refused before the
+    write and before Docker mounts it as a file."""
+
+    for index, make in enumerate((os.mkfifo, lambda path: path.mkdir())):
+        repo = tmp_path / f"repo-{index}"
+        repo.mkdir()
+        subprocess.run(["git", "init", "--quiet", str(repo)], check=True)
+        make(repo / ".git/config.worktree")
+
+        completed, invocations = _run(tmp_path / f"run-{index}", cwd=repo)
+
+        assert completed.returncode == 2, index
+        assert "not a regular file" in completed.stderr, index
+        assert invocations == [], index
 
 
 def test_wrapper_refuses_a_symlinked_git_path(tmp_path: Path) -> None:
@@ -587,24 +624,6 @@ def test_wrapper_still_runs_a_repository_without_symlinked_git_paths(
     assert _docker_run(invocations)
 
 
-def test_wrapper_leaves_config_worktree_alone_without_worktree_config(
-    tmp_path: Path,
-) -> None:
-    """Git ignores .git/config.worktree when extensions.worktreeConfig is off,
-    so no mount is added and no file is created in the repository."""
-
-    repo = tmp_path / "repo"
-    repo.mkdir()
-    subprocess.run(["git", "init", "--quiet", str(repo)], check=True)
-
-    _, invocations = _run(tmp_path / "a", cwd=repo)
-    argv = _docker_run(invocations)
-    mounts = [argv[index + 1] for index, arg in enumerate(argv) if arg == "--mount"]
-
-    assert not any("config.worktree" in mount for mount in mounts)
-    assert not (repo / ".git/config.worktree").exists()
-
-
 def test_wrapper_leaves_a_git_file_and_a_plain_directory_alone(
     tmp_path: Path,
 ) -> None:
@@ -647,10 +666,17 @@ def test_wrapper_keeps_a_project_path_with_a_space_in_one_mount(
         f"type=bind,source={repo}/.git/config,target=/workspace/.git/config,readonly"
     ) in mounts
     assert (
+        f"type=bind,source={repo}/.git/config.worktree,"
+        "target=/workspace/.git/config.worktree,readonly"
+    ) in mounts
+    assert (
         f"type=bind,source={repo}/.git/worktrees,"
         "target=/workspace/.git/worktrees,readonly"
     ) in mounts
-    assert len(mounts) == 6
+    assert (
+        f"type=bind,source={repo}/.git/modules,target=/workspace/.git/modules,readonly"
+    ) in mounts
+    assert len(mounts) == 8
     assert all("target=" in mount for mount in mounts)
 
 
@@ -952,6 +978,31 @@ def test_wrapper_rejects_a_bogus_variable_name(tmp_path: Path) -> None:
     assert spaced_calls == []
 
 
+def test_wrapper_does_not_glob_the_variable_names_it_forwards(
+    tmp_path: Path,
+) -> None:
+    """The names are word-split from PI_SANDBOX_ENV, and an unquoted expansion
+    is also pathname-expanded, so a value like `*` was replaced by the
+    project's filenames. A file named after a secret then forwarded that host
+    variable, which the README says cannot happen: nothing is forwarded unless
+    named."""
+
+    project = tmp_path / "project"
+    project.mkdir()
+    (project / "LEAKED_SECRET").write_text("")
+
+    completed, invocations = _run(
+        tmp_path,
+        cwd=project,
+        forward="*",
+        also={"LEAKED_SECRET": "leaked-value"},
+    )
+
+    assert completed.returncode == 2
+    assert "invalid variable name" in completed.stderr
+    assert invocations == []
+
+
 def test_wrapper_keeps_the_container_unprivileged(tmp_path: Path) -> None:
     """Asserted rather than assumed: dropping one of these costs nothing that
     the rest of the suite would notice."""
@@ -1162,6 +1213,30 @@ def test_wrapper_and_readme_agree_on_how_to_remove_old_images(
     assert command in (ROOT / "README.md").read_text()
     assert "docker image prune --filter" not in completed.stderr
     assert "docker image prune --filter" not in (ROOT / "README.md").read_text()
+
+
+def test_ci_smoke_mirrors_the_wrapper_git_mounts(tmp_path: Path) -> None:
+    """The smoke job repeats the wrapper's mount list by hand, so it has to
+    name every part the wrapper protects. A part it omits is left writable
+    through the .git mount, and the smoke test then checks nothing there.
+    config.worktree was missed once the wrapper began mounting it
+    unconditionally."""
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "--quiet", str(repo)], check=True)
+
+    _, invocations = _run(tmp_path / "run", cwd=repo)
+    argv = _docker_run(invocations)
+    mounts = [
+        argv[index + 1]
+        for index, arg in enumerate(argv)
+        if arg == "--mount" and argv[index + 1].startswith("type=bind")
+    ]
+
+    workflow = (ROOT / ".github/workflows/ci.yml").read_text()
+    for mount in mounts:
+        assert mount.replace(str(repo), "/tmp/proj") in workflow, mount
 
 
 def test_wrapper_tags_the_image_by_content_and_uses_it_for_inspect_and_run(

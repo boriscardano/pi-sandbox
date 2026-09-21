@@ -100,6 +100,19 @@ case "$project" in
         ;;
 esac
 
+# A symlink at any of these is followed by Git, by the mkdir below and by the
+# bind mounts, so the agent can point the host's Git at a config it wrote, or
+# make this script create directories outside the project. The `.git` symlink
+# was reproduced: the next launch mounted the target read-write and the agent
+# read a host key from it. Refuse one rather than follow it, before the image
+# build and every mount, and whether or not this is a repository.
+for link in .git .git/config .git/hooks .git/modules .git/worktrees .git/config.worktree; do
+    if [ -L "$project/$link" ]; then
+        printf '%s\n' "refusing to run: $project/$link is a symlink, which Git and this script would follow outside the project, so inspect and remove it" >&2
+        exit 2
+    fi
+done
+
 # Extra host variables to forward, by name only. Names are validated so a
 # stray value cannot smuggle in another docker flag.
 extra_env=''
@@ -141,6 +154,7 @@ case "${1:-}" in
         chose_model=''
         chose_provider=''
         needs_key=''
+        wants_info=''
         model_next=''
         provider_next=''
         for arg in "$@"; do
@@ -161,6 +175,8 @@ case "${1:-}" in
             fi
             case "$arg" in
                 --) break ;;  # everything after this is a message, not a flag
+                # Pi prints these and exits without a model call.
+                --help | -h | --version | -v) wants_info=1 ;;
                 --model) chose_model=1; model_next=1 ;;
                 --model=opencode-go/*) chose_model=1; chose_provider=1; needs_key=1 ;;
                 --model=*/*) chose_model=1; chose_provider=1 ;;
@@ -183,8 +199,9 @@ esac
 
 # Required only when this run reaches opencode-go: the default provider the
 # case above supplies, the flag naming it, or a model under it. Another
-# provider's missing key is Pi's to complain about, not this wrapper's.
-if [ -n "${needs_key:-}" ] && [ -z "${OPENCODE_GO_API_KEY:-}" ]; then
+# provider's missing key is Pi's to complain about, not this wrapper's, and
+# --help, -h, --version and -v print and exit without a model call.
+if [ -n "${needs_key:-}" ] && [ -z "${wants_info:-}" ] && [ -z "${OPENCODE_GO_API_KEY:-}" ]; then
     printf '%s\n' "OPENCODE_GO_API_KEY is required" >&2
     printf '%s\n' \
         "get it with: pi auth print-api-key --provider opencode-go" >&2
@@ -253,14 +270,10 @@ if [ -d "$project/.git" ]; then
     # `git sparse-checkout init --cone` sets extensions.worktreeConfig, and git
     # then reads .git/config.worktree, which can name a command through
     # core.fsmonitor just as .git/config can. It is writable through the .git
-    # mount above unless it is covered too. A symlink there would be followed
-    # by Git and by this mount, so refuse one. `set -C` creates the file only
-    # when it is missing, without writing through a link.
+    # mount above unless it is covered too. A symlink there is refused above
+    # with the other git paths. `set -C` creates the file only when it is
+    # missing, without writing through a link.
     if [ "$(git -C "$project" config --type=bool --get extensions.worktreeConfig 2>/dev/null)" = true ]; then
-        if [ -L "$project/.git/config.worktree" ]; then
-            printf '%s\n' "refusing to run: $project/.git/config.worktree is a symlink, which Git would follow and run what it names" >&2
-            exit 2
-        fi
         (set -C; : > "$project/.git/config.worktree") 2>/dev/null || true
         set -- --mount "type=bind,source=$project/.git/config.worktree,target=/workspace/.git/config.worktree,readonly" "$@"
     fi
@@ -303,10 +316,16 @@ docker run \
 # Escape those characters before building the pattern.
 git_path=$(printf '%s' "$project" | sed 's/[][*?\\]/\\&/g')
 nested=''
-if ! nested=$(find "$project" -path "$git_path/.git" -prune -o \
+if ! found=$(find "$project" -path "$git_path/.git" -prune -o \
     \( -name .git -o -path '*/.git/config' -o -path '*/.git/hooks/*' \) \
     -cnewer "$marker" -print 2>/dev/null); then
     printf '%s\n' "pi-sandbox: warning: the nested-git check could not run because find failed, so the project was not scanned for nested git metadata" >&2
+else
+    # A `git init sub` writes sub/.git, its config and a hooks/*.sample for
+    # every hook, so one repository printed fifteen lines. Keep the `.git`
+    # path once and drop what is under it, matching the last `/.git` so a
+    # project path that itself contains one still names the right repository.
+    nested=$(printf '%s\n' "$found" | sed 's#\(.*\)/\.git/.*#\1/.git#' | sort -u)
 fi
 # A rebase, merge or cherry-pick the container planted makes the host's Git
 # report an operation in progress, and `git rebase --continue` then runs the

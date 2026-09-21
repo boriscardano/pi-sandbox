@@ -228,9 +228,9 @@ with `git -c user.name=... -c user.email=...`.
 `.git/worktrees` and, when the repository has them, `.git/modules` are mounted
 read-only inside it. The hooks directory and the worktrees directory are
 created first if they are missing, and the worktree config is created empty
-when Git would read it and it is not there. A symlink at
-`.git/config.worktree`, which Git and the mount would both follow, is refused
-rather than mounted.
+when Git would read it and it is not there. A symlink at `.git` or at any of
+those five paths is refused before the wrapper creates or mounts anything,
+because Git, the mount and the `mkdir` would all follow it outside the project.
 Git runs commands named in those places, through `core.fsmonitor`,
 `core.pager`, `core.hooksPath` and `filter.<name>.clean`, so leaving them
 writable would let the agent leave a command behind that you run yourself with

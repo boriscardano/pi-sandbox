@@ -36,7 +36,10 @@ exit 0
 # repository cannot be prevented by a mount, so the wrapper looks for it at
 # exit instead.
 NESTED_GIT = (
-    "mkdir -p sub/.git && printf '[core]\\n\\tfsmonitor = true\\n' > sub/.git/config"
+    "mkdir -p sub/.git/hooks && "
+    "printf '[core]\\n\\tfsmonitor = true\\n' > sub/.git/config && "
+    "printf '#!/bin/sh\\n' > sub/.git/hooks/pre-commit.sample && "
+    "printf '#!/bin/sh\\n' > sub/.git/hooks/post-commit.sample"
 )
 
 # Simulates a rebase the agent can plant. `exec` lines in the todo run when the
@@ -213,6 +216,29 @@ def test_wrapper_requires_the_key_for_an_opencode_go_model_or_provider(
     assert flag.returncode == 2
     assert "OPENCODE_GO_API_KEY is required" in flag.stderr
     assert flag_calls == []
+
+
+def test_wrapper_does_not_require_the_key_for_pi_help_or_version(
+    tmp_path: Path,
+) -> None:
+    """Pi prints these and exits without a model call, so requiring the key
+    would make the wrapper's own help and version unreachable without one.
+    The default provider and model are still prepended, as for any prompt."""
+
+    for index, flag in enumerate(("--help", "-h", "--version", "-v")):
+        completed, invocations = _run(tmp_path / f"run-{index}", flag, key=None)
+
+        assert completed.returncode == 0, flag
+        assert "OPENCODE_GO_API_KEY is required" not in completed.stderr, flag
+        argv = _docker_run(invocations)
+        image = _image(argv)
+        assert argv[argv.index(image) + 1 :] == [
+            "--provider",
+            "opencode-go",
+            "--model",
+            "deepseek-v4.1-flash",
+            flag,
+        ]
 
 
 def test_wrapper_mounts_only_the_chosen_project_and_a_state_volume(
@@ -449,6 +475,57 @@ def test_wrapper_refuses_a_config_worktree_symlink(tmp_path: Path) -> None:
     assert not any(argv[0] == "run" for argv in invocations)
 
 
+def test_wrapper_refuses_a_symlinked_git_path(tmp_path: Path) -> None:
+    """Git, the `mkdir` below and the bind mounts all follow a symlink, so the
+    agent can make the next launch create directories outside the project or
+    mount a host directory read-write. The `.git` case was reproduced: the
+    target's id_rsa was readable from the second session. Every path is
+    refused before anything is created or run."""
+
+    for index, relative in enumerate(
+        (
+            ".git",
+            ".git/config",
+            ".git/hooks",
+            ".git/modules",
+            ".git/worktrees",
+            ".git/config.worktree",
+        )
+    ):
+        project = tmp_path / f"project-{index}"
+        project.mkdir()
+        if relative != ".git":
+            (project / ".git").mkdir()
+        target = tmp_path / f"target-{index}"
+        target.mkdir()
+        (target / "keep").write_text("unchanged")
+        (project / relative).symlink_to(target)
+
+        completed, invocations = _run(tmp_path / f"run-{index}", cwd=project)
+
+        assert completed.returncode == 2, relative
+        assert "symlink" in completed.stderr, relative
+        assert str(project / relative) in completed.stderr, relative
+        assert invocations == [], relative
+        # Nothing was created through the link.
+        assert sorted(path.name for path in target.iterdir()) == ["keep"], relative
+
+
+def test_wrapper_still_runs_a_repository_without_symlinked_git_paths(
+    tmp_path: Path,
+) -> None:
+    """The refusal is only for symlinks: an ordinary repository still runs."""
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "--quiet", str(repo)], check=True)
+
+    completed, invocations = _run(tmp_path / "run", cwd=repo)
+
+    assert completed.returncode == 0
+    assert _docker_run(invocations)
+
+
 def test_wrapper_leaves_config_worktree_alone_without_worktree_config(
     tmp_path: Path,
 ) -> None:
@@ -533,14 +610,44 @@ def test_wrapper_warns_about_nested_git_metadata_the_container_left(
 ) -> None:
     """A nested `git init sub` cannot be stopped by a mount, and on Docker
     Desktop the host user owns what the agent writes, so host git trusts a
-    config or hook there. Detect it at exit instead of preventing it."""
+    config or hook there. Detect it at exit instead of preventing it, and
+    print each repository once: its .git, not its config and every hook."""
 
     completed, _ = _run(tmp_path, agent=NESTED_GIT)
 
     assert completed.returncode == 0
-    assert "nested git metadata" in completed.stderr
-    assert str(tmp_path / "project/sub/.git") in completed.stderr
-    assert "inspect it" in completed.stderr
+    lines = completed.stderr.splitlines()
+    start = lines.index(
+        "pi-sandbox: warning: the container left nested git metadata in the project:"
+    )
+    assert lines[start + 1] == str(tmp_path / "project/sub/.git")
+    assert lines[start + 2].startswith("your host git trusts it")
+    assert "sub/.git/config" not in completed.stderr
+    assert "sub/.git/hooks" not in completed.stderr
+
+
+def test_wrapper_prints_one_line_per_nested_repository(tmp_path: Path) -> None:
+    """Deduplicating by `.git` path keeps two repositories to two lines even
+    though find reports each one's config and hooks too."""
+
+    completed, _ = _run(
+        tmp_path,
+        agent=(
+            "mkdir -p one/.git/hooks two/.git/hooks && "
+            "touch one/.git/config two/.git/config "
+            "one/.git/hooks/pre-commit.sample two/.git/hooks/pre-commit.sample"
+        ),
+    )
+
+    lines = completed.stderr.splitlines()
+    start = lines.index(
+        "pi-sandbox: warning: the container left nested git metadata in the project:"
+    )
+    assert lines[start + 1 : start + 3] == [
+        str(tmp_path / "project/one/.git"),
+        str(tmp_path / "project/two/.git"),
+    ]
+    assert lines[start + 3].startswith("your host git trusts it")
 
 
 def test_wrapper_stays_quiet_when_the_container_leaves_no_nested_git(

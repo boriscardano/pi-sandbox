@@ -69,7 +69,9 @@ Mounted:
 
 - the project you launched from, at `/workspace`, read-write. Inside a Git
   repository this is the repository root, even when you launch from a
-  subdirectory.
+  subdirectory. It is found from the nearest `.git` up the tree, not from
+  `git rev-parse --show-toplevel`, whose answer a planted `core.worktree` or
+  `.git` file can point at any host directory.
 - a per-project Docker volume at `/home/agent` for Pi's own state.
 - inside a Git repository, `.git` itself is bind-mounted over the project, so
   it cannot be renamed away, and the parts of it that can name a command are
@@ -353,6 +355,11 @@ volume, and checks `herdr.dev` for updates on a timer like any other Herdr.
   after `docker run` returns, so they do not run at all if the wrapper itself
   is killed, and anything they find has already been written to your checkout.
   They warn rather than fixing.
+- A planted `.git` can also make the next launch hang rather than start. The
+  wrapper reads `.git/config` with git before it mounts anything, and an
+  `include.path` naming a FIFO, or a `config.worktree` that is a FIFO while
+  `extensions.worktreeConfig` is on, blocks that read. It fails closed, so no
+  container starts, and the file is in your checkout to remove.
 - If the script lives inside the project it mounts, the agent can edit the
   script that defines its own sandbox, which would take effect on the next
   launch. Keeping it in its own directory, as here, avoids that.

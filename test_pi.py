@@ -268,6 +268,67 @@ def test_wrapper_mounts_the_git_root_when_run_from_a_subdirectory(
     assert f"type=bind,source={repo},target=/workspace" in _docker_run(invocations)
 
 
+def test_wrapper_mounts_the_launch_directory_not_a_planted_worktree(
+    tmp_path: Path,
+) -> None:
+    """The repository is found from the nearest `.git`, not from git.
+    `git rev-parse --show-toplevel` honours `core.worktree`, which lives in
+    .git/config and so can be written by the container. It was reproduced:
+    after the agent set `core.worktree = /etc`, the next launch bind-mounted
+    the host's /etc at /workspace with no warning. An ancestor with no `.git`
+    of its own is the same escape with a narrower target, and containment
+    alone would not stop it."""
+
+    home = tmp_path / "home"
+    outer = tmp_path / "outer"
+    for index, target in enumerate(("/etc", str(outer))):
+        repo = outer / f"repo-{index}"
+        repo.mkdir(parents=True)
+        subprocess.run(["git", "init", "--quiet", str(repo)], check=True)
+        subprocess.run(
+            ["git", "-C", str(repo), "config", "core.worktree", target],
+            check=True,
+        )
+
+        completed, invocations = _run(tmp_path / f"run-{index}", cwd=repo, home=home)
+        argv = _docker_run(invocations)
+        mounts = [
+            argv[position + 1] for position, arg in enumerate(argv) if arg == "--mount"
+        ]
+
+        assert completed.returncode == 0, target
+        assert f"type=bind,source={repo},target=/workspace" in mounts, target
+        assert not any(f"source={target}," in mount for mount in mounts), target
+
+
+def test_wrapper_ignores_a_dot_git_file_that_redirects_the_worktree(
+    tmp_path: Path,
+) -> None:
+    """A `.git` file names a git directory the container can build inside the
+    project, and `core.worktree` there makes git report a host directory. The
+    launch directory's own `.git` names the repository instead."""
+
+    project = tmp_path / "project"
+    project.mkdir()
+    gitdir = project / "built"
+    subprocess.run(["git", "init", "--quiet", str(gitdir)], check=True)
+    subprocess.run(
+        ["git", "-C", str(gitdir), "config", "core.worktree", "/etc"],
+        check=True,
+    )
+    (project / ".git").write_text(f"gitdir: {gitdir}/.git\n")
+
+    completed, invocations = _run(tmp_path / "run", cwd=project)
+    argv = _docker_run(invocations)
+    mounts = [
+        argv[position + 1] for position, arg in enumerate(argv) if arg == "--mount"
+    ]
+
+    assert completed.returncode == 0
+    assert f"type=bind,source={project},target=/workspace" in mounts
+    assert not any("source=/etc," in mount for mount in mounts)
+
+
 def test_wrapper_mounts_git_config_and_hooks_read_only(tmp_path: Path) -> None:
     """A writable .git/config or hook is a command the host runs the next time
     the owner touches the checkout: `git status` and `git commit` honour
@@ -624,6 +685,43 @@ def test_wrapper_warns_about_nested_git_metadata_the_container_left(
     assert lines[start + 2].startswith("your host git trusts it")
     assert "sub/.git/config" not in completed.stderr
     assert "sub/.git/hooks" not in completed.stderr
+
+
+def test_wrapper_warns_about_a_root_git_the_container_created(
+    tmp_path: Path,
+) -> None:
+    """In a project that is not a repository at launch nothing is mounted over
+    `.git`, so the container can `git init .` and leave a root `.git` whose
+    config or hooks the host would trust. Pruning the root `.git`
+    unconditionally, as when it was protected, hid it. It is reported like a
+    nested one instead."""
+
+    completed, _ = _run(
+        tmp_path,
+        agent="git init -q . && git config core.fsmonitor true",
+    )
+
+    lines = completed.stderr.splitlines()
+    start = lines.index(
+        "pi-sandbox: warning: the container left nested git metadata in the project:"
+    )
+    assert lines[start + 1] == str(tmp_path / "project/.git")
+    assert lines[start + 2].startswith("your host git trusts it")
+
+
+def test_wrapper_does_not_report_the_protected_root_git(tmp_path: Path) -> None:
+    """The repository's own `.git` is mounted over at launch, so its ctime
+    moving when the agent commits is expected and must not be reported as
+    nested metadata the container left."""
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "--quiet", str(repo)], check=True)
+
+    completed, _ = _run(tmp_path / "run", cwd=repo, agent="touch .git")
+
+    assert completed.returncode == 0
+    assert "nested git metadata" not in completed.stderr
 
 
 def test_wrapper_prints_one_line_per_nested_repository(tmp_path: Path) -> None:

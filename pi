@@ -72,12 +72,25 @@ image_tag=$(
 )
 image=pi-sandbox:$image_tag
 
-# The repository to mount: the git root when there is one, else the cwd. This
+# The repository to mount: the nearest directory at or above the launch
+# directory that holds a `.git`, either the directory itself or the file a
+# linked worktree or submodule checkout uses, else the launch directory. This
 # is what makes the script work for any project instead of one checkout.
-if project=$(git rev-parse --show-toplevel 2>/dev/null) && [ -n "$project" ]; then
-    :
-else
-    project=$(pwd)
+#
+# Git is deliberately not asked. `git rev-parse --show-toplevel` honours
+# `core.worktree` in .git/config and the `gitdir` in a `.git` file, and both
+# live in the project, so the container can write them. A value the agent left
+# there made git name any host directory and the wrapper mounted it: with
+# `core.worktree = /etc` the next launch bind-mounted the host's /etc at
+# /workspace, and a path under the home directory would have exposed it the
+# same way. The nearest `.git` cannot be moved by a config value.
+launch_dir=$(pwd)
+project=$launch_dir
+while [ "$project" != / ] && [ ! -e "$project/.git" ]; do
+    project=$(dirname -- "$project")
+done
+if [ ! -e "$project/.git" ]; then
+    project=$launch_dir
 fi
 project=$(CDPATH= cd -- "$project" && pwd)
 
@@ -239,6 +252,9 @@ trap : INT
 set -- "$image" "$@"
 set -- --mount "type=volume,source=$state_volume,target=/home/agent" "$@"
 if [ -d "$project/.git" ]; then
+    # Remembered for the exit check: a root `.git` this launch protected is the
+    # one the container could not have replaced, and is the only one to prune.
+    protected_git=1
     # Mounting .git itself makes it a mount point, which cannot be renamed or
     # removed. Without it the agent can `mv .git .git-old`, build a fresh .git
     # with its own config and hooks, and the host runs what it names. The parts
@@ -307,16 +323,27 @@ docker run \
     --mount "type=bind,source=$project,target=/workspace" \
     "$@" || docker_status=$?
 
-# Prune the project's own .git, which is protected, and look for nested git
-# metadata the container created. Warn only, never delete.
+# Prune the project's own .git, but only when this launch protected it with a
+# mount, and look for nested git metadata the container created. Warn only,
+# never delete.
+#
+# In a project that was not a repository at launch nothing was mounted over
+# `.git`, so the container can create a root `.git`, file or directory, whose
+# config, hooks or `core.worktree` the host would then trust. Pruning the root
+# unconditionally hid it. An empty pattern matches nothing, so find descends
+# into it and reports it like a nested one.
 #
 # `-path` takes a glob, so a `[`, `*` or `?` in the project path would stop the
 # prune from matching the root `.git`: with `[x]` the protected root is
 # reported as nested, and with `*` a real nested one is pruned away and missed.
 # Escape those characters before building the pattern.
 git_path=$(printf '%s' "$project" | sed 's/[][*?\\]/\\&/g')
+git_prune=''
+if [ -n "${protected_git:-}" ]; then
+    git_prune=$git_path/.git
+fi
 nested=''
-if ! found=$(find "$project" -path "$git_path/.git" -prune -o \
+if ! found=$(find "$project" -path "$git_prune" -prune -o \
     \( -name .git -o -path '*/.git/config' -o -path '*/.git/hooks/*' \) \
     -cnewer "$marker" -print 2>/dev/null); then
     printf '%s\n' "pi-sandbox: warning: the nested-git check could not run because find failed, so the project was not scanned for nested git metadata" >&2

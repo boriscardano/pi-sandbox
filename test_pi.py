@@ -36,8 +36,7 @@ exit 0
 # repository cannot be prevented by a mount, so the wrapper looks for it at
 # exit instead.
 NESTED_GIT = (
-    "mkdir -p sub/.git && printf '[core]\\n\\tfsmonitor = true\\n' "
-    "> sub/.git/config"
+    "mkdir -p sub/.git && printf '[core]\\n\\tfsmonitor = true\\n' > sub/.git/config"
 )
 
 
@@ -104,6 +103,7 @@ def _run(
         text=True,
         cwd=project,
         env=env,
+        check=False,
     )
     invocations = [
         [line for line in block.splitlines() if line and not line.startswith("PARENT=")]
@@ -246,12 +246,10 @@ def test_wrapper_mounts_git_config_and_hooks_read_only(tmp_path: Path) -> None:
     assert mounts[0] == f"type=bind,source={repo},target=/workspace"
     assert mounts[1] == f"type=bind,source={repo}/.git,target=/workspace/.git"
     assert mounts[2] == (
-        f"type=bind,source={repo}/.git/config,"
-        "target=/workspace/.git/config,readonly"
+        f"type=bind,source={repo}/.git/config,target=/workspace/.git/config,readonly"
     )
     assert mounts[3] == (
-        f"type=bind,source={repo}/.git/hooks,"
-        "target=/workspace/.git/hooks,readonly"
+        f"type=bind,source={repo}/.git/hooks,target=/workspace/.git/hooks,readonly"
     )
     # A fresh repository has no modules, and the state volume is still last.
     assert len(mounts) == 5
@@ -297,8 +295,7 @@ def test_wrapper_creates_a_missing_git_hooks_directory(tmp_path: Path) -> None:
 
     assert (project / ".git/hooks").is_dir()
     assert (
-        f"type=bind,source={project}/.git/hooks,"
-        "target=/workspace/.git/hooks,readonly"
+        f"type=bind,source={project}/.git/hooks,target=/workspace/.git/hooks,readonly"
     ) in mounts
 
 
@@ -359,11 +356,7 @@ def test_wrapper_leaves_a_git_file_and_a_plain_directory_alone(
 
     for invocations in (linked_calls, plain_calls):
         argv = _docker_run(invocations)
-        mounts = [
-            argv[index + 1]
-            for index, arg in enumerate(argv)
-            if arg == "--mount"
-        ]
+        mounts = [argv[index + 1] for index, arg in enumerate(argv) if arg == "--mount"]
         assert len(mounts) == 2
 
 
@@ -384,8 +377,7 @@ def test_wrapper_keeps_a_project_path_with_a_space_in_one_mount(
     assert f"type=bind,source={repo},target=/workspace" in mounts
     assert f"type=bind,source={repo}/.git,target=/workspace/.git" in mounts
     assert (
-        f"type=bind,source={repo}/.git/config,"
-        "target=/workspace/.git/config,readonly"
+        f"type=bind,source={repo}/.git/config,target=/workspace/.git/config,readonly"
     ) in mounts
     assert len(mounts) == 5
     assert all("target=" in mount for mount in mounts)
@@ -757,9 +749,7 @@ def test_wrapper_builds_with_the_host_ids_on_linux(tmp_path: Path) -> None:
         ["id", "-g"], capture_output=True, text=True, check=True
     ).stdout.strip()
 
-    args = [
-        build[index + 1] for index, arg in enumerate(build) if arg == "--build-arg"
-    ]
+    args = [build[index + 1] for index, arg in enumerate(build) if arg == "--build-arg"]
     assert args == [f"AGENT_UID={real_uid}", f"AGENT_GID={real_gid}"]
 
 

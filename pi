@@ -194,7 +194,7 @@ fi
 if ! docker image inspect "$image" >/dev/null 2>&1; then
     printf '%s\n' "building $image" >&2
     printf '%s\n' \
-        "older pi-sandbox images can be removed with: docker image prune --filter label=pi-sandbox.image=1" >&2
+        "older pi-sandbox images can be removed with: docker image prune -a --filter label=pi-sandbox.image=1 (this also removes the current image, which the next launch rebuilds)" >&2
     # shellcheck disable=SC2086  # empty off Linux, two words on it
     docker build --file "$dockerfile" --tag "$image" $build_args "$(dirname -- "$dockerfile")"
 fi
@@ -239,6 +239,20 @@ if [ -d "$project/.git" ]; then
         set -- --mount "type=bind,source=$project/.git/modules,target=/workspace/.git/modules,readonly" "$@"
     fi
     set -- --mount "type=bind,source=$project/.git/hooks,target=/workspace/.git/hooks,readonly" "$@"
+    # `git sparse-checkout init --cone` sets extensions.worktreeConfig, and git
+    # then reads .git/config.worktree, which can name a command through
+    # core.fsmonitor just as .git/config can. It is writable through the .git
+    # mount above unless it is covered too. A symlink there would be followed
+    # by Git and by this mount, so refuse one. `set -C` creates the file only
+    # when it is missing, without writing through a link.
+    if [ "$(git -C "$project" config --type=bool --get extensions.worktreeConfig 2>/dev/null)" = true ]; then
+        if [ -L "$project/.git/config.worktree" ]; then
+            printf '%s\n' "refusing to run: $project/.git/config.worktree is a symlink, which Git would follow and run what it names" >&2
+            exit 2
+        fi
+        (set -C; : > "$project/.git/config.worktree") 2>/dev/null || true
+        set -- --mount "type=bind,source=$project/.git/config.worktree,target=/workspace/.git/config.worktree,readonly" "$@"
+    fi
     set -- --mount "type=bind,source=$project/.git/config,target=/workspace/.git/config,readonly" "$@"
     set -- --mount "type=bind,source=$project/.git,target=/workspace/.git" "$@"
 fi
@@ -271,9 +285,18 @@ docker run \
 
 # Prune the project's own .git, which is protected, and look for nested git
 # metadata the container created. Warn only, never delete.
-nested=$(find "$project" -path "$project/.git" -prune -o \
+#
+# `-path` takes a glob, so a `[`, `*` or `?` in the project path would stop the
+# prune from matching the root `.git`: with `[x]` the protected root is
+# reported as nested, and with `*` a real nested one is pruned away and missed.
+# Escape those characters before building the pattern.
+git_path=$(printf '%s' "$project" | sed 's/[][*?\\]/\\&/g')
+nested=''
+if ! nested=$(find "$project" -path "$git_path/.git" -prune -o \
     \( -name .git -o -path '*/.git/config' -o -path '*/.git/hooks/*' \) \
-    -cnewer "$marker" -print) || nested=''
+    -cnewer "$marker" -print 2>/dev/null); then
+    printf '%s\n' "pi-sandbox: warning: the nested-git check could not run because find failed, so the project was not scanned for nested git metadata" >&2
+fi
 rm -f "$marker"
 if [ -n "$nested" ]; then
     printf '%s\n' "pi-sandbox: warning: the container left nested git metadata in the project:" >&2

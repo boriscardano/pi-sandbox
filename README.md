@@ -60,7 +60,8 @@ Edits to `Dockerfile.pi`, `entrypoint.sh` or `herdr-fleet.md` rebuild
 automatically on the next launch. The image is tagged by the contents of those
 files, so a changed file produces a tag that does not exist yet and the wrapper
 builds it before starting. Each build leaves the older images behind. Remove
-them with `docker image prune --filter label=pi-sandbox.image=1`.
+them with `docker image prune -a --filter label=pi-sandbox.image=1`, which also
+removes the current image, and the next launch rebuilds it.
 
 ## What the container can and cannot see
 
@@ -72,8 +73,9 @@ Mounted:
 - a per-project Docker volume at `/home/agent` for Pi's own state.
 - inside a Git repository, `.git` itself is bind-mounted over the project, so
   it cannot be renamed away, and the parts of it that can name a command are
-  then mounted read-only inside it: `.git/config`, `.git/hooks` and, when it
-  exists, `.git/modules`.
+  then mounted read-only inside it: `.git/config`, `.git/config.worktree` when
+  `extensions.worktreeConfig` is on, `.git/hooks` and, when it exists,
+  `.git/modules`.
 
 Not mounted, and unreachable: your home directory, `~/.ssh`, `~/.aws`,
 `~/.config`, the system keychain, every other project, the Docker socket, your
@@ -82,7 +84,8 @@ The script refuses to start if the directory it would mount is your home
 directory, contains it, is `/`, or has a comma in its path, which Docker's
 `--mount` syntax would read as another field.
 
-The container runs as non-root (`agent`, uid 1001) with `--cap-drop ALL`,
+The container runs as non-root (`agent`, your own uid and gid on Linux and
+1001 on Docker Desktop) with `--cap-drop ALL`,
 `--security-opt no-new-privileges` and `--pids-limit 512`. No `--privileged`,
 and no host PID, IPC or network namespace. Outbound networking is on, since the
 agent has to reach the model API. No port is published.
@@ -221,8 +224,12 @@ because the mounted files belong to the host user, and commits use the identity
 with `git -c user.name=... -c user.email=...`.
 
 `.git` itself is bind-mounted over the project, and then `.git/config`,
-`.git/hooks` and, when the repository has them, `.git/modules` are mounted
-read-only inside it. The hooks directory is created first if it is missing.
+`.git/config.worktree` when `extensions.worktreeConfig` is on, `.git/hooks`
+and, when the repository has them, `.git/modules` are mounted read-only inside
+it. The hooks directory is created first if it is missing, and the worktree
+config is created empty when Git would read it and it is not there. A symlink
+at `.git/config.worktree`, which Git and the mount would both follow, is
+refused rather than mounted.
 Git runs commands named in those places, through `core.fsmonitor`,
 `core.pager`, `core.hooksPath` and `filter.<name>.clean`, so leaving them
 writable would let the agent leave a command behind that you run yourself with

@@ -4,7 +4,7 @@
 FROM node@sha256:0e0ff40c39bc087845bfb27465a0df4ea419520094bc35842ff83dd8cbe6f9b6
 
 # The wrapper tags each build by the contents of its inputs, so older images
-# accumulate. This one line is what `docker image prune --filter
+# accumulate. This one line is what `docker image prune -a --filter
 # label=pi-sandbox.image=1` targets.
 LABEL pi-sandbox.image=1
 
@@ -79,20 +79,13 @@ ARG AGENT_UID=1001
 ARG AGENT_GID=1001
 
 # Own the home directory in the image layer so the first run of the named state
-# volume inherits that ownership instead of coming back root-owned. The group
-# stays named agent so the COPY --chown below resolves for any gid, and a host
-# gid that already exists in the image (gid 100 is users) is reused as agent's
-# primary group rather than refused.
-RUN set -eu; \
-    if getent group "$AGENT_GID" >/dev/null; then \
-        primary=$(getent group "$AGENT_GID" | cut -d: -f1 | head -n 1); \
-        groupadd --non-unique --gid "$AGENT_GID" agent; \
-    else \
-        primary=agent; \
-        groupadd --gid "$AGENT_GID" agent; \
-    fi; \
-    useradd --create-home --shell /bin/bash --uid "$AGENT_UID" \
-        --gid "$primary" agent
+# volume inherits that ownership instead of coming back root-owned. The group is
+# always named agent so the COPY --chown below resolves for any gid. --non-unique
+# lets it take a gid that already exists in the image (gid 100 is users) without
+# refusing to build.
+RUN groupadd --non-unique --gid "$AGENT_GID" agent \
+    && useradd --create-home --shell /bin/bash --uid "$AGENT_UID" \
+        --gid agent agent
 ENV HOME=/home/agent
 
 # Keep uv's virtualenv out of /workspace: the host checkout carries a macOS

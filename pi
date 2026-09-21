@@ -44,6 +44,24 @@ if [ "$project" = "${HOME%/}" ] || case "${HOME%/}/" in "$project"/*) true ;; *)
     exit 2
 fi
 
+# Parts of .git that can name a command are layered read-only over the
+# read-write project mount, so a hook or a config key the agent writes cannot
+# make an ordinary `git status` or `git commit` on the host run it. Only a real
+# .git directory is protected: when .git is a file (a linked worktree or a
+# submodule checkout) the real git directory is outside the mount, git does not
+# work in the container anyway, and there is nothing in it to protect.
+git_mounts=''
+if [ -d "$project/.git" ]; then
+    # Created first on purpose. Without the directory the agent could make its
+    # own and leave a hook in it for the host to run.
+    mkdir -p "$project/.git/hooks"
+    git_mounts="--mount type=bind,source=$project/.git/config,target=/workspace/.git/config,readonly --mount type=bind,source=$project/.git/hooks,target=/workspace/.git/hooks,readonly"
+    # Submodule configs carry the same hook and filter keys as .git/config.
+    if [ -d "$project/.git/modules" ]; then
+        git_mounts="$git_mounts --mount type=bind,source=$project/.git/modules,target=/workspace/.git/modules,readonly"
+    fi
+fi
+
 # Extra host variables to forward, by name only. Names are validated so a
 # stray value cannot smuggle in another docker flag.
 extra_env=''
@@ -164,5 +182,6 @@ docker run \
     --env TERM=xterm-256color \
     --env COLORTERM=truecolor \
     --mount "type=bind,source=$project,target=/workspace" \
+    $git_mounts \
     --mount "type=volume,source=$state_volume,target=/home/agent" \
     "$image" "$@"

@@ -61,6 +61,10 @@ Mounted:
   repository this is the repository root, even when you launch from a
   subdirectory.
 - a per-project Docker volume at `/home/agent` for Pi's own state.
+- inside a Git repository, the parts of `.git` that can name a command are
+  mounted read-only over the project, so the agent cannot leave one there for
+  your host Git to run: `.git/config`, `.git/hooks` and, when it exists,
+  `.git/modules`.
 
 Not mounted, and unreachable: your home directory, `~/.ssh`, `~/.aws`,
 `~/.config`, the system keychain, every other project, the Docker socket, your
@@ -206,6 +210,19 @@ because the mounted files belong to the host user, and commits use the identity
 `Pi Sandbox <pi-sandbox@localhost>` rather than yours. Override it per commit
 with `git -c user.name=... -c user.email=...`.
 
+`.git/config`, `.git/hooks` and, when the repository has them, `.git/modules`
+are mounted read-only over the project, and the hooks directory is created
+first if it is missing. Git runs commands named in those places, through
+`core.fsmonitor`, `core.pager`, `core.hooksPath` and `filter.<name>.clean`, so
+leaving them writable would let the agent leave a command behind that you run
+yourself with the next `git status`. The cost is that anything writing there
+fails in the sandbox: `git config`, `git remote add`, installing a hook and
+most `git submodule` operations. Do those on the host. `git add`, `git commit`
+and the rest still work, because they write to `.git/index`, `.git/objects`
+and `.git/refs`, which stay writable. A linked worktree or a submodule
+checkout keeps its real Git directory outside the mount and gets no such
+protection, and Git does not work in the sandbox for it anyway.
+
 No credentials are mounted, so `git push` fails inside the sandbox by design.
 Push from the host after reviewing the diff.
 
@@ -277,6 +294,10 @@ volume, and checks `herdr.dev` for updates on a timer like any other Herdr.
 - The mounted project is fully readable and writable by the agent. Only launch
   it from a project whose contents you are willing to send to the model
   provider, and keep a remote you can restore from.
+- Protecting `.git` does not make the checkout safe to run. The agent can still
+  write `.envrc` for direnv, a `Makefile`, `package.json` scripts, editor task
+  files and the code itself, all of which your host may execute later. Review
+  the diff before running anything from a checkout the agent has touched.
 - If the script lives inside the project it mounts, the agent can edit the
   script that defines its own sandbox, which would take effect on the next
   launch. Keeping it in its own directory, as here, avoids that.
@@ -300,13 +321,13 @@ uv run --with pytest pytest
 ```
 
 The tests use a fake `docker` on `PATH`, so they neither build an image nor
-start a container. They assert the isolation properties: only the two expected
-mounts, the keys forwarded by name and never by value, the sandboxing flags
-present and no privileged or host namespace flags, the home-directory refusal,
-and that a Herdr pane's socket stays on the host. The rest read `Dockerfile.pi`
-or run `entrypoint.sh` against stub binaries and a throwaway home, for the
-default model, where the subscription key is written, and what happens when the
-agent has ruined the file it is written to.
+start a container. They assert the isolation properties: the expected mounts
+and no others, the keys forwarded by name and never by value, the sandboxing
+flags present and no privileged or host namespace flags, the home-directory
+refusal, and that a Herdr pane's socket stays on the host. The rest read
+`Dockerfile.pi` or run `entrypoint.sh` against stub binaries and a throwaway
+home, for the default model, where the subscription key is written, and what
+happens when the agent has ruined the file it is written to.
 
 ## License
 

@@ -131,6 +131,112 @@ def test_wrapper_mounts_the_git_root_when_run_from_a_subdirectory(
     assert f"type=bind,source={repo},target=/workspace" in _docker_run(invocations)
 
 
+def test_wrapper_mounts_git_config_and_hooks_read_only(tmp_path: Path) -> None:
+    """A writable .git/config or hook is a command the host runs the next time
+    the owner touches the checkout: `git status` and `git commit` honour
+    core.fsmonitor, core.pager, core.hooksPath and filter.<name>.clean."""
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "--quiet", str(repo)], check=True)
+
+    _, invocations = _run(tmp_path, cwd=repo)
+    argv = _docker_run(invocations)
+    mounts = [argv[index + 1] for index, arg in enumerate(argv) if arg == "--mount"]
+
+    assert mounts[0] == f"type=bind,source={repo},target=/workspace"
+    assert mounts[1] == (
+        f"type=bind,source={repo}/.git/config,"
+        "target=/workspace/.git/config,readonly"
+    )
+    assert mounts[2] == (
+        f"type=bind,source={repo}/.git/hooks,"
+        "target=/workspace/.git/hooks,readonly"
+    )
+    # A fresh repository has no modules, and the state volume is still last.
+    assert len(mounts) == 4
+    assert mounts[3].startswith("type=volume,source=pi-sandbox-")
+    assert mounts[3].endswith(",target=/home/agent")
+
+
+def test_wrapper_creates_a_missing_git_hooks_directory(tmp_path: Path) -> None:
+    """Skipping the mount because the directory is absent would leave the
+    agent free to create it and put a hook there for the host to run."""
+
+    project = tmp_path / "project"
+    (project / ".git").mkdir(parents=True)
+    (project / ".git/config").write_text("[core]\n\trepositoryformatversion = 0\n")
+
+    _, invocations = _run(tmp_path, cwd=project)
+    argv = _docker_run(invocations)
+    mounts = [argv[index + 1] for index, arg in enumerate(argv) if arg == "--mount"]
+
+    assert (project / ".git/hooks").is_dir()
+    assert (
+        f"type=bind,source={project}/.git/hooks,"
+        "target=/workspace/.git/hooks,readonly"
+    ) in mounts
+
+
+def test_wrapper_mounts_git_modules_only_when_present(tmp_path: Path) -> None:
+    """Submodule configs carry the same keys, so they get the same treatment,
+    and a repository without the directory gets no mount that would fail."""
+
+    with_modules = tmp_path / "with-modules"
+    without = tmp_path / "without"
+    for repo in (with_modules, without):
+        repo.mkdir()
+        subprocess.run(["git", "init", "--quiet", str(repo)], check=True)
+    (with_modules / ".git/modules").mkdir()
+
+    _, present = _run(tmp_path / "a", cwd=with_modules)
+    _, absent = _run(tmp_path / "b", cwd=without)
+    present_argv = _docker_run(present)
+    absent_argv = _docker_run(absent)
+    present_mounts = [
+        present_argv[index + 1]
+        for index, arg in enumerate(present_argv)
+        if arg == "--mount"
+    ]
+    absent_mounts = [
+        absent_argv[index + 1]
+        for index, arg in enumerate(absent_argv)
+        if arg == "--mount"
+    ]
+
+    assert (
+        f"type=bind,source={with_modules}/.git/modules,"
+        "target=/workspace/.git/modules,readonly"
+    ) in present_mounts
+    assert not any(".git/modules" in mount for mount in absent_mounts)
+
+
+def test_wrapper_leaves_a_git_file_and_a_plain_directory_alone(
+    tmp_path: Path,
+) -> None:
+    """A linked worktree or a submodule checkout has .git as a file pointing
+    outside the mount, so there is nothing inside it to protect, and a
+    non-repository gets no extra mounts at all."""
+
+    linked = tmp_path / "linked"
+    plain = tmp_path / "plain"
+    linked.mkdir()
+    plain.mkdir()
+    (linked / ".git").write_text("gitdir: /elsewhere/.git/worktrees/linked\n")
+
+    _, linked_calls = _run(tmp_path / "a", cwd=linked)
+    _, plain_calls = _run(tmp_path / "b", cwd=plain)
+
+    for invocations in (linked_calls, plain_calls):
+        argv = _docker_run(invocations)
+        mounts = [
+            argv[index + 1]
+            for index, arg in enumerate(argv)
+            if arg == "--mount"
+        ]
+        assert len(mounts) == 2
+
+
 def test_wrapper_gives_each_project_its_own_state_volume(tmp_path: Path) -> None:
     one = tmp_path / "one"
     two = tmp_path / "two"

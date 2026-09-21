@@ -59,9 +59,33 @@ RUN git config --system --add safe.directory /workspace \
     && git config --system user.name 'Pi Sandbox' \
     && git config --system user.email 'pi-sandbox@localhost'
 
+# The base image carries a node user and group at 1000:1000, the common Linux
+# host uid and gid. Remove them so agent can take those ids rather than have a
+# second user sharing them.
+RUN userdel --remove node 2>/dev/null || true; \
+    groupdel node 2>/dev/null || true
+
+# On Linux the wrapper builds with the host uid and gid, because a bind mount
+# keeps the host ownership. The defaults leave Docker Desktop images, and the
+# state volumes they already own as 1001, unchanged.
+ARG AGENT_UID=1001
+ARG AGENT_GID=1001
+
 # Own the home directory in the image layer so the first run of the named state
-# volume inherits that ownership instead of coming back root-owned.
-RUN useradd --create-home --shell /bin/bash agent
+# volume inherits that ownership instead of coming back root-owned. The group
+# stays named agent so the COPY --chown below resolves for any gid, and a host
+# gid that already exists in the image (gid 100 is users) is reused as agent's
+# primary group rather than refused.
+RUN set -eu; \
+    if getent group "$AGENT_GID" >/dev/null; then \
+        primary=$(getent group "$AGENT_GID" | cut -d: -f1 | head -n 1); \
+        groupadd --non-unique --gid "$AGENT_GID" agent; \
+    else \
+        primary=agent; \
+        groupadd --gid "$AGENT_GID" agent; \
+    fi; \
+    useradd --create-home --shell /bin/bash --uid "$AGENT_UID" \
+        --gid "$primary" agent
 ENV HOME=/home/agent
 
 # Keep uv's virtualenv out of /workspace: the host checkout carries a macOS

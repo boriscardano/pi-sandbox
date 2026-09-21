@@ -36,15 +36,34 @@ else
     exit 2
 fi
 
+# On Linux the bind mount keeps the host uid and gid, so build the image with
+# them and append them to the tag input: two host users, or a changed uid, get
+# their own image. Docker Desktop maps the mounted files to the container user,
+# so there the defaults keep the images and volumes that already exist. Running
+# as root would make the container user uid 0 and leave root-owned files in the
+# project, so refuse it.
+build_args=''
+host_ids=''
+if [ "$(uname -s)" = Linux ]; then
+    if [ "$(id -u)" -eq 0 ]; then
+        printf '%s\n' "refusing to run as root: the container user would be uid 0 and the project's files would end up root-owned" >&2
+        exit 2
+    fi
+    host_ids=$(id -u):$(id -g)
+    build_args="--build-arg AGENT_UID=$(id -u) --build-arg AGENT_GID=$(id -g)"
+fi
+
 # Tag the image by the contents of the files that build it, so a `git pull`
 # that changes one produces a tag that does not exist yet and the build below
 # rebuilds it instead of silently running the old image. The files are hashed
-# in this fixed order, and extra inputs (Linux build arguments, later) can be
-# appended to the same list.
+# in this fixed order, and the Linux host ids are appended to the same list.
 image_tag=$(
-    cat "$dockerfile" \
-        "$script_dir/entrypoint.sh" \
-        "$script_dir/herdr-fleet.md" \
+    {
+        cat "$dockerfile" \
+            "$script_dir/entrypoint.sh" \
+            "$script_dir/herdr-fleet.md"
+        printf '%s' "$host_ids"
+    } \
         | "$hash_cmd" \
         | cut -c1-12
 )
@@ -110,7 +129,8 @@ if ! docker image inspect "$image" >/dev/null 2>&1; then
     printf '%s\n' "building $image" >&2
     printf '%s\n' \
         "older pi-sandbox images can be removed with: docker image prune --filter label=pi-sandbox.image=1" >&2
-    docker build --file "$dockerfile" --tag "$image" "$(dirname -- "$dockerfile")"
+    # shellcheck disable=SC2086  # empty off Linux, two words on it
+    docker build --file "$dockerfile" --tag "$image" $build_args "$(dirname -- "$dockerfile")"
 fi
 
 # Default to a Chinese-hosted model through OpenCode, unless the caller picks

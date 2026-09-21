@@ -53,12 +53,30 @@ def _run(
     agent: str | None = None,
     run_status: str = "0",
     wrapper: Path | None = None,
+    uname: str | None = None,
+    fake_id: tuple[str, str] | None = None,
 ) -> tuple[subprocess.CompletedProcess[str], list[list[str]]]:
     bin_dir = tmp_path / "fakebin"
     bin_dir.mkdir(parents=True)
     docker = bin_dir / "docker"
     docker.write_text(FAKE_DOCKER)
     docker.chmod(0o755)
+    # Only when a test asks for a platform, so every other test sees the host.
+    if uname is not None:
+        fake = bin_dir / "uname"
+        fake.write_text(f"#!/bin/sh\nprintf '%s\\n' '{uname}'\n")
+        fake.chmod(0o755)
+    if fake_id is not None:
+        uid, gid = fake_id
+        fake = bin_dir / "id"
+        fake.write_text(
+            "#!/bin/sh\n"
+            'case "$1" in\n'
+            f"    -u) printf '%s\\n' '{uid}' ;;\n"
+            f"    -g) printf '%s\\n' '{gid}' ;;\n"
+            "esac\n"
+        )
+        fake.chmod(0o755)
     log = tmp_path / "docker.log"
 
     project = cwd if cwd is not None else tmp_path / "project"
@@ -684,6 +702,55 @@ def test_wrapper_changes_the_image_tag_when_a_build_input_changes(
         assert tag(tmp_path / name.replace(".", "-"), changed=name) != unchanged
 
 
+def test_wrapper_builds_with_the_host_ids_on_linux(tmp_path: Path) -> None:
+    """A bind mount keeps the host uid and gid on Linux, so the image has to
+    be built with them for the agent to write /workspace."""
+
+    _, invocations = _run(tmp_path, inspect_status="1", uname="Linux")
+    build = invocations[1]
+    real_uid = subprocess.run(
+        ["id", "-u"], capture_output=True, text=True, check=True
+    ).stdout.strip()
+    real_gid = subprocess.run(
+        ["id", "-g"], capture_output=True, text=True, check=True
+    ).stdout.strip()
+
+    args = [
+        build[index + 1] for index, arg in enumerate(build) if arg == "--build-arg"
+    ]
+    assert args == [f"AGENT_UID={real_uid}", f"AGENT_GID={real_gid}"]
+
+
+def test_wrapper_builds_without_the_host_ids_off_linux(tmp_path: Path) -> None:
+    """Docker Desktop maps the mounted files to the container user, so the
+    defaults, and the state volumes already owned as 1001, still fit."""
+
+    _, invocations = _run(tmp_path, inspect_status="1", uname="Darwin")
+
+    assert "--build-arg" not in invocations[1]
+
+
+def test_wrapper_gives_linux_host_ids_their_own_image_tag(tmp_path: Path) -> None:
+    """A changed uid, or a second host user, must not reuse the image built
+    for the first one."""
+
+    _, linux = _run(tmp_path / "linux", uname="Linux")
+    _, darwin = _run(tmp_path / "darwin", uname="Darwin")
+
+    assert _image(_docker_run(linux)) != _image(_docker_run(darwin))
+
+
+def test_wrapper_refuses_to_run_as_root_on_linux(tmp_path: Path) -> None:
+    """A root uid would make the container user uid 0 and leave root-owned
+    files in the project it mounts."""
+
+    completed, invocations = _run(tmp_path, uname="Linux", fake_id=("0", "0"))
+
+    assert completed.returncode == 2
+    assert "root" in completed.stderr
+    assert invocations == []
+
+
 def test_wrapper_stays_in_the_process_tree_so_herdr_can_identify_pi(
     tmp_path: Path,
 ) -> None:
@@ -707,6 +774,25 @@ def test_image_installs_the_extensions_after_becoming_the_agent_user() -> None:
 
     assert installs
     assert min(installs) > lines.index("USER agent")
+
+
+def test_image_builds_the_agent_user_with_build_argument_ids() -> None:
+    """The wrapper passes the host uid and gid on Linux, so the defaults stay
+    at the Docker Desktop value and the base image's node user, which sits at
+    the common host uid, is removed before agent takes those ids."""
+
+    dockerfile = (ROOT / "Dockerfile.pi").read_text()
+    lines = dockerfile.splitlines()
+
+    assert "ARG AGENT_UID=1001" in dockerfile
+    assert "ARG AGENT_GID=1001" in dockerfile
+    removed = next(
+        index
+        for index, line in enumerate(lines)
+        if "userdel" in line and "node" in line
+    )
+    created = next(index for index, line in enumerate(lines) if "useradd" in line)
+    assert removed < created
 
 
 def test_image_pins_herdr_and_checks_it_against_a_digest() -> None:

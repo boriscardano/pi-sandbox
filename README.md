@@ -18,12 +18,13 @@ export OPENCODE_GO_API_KEY=$(pi auth print-api-key --provider opencode-go)
 The wrapper requires it even when you mean to use a model from somewhere else,
 since it is what the default needs.
 
-Developed and verified on macOS with Docker Desktop. It should work on Windows
-with Docker Desktop for the same reason: both map bind-mount ownership to the
-container user, so the agent can write to `/workspace`. On native Linux there
-is no such mapping, the mounted files keep their host UID, and the container
-user (1001) would find `/workspace` read-only. Linux needs UID handling that
-this script does not yet do, so treat it as unsupported for now.
+Developed and verified on macOS with Docker Desktop. Windows with Docker
+Desktop works the same way: both map bind-mount ownership to the container
+user, so the agent can write to `/workspace`. On native Linux the mounted files
+keep their host UID and GID, so the wrapper builds the image with your own, and
+the container user matches you. Each pair of ids gets its own image tag. Do not
+run it as root on Linux: that would make the container user UID 0 and leave
+root-owned files in the project. Rootless Docker and Podman are untested.
 
 ## Use
 

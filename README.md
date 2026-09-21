@@ -61,16 +61,17 @@ Mounted:
   repository this is the repository root, even when you launch from a
   subdirectory.
 - a per-project Docker volume at `/home/agent` for Pi's own state.
-- inside a Git repository, the parts of `.git` that can name a command are
-  mounted read-only over the project, so the agent cannot leave one there for
-  your host Git to run: `.git/config`, `.git/hooks` and, when it exists,
-  `.git/modules`.
+- inside a Git repository, `.git` itself is bind-mounted over the project, so
+  it cannot be renamed away, and the parts of it that can name a command are
+  then mounted read-only inside it: `.git/config`, `.git/hooks` and, when it
+  exists, `.git/modules`.
 
 Not mounted, and unreachable: your home directory, `~/.ssh`, `~/.aws`,
 `~/.config`, the system keychain, every other project, the Docker socket, your
 Herdr socket, and `~/.pi` on the host, which holds Pi's provider OAuth tokens.
 The script refuses to start if the directory it would mount is your home
-directory, contains it, or is `/`.
+directory, contains it, is `/`, or has a comma in its path, which Docker's
+`--mount` syntax would read as another field.
 
 The container runs as non-root (`agent`, uid 1001) with `--cap-drop ALL`,
 `--security-opt no-new-privileges` and `--pids-limit 512`. No `--privileged`,
@@ -210,18 +211,36 @@ because the mounted files belong to the host user, and commits use the identity
 `Pi Sandbox <pi-sandbox@localhost>` rather than yours. Override it per commit
 with `git -c user.name=... -c user.email=...`.
 
-`.git/config`, `.git/hooks` and, when the repository has them, `.git/modules`
-are mounted read-only over the project, and the hooks directory is created
-first if it is missing. Git runs commands named in those places, through
-`core.fsmonitor`, `core.pager`, `core.hooksPath` and `filter.<name>.clean`, so
-leaving them writable would let the agent leave a command behind that you run
-yourself with the next `git status`. The cost is that anything writing there
-fails in the sandbox: `git config`, `git remote add`, installing a hook and
-most `git submodule` operations. Do those on the host. `git add`, `git commit`
-and the rest still work, because they write to `.git/index`, `.git/objects`
-and `.git/refs`, which stay writable. A linked worktree or a submodule
-checkout keeps its real Git directory outside the mount and gets no such
-protection, and Git does not work in the sandbox for it anyway.
+`.git` itself is bind-mounted over the project, and then `.git/config`,
+`.git/hooks` and, when the repository has them, `.git/modules` are mounted
+read-only inside it. The hooks directory is created first if it is missing.
+Git runs commands named in those places, through `core.fsmonitor`,
+`core.pager`, `core.hooksPath` and `filter.<name>.clean`, so leaving them
+writable would let the agent leave a command behind that you run yourself with
+the next `git status`.
+
+Mounting `.git` matters on its own. Read-only mounts on the files inside it do
+not stop `mv .git .git-old`, which succeeds while `.git` is still an ordinary
+directory of the project, and the agent can then build a fresh `.git` with its
+own config. A bind mount makes `.git` a mount point, which cannot be renamed
+or removed, so that move fails with `Device or resource busy`.
+
+The cost is that anything writing there fails in the sandbox: `git config`,
+`git remote add`, installing a hook and most `git submodule` operations. Do
+those on the host. `git add`, `git commit` and the rest still work, because
+they write to `.git/index`, `.git/objects` and `.git/refs`, which stay
+writable. A linked worktree or a submodule checkout keeps its real Git
+directory outside the mount and gets no such protection, and Git does not work
+in the sandbox for it anyway.
+
+A repository the agent creates inside the project is not covered by any mount.
+`git init sub` leaves `sub/.git/config` in your checkout, and on Docker Desktop
+the host user owns the files the agent writes, so host Git trusts them and
+would run a command named there. The wrapper cannot prevent that, so it warns
+instead: when the container exits it looks for `.git` entries, `.git/config`
+files and `.git/hooks` entries under the project whose ctime is newer than a
+marker made before the container started, and prints what it found. It only
+warns, and deletes nothing.
 
 No credentials are mounted, so `git push` fails inside the sandbox by design.
 Push from the host after reviewing the diff.
@@ -298,6 +317,10 @@ volume, and checks `herdr.dev` for updates on a timer like any other Herdr.
   write `.envrc` for direnv, a `Makefile`, `package.json` scripts, editor task
   files and the code itself, all of which your host may execute later. Review
   the diff before running anything from a checkout the agent has touched.
+- Nested repositories the agent creates inside the project are detected at
+  exit, not prevented. The check runs after `docker run` returns, so it does
+  not run at all if the wrapper itself is killed, and anything it finds has
+  already been written to your checkout. It also warns rather than fixing.
 - If the script lives inside the project it mounts, the agent can edit the
   script that defines its own sandbox, which would take effect on the next
   launch. Keeping it in its own directory, as here, avoids that.

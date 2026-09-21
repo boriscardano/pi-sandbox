@@ -23,8 +23,22 @@ FAKE_DOCKER = """#!/bin/sh
 case "$1" in
     image) exit "${PI_SANDBOX_FAKE_INSPECT:-0}" ;;
 esac
+if [ "$1" = run ]; then
+    if [ -n "${PI_SANDBOX_FAKE_AGENT:-}" ]; then
+        sh -c "$PI_SANDBOX_FAKE_AGENT"
+    fi
+    exit "${PI_SANDBOX_FAKE_RUN_STATUS:-0}"
+fi
 exit 0
 """
+
+# Simulates what an agent can leave behind in the mounted project. A nested
+# repository cannot be prevented by a mount, so the wrapper looks for it at
+# exit instead.
+NESTED_GIT = (
+    "mkdir -p sub/.git && printf '[core]\\n\\tfsmonitor = true\\n' "
+    "> sub/.git/config"
+)
 
 
 def _run(
@@ -36,6 +50,8 @@ def _run(
     home: Path | None = None,
     forward: str | None = None,
     also: dict[str, str] | None = None,
+    agent: str | None = None,
+    run_status: str = "0",
 ) -> tuple[subprocess.CompletedProcess[str], list[list[str]]]:
     bin_dir = tmp_path / "fakebin"
     bin_dir.mkdir(parents=True)
@@ -52,7 +68,10 @@ def _run(
         "HOME": str(home if home is not None else tmp_path / "home"),
         "PI_SANDBOX_FAKE_LOG": str(log),
         "PI_SANDBOX_FAKE_INSPECT": inspect_status,
+        "PI_SANDBOX_FAKE_RUN_STATUS": run_status,
     }
+    if agent is not None:
+        env["PI_SANDBOX_FAKE_AGENT"] = agent
     if key is not None:
         env["OPENCODE_GO_API_KEY"] = key
     if forward is not None:
@@ -145,18 +164,43 @@ def test_wrapper_mounts_git_config_and_hooks_read_only(tmp_path: Path) -> None:
     mounts = [argv[index + 1] for index, arg in enumerate(argv) if arg == "--mount"]
 
     assert mounts[0] == f"type=bind,source={repo},target=/workspace"
-    assert mounts[1] == (
+    assert mounts[1] == f"type=bind,source={repo}/.git,target=/workspace/.git"
+    assert mounts[2] == (
         f"type=bind,source={repo}/.git/config,"
         "target=/workspace/.git/config,readonly"
     )
-    assert mounts[2] == (
+    assert mounts[3] == (
         f"type=bind,source={repo}/.git/hooks,"
         "target=/workspace/.git/hooks,readonly"
     )
     # A fresh repository has no modules, and the state volume is still last.
-    assert len(mounts) == 4
-    assert mounts[3].startswith("type=volume,source=pi-sandbox-")
-    assert mounts[3].endswith(",target=/home/agent")
+    assert len(mounts) == 5
+    assert mounts[4].startswith("type=volume,source=pi-sandbox-")
+    assert mounts[4].endswith(",target=/home/agent")
+
+
+def test_wrapper_mounts_dot_git_itself_so_it_cannot_be_replaced(
+    tmp_path: Path,
+) -> None:
+    """Read-only mounts on .git/config and .git/hooks do not stop `mv .git
+    .git-old`: nothing is mounted at .git itself, so the rename succeeds and
+    the agent builds a fresh .git with its own config. Mounting .git makes it
+    a mount point, which cannot be renamed or removed."""
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "--quiet", str(repo)], check=True)
+
+    _, invocations = _run(tmp_path, cwd=repo)
+    argv = _docker_run(invocations)
+    mounts = [argv[index + 1] for index, arg in enumerate(argv) if arg == "--mount"]
+
+    # After the workspace mount and before the read-only parts, so they layer
+    # over it rather than the other way round.
+    assert mounts[1] == f"type=bind,source={repo}/.git,target=/workspace/.git"
+    assert "readonly" not in mounts[1]
+    assert mounts[2].endswith(",target=/workspace/.git/config,readonly")
+    assert mounts[3].endswith(",target=/workspace/.git/hooks,readonly")
 
 
 def test_wrapper_creates_a_missing_git_hooks_directory(tmp_path: Path) -> None:
@@ -204,10 +248,16 @@ def test_wrapper_mounts_git_modules_only_when_present(tmp_path: Path) -> None:
         if arg == "--mount"
     ]
 
-    assert (
+    modules = (
         f"type=bind,source={with_modules}/.git/modules,"
         "target=/workspace/.git/modules,readonly"
-    ) in present_mounts
+    )
+    assert modules in present_mounts
+    # Layered over .git and under the state volume, like the other read-only
+    # parts.
+    assert present_mounts.index(modules) < present_mounts.index(
+        next(mount for mount in present_mounts if mount.startswith("type=volume"))
+    )
     assert not any(".git/modules" in mount for mount in absent_mounts)
 
 
@@ -235,6 +285,81 @@ def test_wrapper_leaves_a_git_file_and_a_plain_directory_alone(
             if arg == "--mount"
         ]
         assert len(mounts) == 2
+
+
+def test_wrapper_keeps_a_project_path_with_a_space_in_one_mount(
+    tmp_path: Path,
+) -> None:
+    """An unquoted mount variable split `/Users/x/my project` into broken
+    --mount arguments, so the tail of the command is built with `set --`."""
+
+    repo = tmp_path / "my project"
+    repo.mkdir()
+    subprocess.run(["git", "init", "--quiet", str(repo)], check=True)
+
+    _, invocations = _run(tmp_path, cwd=repo)
+    argv = _docker_run(invocations)
+    mounts = [argv[index + 1] for index, arg in enumerate(argv) if arg == "--mount"]
+
+    assert f"type=bind,source={repo},target=/workspace" in mounts
+    assert f"type=bind,source={repo}/.git,target=/workspace/.git" in mounts
+    assert (
+        f"type=bind,source={repo}/.git/config,"
+        "target=/workspace/.git/config,readonly"
+    ) in mounts
+    assert len(mounts) == 5
+    assert all("target=" in mount for mount in mounts)
+
+
+def test_wrapper_refuses_a_project_path_with_a_comma(tmp_path: Path) -> None:
+    """Docker parses --mount as comma-separated fields, so a comma in the path
+    splits the source. That breaks the original mounts as much as the git
+    ones, so the path is refused rather than mounted wrongly."""
+
+    completed, invocations = _run(tmp_path, cwd=tmp_path / "a,b")
+
+    assert completed.returncode == 2
+    assert "comma" in completed.stderr
+    assert invocations == []
+
+
+def test_wrapper_warns_about_nested_git_metadata_the_container_left(
+    tmp_path: Path,
+) -> None:
+    """A nested `git init sub` cannot be stopped by a mount, and on Docker
+    Desktop the host user owns what the agent writes, so host git trusts a
+    config or hook there. Detect it at exit instead of preventing it."""
+
+    completed, _ = _run(tmp_path, agent=NESTED_GIT)
+
+    assert completed.returncode == 0
+    assert "nested git metadata" in completed.stderr
+    assert str(tmp_path / "project/sub/.git") in completed.stderr
+    assert "inspect it" in completed.stderr
+
+
+def test_wrapper_stays_quiet_when_the_container_leaves_no_nested_git(
+    tmp_path: Path,
+) -> None:
+    completed, _ = _run(tmp_path)
+
+    assert completed.returncode == 0
+    assert "nested git metadata" not in completed.stderr
+
+
+def test_wrapper_keeps_docker_status_through_the_nested_git_check(
+    tmp_path: Path,
+) -> None:
+    """`set -e` would otherwise end the script on docker's non-zero status
+    before the check runs and change the status the caller sees."""
+
+    warning, _ = _run(tmp_path, agent=NESTED_GIT, run_status="7")
+    quiet, _ = _run(tmp_path / "b", run_status="7")
+
+    assert warning.returncode == 7
+    assert "nested git metadata" in warning.stderr
+    assert quiet.returncode == 7
+    assert "nested git metadata" not in quiet.stderr
 
 
 def test_wrapper_gives_each_project_its_own_state_volume(tmp_path: Path) -> None:

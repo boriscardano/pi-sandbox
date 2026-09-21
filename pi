@@ -44,23 +44,14 @@ if [ "$project" = "${HOME%/}" ] || case "${HOME%/}/" in "$project"/*) true ;; *)
     exit 2
 fi
 
-# Parts of .git that can name a command are layered read-only over the
-# read-write project mount, so a hook or a config key the agent writes cannot
-# make an ordinary `git status` or `git commit` on the host run it. Only a real
-# .git directory is protected: when .git is a file (a linked worktree or a
-# submodule checkout) the real git directory is outside the mount, git does not
-# work in the container anyway, and there is nothing in it to protect.
-git_mounts=''
-if [ -d "$project/.git" ]; then
-    # Created first on purpose. Without the directory the agent could make its
-    # own and leave a hook in it for the host to run.
-    mkdir -p "$project/.git/hooks"
-    git_mounts="--mount type=bind,source=$project/.git/config,target=/workspace/.git/config,readonly --mount type=bind,source=$project/.git/hooks,target=/workspace/.git/hooks,readonly"
-    # Submodule configs carry the same hook and filter keys as .git/config.
-    if [ -d "$project/.git/modules" ]; then
-        git_mounts="$git_mounts --mount type=bind,source=$project/.git/modules,target=/workspace/.git/modules,readonly"
-    fi
-fi
+# Docker parses --mount as comma-separated fields, so a comma anywhere in the
+# project path would split the source and mount something else.
+case "$project" in
+    *,*)
+        printf '%s\n' "refusing to mount $project: the path contains a comma" >&2
+        exit 2
+        ;;
+esac
 
 # Extra host variables to forward, by name only. Names are validated so a
 # stray value cannot smuggle in another docker flag.
@@ -165,6 +156,42 @@ fi
 # SIGINT's default disposition.
 trap : INT
 
+# The tail of the docker command, the mounts and then the image and Pi's
+# arguments, is built in the positional parameters. A variable holding the
+# mounts would split on the spaces in a path like `/Users/x/my project`, and
+# POSIX sh has no arrays. Prepend in reverse, because each `set --` puts its
+# arguments first and the last mount must end up closest to the project.
+set -- "$image" "$@"
+set -- --mount "type=volume,source=$state_volume,target=/home/agent" "$@"
+if [ -d "$project/.git" ]; then
+    # Mounting .git itself makes it a mount point, which cannot be renamed or
+    # removed. Without it the agent can `mv .git .git-old`, build a fresh .git
+    # with its own config and hooks, and the host runs what it names. The parts
+    # that can name a command are then layered read-only over that writable
+    # mount, so the index, objects and refs stay writable and `git add` and
+    # `git commit` still work. A .git file (a linked worktree or a submodule
+    # checkout) gets nothing: the real git directory is outside the mount and
+    # git does not work in the container for it anyway.
+    #
+    # Created first on purpose. Without the directory the agent could make its
+    # own and leave a hook in it for the host to run.
+    mkdir -p "$project/.git/hooks"
+    # Submodule configs carry the same hook and filter keys as .git/config.
+    if [ -d "$project/.git/modules" ]; then
+        set -- --mount "type=bind,source=$project/.git/modules,target=/workspace/.git/modules,readonly" "$@"
+    fi
+    set -- --mount "type=bind,source=$project/.git/hooks,target=/workspace/.git/hooks,readonly" "$@"
+    set -- --mount "type=bind,source=$project/.git/config,target=/workspace/.git/config,readonly" "$@"
+    set -- --mount "type=bind,source=$project/.git,target=/workspace/.git" "$@"
+fi
+
+# A nested repository cannot be stopped by a mount: the agent can `git init
+# sub`, the host user owns what it writes, and host git trusts the config and
+# hooks there. Warn about it at exit instead. ctime is compared because
+# `touch` cannot forge it.
+marker=$(mktemp)
+
+docker_status=0
 # shellcheck disable=SC2086
 docker run \
     --rm \
@@ -182,6 +209,19 @@ docker run \
     --env TERM=xterm-256color \
     --env COLORTERM=truecolor \
     --mount "type=bind,source=$project,target=/workspace" \
-    $git_mounts \
-    --mount "type=volume,source=$state_volume,target=/home/agent" \
-    "$image" "$@"
+    "$@" || docker_status=$?
+
+# Prune the project's own .git, which is protected, and look for nested git
+# metadata the container created. Warn only, never delete.
+nested=$(find "$project" -path "$project/.git" -prune -o \
+    \( -name .git -o -path '*/.git/config' -o -path '*/.git/hooks/*' \) \
+    -cnewer "$marker" -print) || nested=''
+rm -f "$marker"
+if [ -n "$nested" ]; then
+    printf '%s\n' "pi-sandbox: warning: the container left nested git metadata in the project:" >&2
+    printf '%s\n' "$nested" >&2
+    printf '%s\n' "your host git trusts it and would run the commands it names, so inspect it before running git there" >&2
+fi
+
+# Docker's status is the wrapper's. `set -e` must not skip the check above.
+exit "$docker_status"

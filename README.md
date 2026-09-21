@@ -346,6 +346,9 @@ volume, and checks `herdr.dev` for updates on a timer like any other Herdr.
   extensions. It carries Node 24, Python 3.11, uv, Git, ripgrep, fd and the
   23 MB Herdr binary.
 
+These are accepted limits, and [SECURITY.md](SECURITY.md) defines what does
+count as a vulnerability here and how to report it privately.
+
 ## Tests
 
 ```sh

@@ -9,14 +9,22 @@ install or configure.
 
 ## Requirements
 
-Docker, and the opencode-go subscription key exported in your shell:
+Docker. For the default model, the opencode-go subscription key exported in
+your shell:
 
 ```sh
 export OPENCODE_GO_API_KEY=$(pi auth print-api-key --provider opencode-go)
 ```
 
-The wrapper requires it even when you mean to use a model from somewhere else,
-since it is what the default needs.
+That key is needed for the default model only. Naming another provider with
+`--provider` or a `provider/model` string runs without it, and Pi then uses
+that provider's own key, forwarded through `OPENCODE_API_KEY` or
+`PI_SANDBOX_ENV`:
+
+```sh
+export OPENCODE_API_KEY=your-opencode-key
+pi --model opencode/glm-5.3
+```
 
 Developed and verified on macOS with Docker Desktop. Windows with Docker
 Desktop works the same way: both map bind-mount ownership to the container

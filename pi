@@ -9,7 +9,10 @@
 # start there reaches nothing on this machine. The host secrets it receives are
 # OPENCODE_GO_API_KEY, which the default model needs, and OPENCODE_API_KEY if
 # you have one, both forwarded by name so their values never land in the
-# command line or an image layer.
+# command line or an image layer. That first key is required only for the
+# default: naming another provider with --provider or a provider/model string
+# runs without it, and that provider's own key then comes through
+# OPENCODE_API_KEY or PI_SANDBOX_ENV.
 #
 #   export OPENCODE_GO_API_KEY=$(pi auth print-api-key --provider opencode-go)
 # Forward further host variables by naming them in PI_SANDBOX_ENV, for example
@@ -112,26 +115,11 @@ for name in $(printf '%s' "${PI_SANDBOX_ENV:-}" | tr ',' ' '); do
     extra_env="$extra_env --env $name"
 done
 
-if [ -z "${OPENCODE_GO_API_KEY:-}" ]; then
-    printf '%s\n' "OPENCODE_GO_API_KEY is required" >&2
-    printf '%s\n' \
-        "get it with: pi auth print-api-key --provider opencode-go" >&2
-    exit 2
-fi
-
 # One state volume per project, so sessions and `pi --resume` stay separate.
 # Inside the container every project is /workspace, which would otherwise make
 # them share one session history.
 project_tag=$(printf '%s' "$project" | "$hash_cmd" | cut -c1-8)
 state_volume=pi-sandbox-$(basename "$project" | tr -c 'A-Za-z0-9_.-' '-')-$project_tag
-
-if ! docker image inspect "$image" >/dev/null 2>&1; then
-    printf '%s\n' "building $image" >&2
-    printf '%s\n' \
-        "older pi-sandbox images can be removed with: docker image prune --filter label=pi-sandbox.image=1" >&2
-    # shellcheck disable=SC2086  # empty off Linux, two words on it
-    docker build --file "$dockerfile" --tag "$image" $build_args "$(dirname -- "$dockerfile")"
-fi
 
 # Default to a Chinese-hosted model through OpenCode, unless the caller picks
 # one. `deepseek-v4.1-flash` is on the opencode-go subscription and not on
@@ -152,19 +140,34 @@ case "${1:-}" in
         # rest of the name to the wrong API.
         chose_model=''
         chose_provider=''
+        needs_key=''
         model_next=''
+        provider_next=''
         for arg in "$@"; do
             if [ -n "$model_next" ]; then
                 model_next=''
-                case "$arg" in */*) chose_provider=1 ;; esac
+                # A `provider/model` string names its own provider, and one
+                # under opencode-go needs the key without the flag too.
+                case "$arg" in
+                    opencode-go/*) chose_provider=1; needs_key=1 ;;
+                    */*) chose_provider=1 ;;
+                esac
+                continue
+            fi
+            if [ -n "$provider_next" ]; then
+                provider_next=''
+                case "$arg" in opencode-go) needs_key=1 ;; esac
                 continue
             fi
             case "$arg" in
                 --) break ;;  # everything after this is a message, not a flag
                 --model) chose_model=1; model_next=1 ;;
+                --model=opencode-go/*) chose_model=1; chose_provider=1; needs_key=1 ;;
                 --model=*/*) chose_model=1; chose_provider=1 ;;
                 --model=*) chose_model=1 ;;
-                --provider | --provider=*) chose_provider=1 ;;
+                --provider) chose_provider=1; provider_next=1 ;;
+                --provider=opencode-go) chose_provider=1; needs_key=1 ;;
+                --provider=*) chose_provider=1 ;;
             esac
         done
         # Both are supplied, because naming one and leaving the other to Pi
@@ -173,9 +176,28 @@ case "${1:-}" in
         # answering from Zen instead. Naming another provider without a model
         # is the caller's to get right.
         [ -n "$chose_model" ] || set -- --model deepseek-v4.1-flash "$@"
+        [ -n "$chose_provider" ] || needs_key=1
         [ -n "$chose_provider" ] || set -- --provider opencode-go "$@"
         ;;
 esac
+
+# Required only when this run reaches opencode-go: the default provider the
+# case above supplies, the flag naming it, or a model under it. Another
+# provider's missing key is Pi's to complain about, not this wrapper's.
+if [ -n "${needs_key:-}" ] && [ -z "${OPENCODE_GO_API_KEY:-}" ]; then
+    printf '%s\n' "OPENCODE_GO_API_KEY is required" >&2
+    printf '%s\n' \
+        "get it with: pi auth print-api-key --provider opencode-go" >&2
+    exit 2
+fi
+
+if ! docker image inspect "$image" >/dev/null 2>&1; then
+    printf '%s\n' "building $image" >&2
+    printf '%s\n' \
+        "older pi-sandbox images can be removed with: docker image prune --filter label=pi-sandbox.image=1" >&2
+    # shellcheck disable=SC2086  # empty off Linux, two words on it
+    docker build --file "$dockerfile" --tag "$image" $build_args "$(dirname -- "$dockerfile")"
+fi
 
 # Allocate a TTY only when there is one, so the same wrapper serves a Herdr
 # pane and a non-interactive check. Unquoted on purpose: these are two words.

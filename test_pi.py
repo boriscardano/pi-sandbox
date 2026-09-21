@@ -161,6 +161,48 @@ def test_wrapper_fails_closed_without_the_opencode_key(tmp_path: Path) -> None:
     assert invocations == []
 
 
+def test_wrapper_requires_the_opencode_key_only_for_opencode_go(
+    tmp_path: Path,
+) -> None:
+    """The wrapper supplies the default provider, so that run needs the key.
+    Another provider is Pi's to authenticate, and the wrapper still forwards
+    both keys by name for docker to drop when they are unset."""
+
+    other, other_calls = _run(
+        tmp_path, "--provider", "opencode", "--model", "kimi-k3", key=None
+    )
+    slashed, slashed_calls = _run(
+        tmp_path / "b", "--model", "opencode/glm-5.3", key=None
+    )
+    subcommand, subcommand_calls = _run(tmp_path / "c", "list", key=None)
+
+    for completed in (other, slashed, subcommand):
+        assert completed.returncode == 0
+        assert "OPENCODE_GO_API_KEY is required" not in completed.stderr
+    for calls in (other_calls, slashed_calls, subcommand_calls):
+        argv = _docker_run(calls)
+        assert argv[argv.index("--env") + 1] == "OPENCODE_GO_API_KEY"
+        assert "OPENCODE_API_KEY" in argv
+
+
+def test_wrapper_requires_the_key_for_an_opencode_go_model_or_provider(
+    tmp_path: Path,
+) -> None:
+    model, model_calls = _run(
+        tmp_path, "--model", "opencode-go/deepseek-v4.1-flash", key=None
+    )
+    flag, flag_calls = _run(
+        tmp_path / "b", "--provider=opencode-go", "--model", "x", key=None
+    )
+
+    assert model.returncode == 2
+    assert "OPENCODE_GO_API_KEY is required" in model.stderr
+    assert model_calls == []
+    assert flag.returncode == 2
+    assert "OPENCODE_GO_API_KEY is required" in flag.stderr
+    assert flag_calls == []
+
+
 def test_wrapper_mounts_only_the_chosen_project_and_a_state_volume(
     tmp_path: Path,
 ) -> None:

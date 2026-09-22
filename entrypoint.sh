@@ -50,6 +50,49 @@ os.replace(pending, path)
     printf '%s\n' "pi-sandbox: could not write the subscription key to auth.json" >&2
 fi
 
+# Extensions and the two Herdr skills live in /home/agent, which is the
+# project's state volume, so an image rebuild does not reach a project whose
+# volume already exists. Bring both up to date on every start, best effort: a
+# registry that is down or slow, or a home the agent has ruined, must cost the
+# update rather than the session.
+#
+# The four packages are also installed in Dockerfile.pi, which seeds a new
+# volume; keep the two lists in step. Lifecycle scripts stay off, as there.
+# `timeout` bounds the whole step so a hung registry cannot stop Pi from
+# starting. Pi's own subcommands are passed through to it untouched, so they
+# must not trigger an install of their own.
+case "${1:-}" in
+    install | remove | uninstall | update | list | config | auth) ;;
+    *)
+        if ! timeout 120 sh -c '
+            export npm_config_ignore_scripts=true
+            for package in \
+                pi-subagents \
+                @tintinweb/pi-subagents \
+                pi-background-tasks \
+                pi-extension-manager
+            do
+                pi install "npm:$package"
+            done
+        ' >/dev/null 2>&1; then
+            printf '%s\n' "pi-sandbox: could not update the extensions" >&2
+        fi
+        ;;
+esac
+
+# Herdr's own skill is printed by the binary and ours is copied from the
+# root-owned location in the image, so both describe the installed version
+# rather than a copy the volume froze at an earlier build. Local and cheap, so
+# no timeout: a failure prints one line and Pi still starts.
+if ! {
+    mkdir -p "$HOME/.pi/agent/skills/herdr" "$HOME/.pi/agent/skills/herdr-fleet" \
+        && herdr --skill > "$HOME/.pi/agent/skills/herdr/SKILL.md" \
+        && cp /usr/local/share/pi-sandbox/herdr-fleet.md \
+            "$HOME/.pi/agent/skills/herdr-fleet/SKILL.md"
+} 2>/dev/null; then
+    printf '%s\n' "pi-sandbox: could not refresh the herdr skills" >&2
+fi
+
 # Herdr's API commands do not start a server, so the agent's first one would be
 # told `server_not_running`. Its socket lives in the agent's home, and no host
 # socket is mounted, so the fleet it serves reaches nothing outside this

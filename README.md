@@ -59,9 +59,10 @@ install for every project.
 Edits to `Dockerfile.pi`, `entrypoint.sh` or `herdr-fleet.md` rebuild
 automatically on the next launch. The image is tagged by the contents of those
 files, so a changed file produces a tag that does not exist yet and the wrapper
-builds it before starting. Each build leaves the older images behind. Remove
-them with `docker image prune -a --filter label=pi-sandbox.image=1`, which also
-removes the current image, and the next launch rebuilds it.
+builds it before starting. It also rebuilds when npm has a newer Pi or
+`herdr.dev` a newer Herdr than the image's label records, and removes the older
+images after the session, so nothing accumulates. The container itself is
+removed by `--rm` when Pi exits.
 
 ## What the container can and cannot see
 
@@ -183,7 +184,8 @@ docker exec -it "$(docker ps -q --filter label=pi-sandbox=1 | head -1)" bash
 
 ## Extensions
 
-The image ships four Pi extensions, pinned in `Dockerfile.pi`:
+The image ships four Pi extensions, installed from npm at their newest
+release:
 
 - `npm:pi-subagents`, delegation to subagents and scripted multi-agent
   workflows, under `/subagents`.
@@ -201,19 +203,24 @@ The Herdr fleet below is a fourth way to do that, with whole Pi sessions
 instead of subagents. Everything still dies with the container.
 
 They live in the agent's home, so they reach a project through that project's
-state volume and one whose volume predates them will not have them. Pi's own
-subcommands run against that volume rather than your host Pi, so `pi list`
-shows what a project actually has and `pi install npm:<package>@<version>`
-adds to it. Pin the version there too, for the reason below. `install`,
-`remove`, `uninstall`, `list`, `config` and `auth` all work this way. So does
-`pi update --extensions`, but bare `pi update` targets Pi itself, which lives
-outside the volume in a root-owned directory the agent cannot write.
-Resetting the volume, as under State and reset, is the other way to pick up a
-change.
+state volume. The entrypoint reinstalls all four on every start, so an existing
+volume ends up at their newest releases even though an image rebuild does not
+reach it. Lifecycle scripts stay off for that install, as they do at build
+time, so a new release cannot run one in a container holding the API key. Pi's
+own subcommands run against the volume rather than your host Pi, so `pi list`
+shows what a project actually has and `pi install npm:<package>` adds one.
+`install`, `remove`, `uninstall`, `list`, `config` and `auth` all work this
+way. So does `pi update --extensions`, but bare `pi update` targets Pi itself,
+which lives outside the volume in a root-owned directory the agent cannot
+write. Resetting the volume, as under State and reset, is the other way to pick
+up a change.
 
-Change the set by editing the `pi install` lines in `Dockerfile.pi` and
-rebuilding. Versions are pinned there on purpose, for the reason in the
-comment beside them.
+Change the set by editing the `pi install` lines in `Dockerfile.pi` and in
+`entrypoint.sh`, which lists the same four. The owner chose to always run the
+newest releases rather than reviewed pins, which means a new upstream release
+reaches the sandbox, and the API key it holds, without review. Lifecycle
+scripts stay off, which limits what a release can run at install time but not
+what the extension code does once it is loaded.
 
 ## Git
 
@@ -318,12 +325,17 @@ herdr pane read <pane-id>
 The provider and model flags are not optional: only the host wrapper applies
 the default, and `deepseek-v4.1-flash` is on the opencode-go subscription
 rather than on OpenCode Zen, so the provider has to be named with it.
-Two skills in the image teach the agent all this: Herdr's own, printed by the
-pinned binary at build time, and `herdr-fleet.md` from this repository, which
-covers what is different here, including telling a child agent not to start a
-fleet of its own. Like the extensions they live in the agent's home, so a
-project whose state volume predates this image has the fleet but not the
-instructions until you reset the volume.
+Two skills teach the agent all this: Herdr's own, printed by the installed
+binary, and `herdr-fleet.md` from this repository, which covers what is
+different here, including telling a child agent not to start a fleet of its
+own. The entrypoint rewrites both from the image on every start, so a project
+whose state volume predates this image still gets the current instructions.
+
+The binary is downloaded at build time from the release `herdr.dev/latest.json`
+names, and checked against the SHA-256 in that manifest. The owner chose to
+track the newest release, so the digest comes from the same publisher as the
+binary: it protects against a corrupted or swapped download, not against a bad
+release.
 
 You cannot see these panes from your own Herdr, so ask the container:
 

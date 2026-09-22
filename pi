@@ -238,12 +238,72 @@ if [ -n "${needs_key:-}" ] && [ -z "${wants_info:-}" ] && [ -z "${OPENCODE_GO_AP
     exit 2
 fi
 
-if ! docker image inspect "$image" >/dev/null 2>&1; then
-    printf '%s\n' "building $image" >&2
-    printf '%s\n' \
-        "older pi-sandbox images can be removed with: docker image prune -a --filter label=pi-sandbox.image=1 (this also removes the current image, which the next launch rebuilds)" >&2
-    # shellcheck disable=SC2086  # empty off Linux, two words on it
-    docker build --file "$dockerfile" --tag "$image" $build_args "$(dirname -- "$dockerfile")"
+# Look up the newest release of Pi and Herdr so a newer one rebuilds the image
+# even though the content tag has not changed. The host may lack python3 and
+# jq, so sed pulls the version out of the JSON, and anything that is not a
+# plain semver is unknown rather than trusted. `--max-time 5` keeps an offline
+# or slow registry from delaying the launch, and a missing curl fails the same
+# way. One unknown version makes the whole comparison unknown: a newer Pi must
+# not rebuild an image whose Herdr version cannot be checked, so only a missing
+# image is built then.
+lookup_version() {
+    body=$(curl -fsS --max-time 5 "$1" 2>/dev/null) || return 0
+    version=$(printf '%s' "$body" | sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')
+    case "$version" in
+        '' | *[!0-9A-Za-z.+-]*) return 0 ;;
+        [0-9]*.[0-9]*) printf '%s' "$version" ;;
+        *) return 0 ;;
+    esac
+}
+
+pi_latest=$(lookup_version https://registry.npmjs.org/@earendil-works/pi-coding-agent/latest)
+herdr_latest=$(lookup_version https://herdr.dev/latest.json)
+if [ -n "$pi_latest" ] && [ -n "$herdr_latest" ]; then
+    want_versions="pi=$pi_latest herdr=$herdr_latest"
+else
+    want_versions=''
+fi
+
+image_exists=0
+if docker image inspect "$image" >/dev/null 2>&1; then
+    image_exists=1
+fi
+
+# The label is only read when both lookups worked, since it is only compared
+# then. A missing label or a failed inspect reads as empty and rebuilds.
+build=0
+have_versions=''
+if [ "$image_exists" -eq 0 ]; then
+    build=1
+elif [ -n "$want_versions" ]; then
+    have_versions=$(docker image inspect \
+        --format '{{index .Config.Labels "pi-sandbox.versions"}}' "$image" 2>/dev/null || true)
+    if [ "$have_versions" != "$want_versions" ]; then
+        build=1
+    fi
+fi
+
+if [ "$build" -eq 1 ]; then
+    version_args=''
+    if [ -n "$pi_latest" ]; then
+        version_args="$version_args --build-arg PI_VERSION=$pi_latest"
+    fi
+    if [ -n "$herdr_latest" ]; then
+        version_args="$version_args --build-arg HERDR_VERSION=$herdr_latest"
+    fi
+    if [ "$image_exists" -eq 1 ]; then
+        printf '%s\n' "pi-sandbox: rebuilding $image: $have_versions -> $want_versions" >&2
+    elif [ -n "$want_versions" ]; then
+        printf '%s\n' "building $image" >&2
+    else
+        printf '%s\n' "pi-sandbox: registry lookup failed, building $image with the default versions" >&2
+    fi
+    # shellcheck disable=SC2086  # empty off Linux, and version_args is two words at most
+    docker build --file "$dockerfile" --tag "$image" $build_args $version_args "$(dirname -- "$dockerfile")"
+fi
+
+if [ "$image_exists" -eq 1 ] && [ -z "$want_versions" ]; then
+    printf '%s\n' "pi-sandbox: could not check the newest Pi and Herdr, using the existing image" >&2
 fi
 
 # Allocate a TTY only when there is one, so the same wrapper serves a Herdr
@@ -399,6 +459,28 @@ if [ -n "$interrupted" ]; then
     printf '%s\n' "pi-sandbox: warning: the container left a git operation in progress:" >&2
     printf '%s\n' "$interrupted" >&2
     printf '%s\n' "your host git will report a rebase, merge or cherry-pick, and continuing it can run commands stored in those files, so inspect and abort it rather than continue" >&2
+fi
+
+# Remove the images earlier builds left behind, now that the session is over.
+# `docker rmi` fails when another running session uses an image, which is
+# expected, so its output is discarded and the loop carries on. The prune then
+# removes the dangling image a same-tag rebuild left. None of this may reach
+# the user's terminal except one summary line, and none of it may change the
+# exit status below.
+removed=''
+if tags=$(docker images pi-sandbox --format '{{.Tag}}' 2>/dev/null); then
+    for tag in $tags; do
+        if [ "$tag" = "${image#pi-sandbox:}" ] || [ "$tag" = "<none>" ]; then
+            continue
+        fi
+        if docker rmi "pi-sandbox:$tag" >/dev/null 2>&1; then
+            removed="$removed $tag"
+        fi
+    done
+fi
+docker image prune -f --filter label=pi-sandbox.image=1 >/dev/null 2>&1 || true
+if [ -n "$removed" ]; then
+    printf '%s\n' "pi-sandbox: removed old images:$removed" >&2
 fi
 
 # Docker's status is the wrapper's. `set -e` must not skip the check above.

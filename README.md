@@ -331,8 +331,18 @@ Mounting your socket would undo the sandbox rather than extend it, since
   provider, and keep a remote you can restore from.
 - Protecting `.git` does not make the checkout safe to run. The agent can still
   write `.envrc` for direnv, a `Makefile`, `package.json` scripts, editor task
-  files and the code itself, all of which your host may execute later. Review
-  the diff before running anything from a checkout the agent has touched.
+  files and the code itself, all of which your host may execute later. The
+  same goes for what your own coding agents trust in a checkout: hooks in
+  `.claude/settings.json`, MCP servers in `.mcp.json`, and instructions in
+  `CLAUDE.md` or `AGENTS.md`. Review the diff before running anything, or
+  starting another agent, in a checkout the agent has touched.
+- The agent can write escape sequences to the terminal you launched it from.
+  The container's terminal device is owned by the user Pi and its tools run
+  as, so any command the agent runs can open it. A
+  sequence can retitle the pane, draw text that looks like your shell, add
+  links, and on a terminal that honours OSC 52, replace your clipboard. Turn
+  off OSC 52 clipboard writes in your terminal, and do not paste from a
+  clipboard you did not fill yourself after a session.
 - Nested repositories, and the rebase, merge or cherry-pick state the agent
   can plant in `.git`, are detected at exit, not prevented. The checks run
   after `docker run` returns, so they do not run at all if the wrapper itself

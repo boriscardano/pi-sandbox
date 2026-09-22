@@ -61,10 +61,8 @@ exit 0
 # touches the network.
 FAKE_CURL = """#!/bin/sh
 url=''
-output=''
 while [ $# -gt 0 ]; do
     case "$1" in
-        -o) output=$2; shift 2 ;;
         -*) shift ;;
         *) url=$1; shift ;;
     esac
@@ -80,11 +78,7 @@ case "$url" in
         ;;
     *) exit 22 ;;
 esac
-if [ -n "$output" ]; then
-    printf '%s\\n' "$body" >"$output"
-else
-    printf '%s\\n' "$body"
-fi
+printf '%s\\n' "$body"
 exit 0
 """
 

@@ -64,6 +64,7 @@ fi
 # holds the API key. `timeout` bounds the whole step so a hung registry cannot
 # stop Pi from starting. Pi's own subcommands are passed through to it
 # untouched, so they must not trigger an install of their own.
+# Keep this list in step with the same list in pi.
 case "${1:-}" in
     install | remove | uninstall | update | list | config | auth) ;;
     *)

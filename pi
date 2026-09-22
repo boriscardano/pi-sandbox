@@ -177,6 +177,7 @@ state_volume=pi-sandbox-$(basename "$project" | tr -c 'A-Za-z0-9_.-' '-')-$proje
 # Pi's subcommands are recognised only as the first argument, so prepending the
 # default to `pi install npm:...` would send it to the model as a chat message
 # instead of installing anything. Leave those alone.
+# Keep this list in step with the same list in entrypoint.sh.
 case "${1:-}" in
     install | remove | uninstall | update | list | config | auth) ;;
     *)

@@ -1919,9 +1919,11 @@ def test_the_entrypoint_hands_pi_a_clean_herdr_environment(tmp_path: Path) -> No
 
 def test_the_entrypoint_updates_the_extensions_on_start(tmp_path: Path) -> None:
     """The extensions live in the state volume, so an image rebuild does not
-    reach an existing project. Reinstalling all four without a version is what
-    moves it to their newest releases, with lifecycle scripts off and bounded
-    so a hung registry cannot stop Pi."""
+    reach an existing project. Installing all four without a version adds the
+    missing ones, but leaves an installed one at its version, so the update
+    after them is what moves the volume to the newest releases. Lifecycle
+    scripts stay off and the step is bounded so a hung registry cannot stop
+    Pi."""
 
     started = _run_entrypoint(tmp_path)
     installs = [call for call in started.calls if call[:1] == ["install"]]
@@ -1932,10 +1934,11 @@ def test_the_entrypoint_updates_the_extensions_on_start(tmp_path: Path) -> None:
         "npm:pi-background-tasks",
         "npm:pi-extension-manager",
     ]
+    assert started.calls[len(installs)] == ["update", "--extensions"]
     assert all(
         started.scripts[index] == "true"
         for index, call in enumerate(started.calls)
-        if call[:1] == ["install"]
+        if call[:1] in (["install"], ["update"])
     )
     # The final exec is Pi itself, which must not inherit the setting.
     assert started.calls[-1] == ["--model", "kimi-k3"]

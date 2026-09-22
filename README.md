@@ -210,12 +210,15 @@ instead of subagents. Everything still dies with the container.
 
 They live in the agent's home, so they reach a project through that project's
 state volume. A new project's first start downloads them. Offline, that start
-proceeds without them, and the next start with a network installs them. The
-entrypoint reinstalls all four on every start, so an existing volume ends up at
-their newest releases even though an image rebuild does not reach it. A
-`pi remove npm:<package>` inside the sandbox therefore lasts only until the next
-start, which installs it again. Lifecycle scripts stay off for that install, so
-a new release cannot run one in a container holding the API key. Pi's own
+proceeds without them, and the next start with a network installs them. On
+every start the entrypoint installs any of the four that is missing and then
+runs `pi update --extensions`, so an existing volume ends up at their newest
+releases even though an image rebuild does not reach it. That update also moves
+any extension you added without a version, while one installed as
+`npm:<package>@<version>` stays at it. A `pi remove npm:<package>` of one of the
+four therefore lasts only until the next start, which installs it again.
+Lifecycle scripts stay off for that install, so a new release cannot run one in
+a container holding the API key. Pi's own
 subcommands run against the volume rather than your host Pi, so `pi list` shows
 what a project actually has and `pi install npm:<package>` adds one. `install`,
 `remove`, `uninstall`, `list`, `config` and `auth` all work this way. So does

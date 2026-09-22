@@ -56,12 +56,14 @@ fi
 # registry that is down or slow, or a home the agent has ruined, must cost the
 # update rather than the session.
 #
-# The four packages are listed here and nowhere else, since this installs
-# them into a new volume and updates an existing one alike. Lifecycle scripts
-# stay off, so a new release cannot run one in a sandbox that holds the API
-# key. `timeout` bounds the whole step so a hung registry cannot stop Pi from
-# starting. Pi's own subcommands are passed through to it untouched, so they
-# must not trigger an install of their own.
+# The four packages are listed here and nowhere else. `pi install` without a
+# version adds a missing one and unpins a pinned one, but leaves an installed
+# one at its version, so `pi update --extensions` is what moves an existing
+# volume to the newest releases (measured: 0.69.0 stayed 0.69.0 until it ran).
+# Lifecycle scripts stay off, so a new release cannot run one in a sandbox that
+# holds the API key. `timeout` bounds the whole step so a hung registry cannot
+# stop Pi from starting. Pi's own subcommands are passed through to it
+# untouched, so they must not trigger an install of their own.
 case "${1:-}" in
     install | remove | uninstall | update | list | config | auth) ;;
     *)
@@ -77,6 +79,7 @@ case "${1:-}" in
             do
                 pi install "npm:$package" || failed=1
             done
+            pi update --extensions || failed=1
             exit "$failed"
         ' >/dev/null 2>&1; then
             printf '%s\n' "pi-sandbox: could not update the extensions" >&2

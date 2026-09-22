@@ -1499,6 +1499,22 @@ def test_wrapper_builds_with_defaults_when_the_lookup_fails_and_no_image(
     assert not any(arg.startswith("HERDR_VERSION=") for arg in args)
 
 
+def test_wrapper_builds_with_the_version_it_found_when_one_lookup_fails(
+    tmp_path: Path,
+) -> None:
+    """With no image and only one lookup answered, the build still uses the
+    version it found, and the message must not claim the lookup failed when a
+    version argument is being passed."""
+
+    completed, invocations = _run(tmp_path, inspect_status="1", curl_herdr="fail")
+    build = next(argv for argv in invocations if argv[0] == "build")
+    args = [build[index + 1] for index, arg in enumerate(build) if arg == "--build-arg"]
+
+    assert "PI_VERSION=0.87.0" in args
+    assert not any(arg.startswith("HERDR_VERSION=") for arg in args)
+    assert "registry lookup failed" not in completed.stderr
+
+
 def test_wrapper_stops_when_the_build_fails(tmp_path: Path) -> None:
     """A build that fails half-way leaves no image under the tag. `set -e`
     has to end the wrapper with docker's status rather than starting the
@@ -1512,22 +1528,24 @@ def test_wrapper_stops_when_the_build_fails(tmp_path: Path) -> None:
     assert not any(argv[0] == "run" for argv in invocations)
 
 
-def test_wrapper_stops_when_a_rebuild_fails_but_the_image_exists(
+def test_wrapper_starts_the_existing_image_when_a_rebuild_fails(
     tmp_path: Path,
 ) -> None:
-    """The same-tag rebuild replaces the image the old tag held, so a failure
-    has to stop the launch rather than run what the tag still points at."""
+    """A same-tag build that fails leaves the image the tag already held
+    intact, so availability wins: warn once and start that image rather than
+    leaving the user with no Pi at all. The exit status is docker run's."""
 
     completed, invocations = _run(
         tmp_path,
         pi_version="0.99.0",
         label="pi=0.87.0 herdr=0.9.1",
         build_status="9",
-        run_status="0",
+        run_status="7",
     )
 
-    assert completed.returncode == 9
-    assert not any(argv[0] == "run" for argv in invocations)
+    assert completed.returncode == 7
+    assert "starting the existing image" in completed.stderr
+    assert _docker_run(invocations)
 
 
 def test_wrapper_gives_linux_host_ids_their_own_image_tag(tmp_path: Path) -> None:

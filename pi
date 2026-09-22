@@ -293,13 +293,25 @@ if [ "$build" -eq 1 ]; then
     fi
     if [ "$image_exists" -eq 1 ]; then
         printf '%s\n' "pi-sandbox: rebuilding $image: $have_versions -> $want_versions" >&2
-    elif [ -n "$want_versions" ]; then
+    elif [ -n "$version_args" ]; then
         printf '%s\n' "building $image" >&2
     else
         printf '%s\n' "pi-sandbox: registry lookup failed, building $image with the default versions" >&2
     fi
+    build_status=0
     # shellcheck disable=SC2086  # empty off Linux, and version_args is two words at most
-    docker build --file "$dockerfile" --tag "$image" $build_args $version_args "$(dirname -- "$dockerfile")"
+    docker build --file "$dockerfile" --tag "$image" $build_args $version_args "$(dirname -- "$dockerfile")" || build_status=$?
+    # A same-tag build that fails leaves the image the tag already held, so a
+    # registry blip must not leave the user unable to start Pi. There is no
+    # image to fall back to when this was a first build, so its status ends
+    # the wrapper.
+    if [ "$build_status" -ne 0 ]; then
+        if [ "$image_exists" -eq 1 ]; then
+            printf '%s\n' "pi-sandbox: could not update $image, starting the existing image" >&2
+        else
+            exit "$build_status"
+        fi
+    fi
 fi
 
 if [ "$image_exists" -eq 1 ] && [ -z "$want_versions" ]; then

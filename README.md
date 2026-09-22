@@ -61,8 +61,10 @@ automatically on the next launch. The image is tagged by the contents of those
 files, so a changed file produces a tag that does not exist yet and the wrapper
 builds it before starting. It also rebuilds when both npm and `herdr.dev`
 answer and either has a newer release than the image's label records. When
-either lookup fails it keeps the existing image and says so. With no image it
-builds, using the versions it did find or the Dockerfile defaults. A rebuild
+either lookup fails it keeps the existing image and says so. With no image
+there is nothing to fall back to and the Dockerfile carries no default
+versions, so the wrapper stops and says the newest Pi and Herdr could not be
+looked up. The first launch therefore needs both lookups to answer. A rebuild
 that fails keeps the image the tag already held and starts it, so a registry
 blip does not leave you without Pi, while a first build that fails stops with
 docker's status. It removes the older images after the session, so nothing

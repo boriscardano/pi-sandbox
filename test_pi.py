@@ -1533,36 +1533,53 @@ def test_wrapper_does_not_rebuild_when_only_one_version_is_known(
     assert [argv for argv in invocations if argv[0] == "build"] == []
 
 
-def test_wrapper_builds_with_defaults_when_the_lookup_fails_and_no_image(
+def _assert_lookup_failure_stops_the_first_launch(
+    completed: subprocess.CompletedProcess[str], invocations: list[list[str]]
+) -> None:
+    """No image plus a failed lookup must stop the launch rather than build a
+    tag the Dockerfile has no defaults for or start an image that is missing."""
+
+    assert completed.returncode == 1
+    assert [argv for argv in invocations if argv[0] == "build"] == []
+    assert [argv for argv in invocations if argv[0] == "run"] == []
+    assert "could not look up the newest Pi and Herdr" in completed.stderr
+    assert "no image to fall back to" in completed.stderr
+
+
+def test_wrapper_refuses_to_build_when_both_lookups_fail_and_no_image(
     tmp_path: Path,
 ) -> None:
-    """Offline with no image, the Dockerfile defaults are the only versions
-    available, so no version argument is passed."""
+    """The Dockerfile has no default versions, so a build with neither one
+    would fail at once. Offline with no image there is nothing to fall back
+    to, so the wrapper must stop instead of building or running."""
 
-    _, invocations = _run(
+    completed, invocations = _run(
         tmp_path, inspect_status="1", curl_pi="fail", curl_herdr="fail"
     )
-    build = next(argv for argv in invocations if argv[0] == "build")
-    args = [build[index + 1] for index, arg in enumerate(build) if arg == "--build-arg"]
 
-    assert not any(arg.startswith("PI_VERSION=") for arg in args)
-    assert not any(arg.startswith("HERDR_VERSION=") for arg in args)
+    _assert_lookup_failure_stops_the_first_launch(completed, invocations)
 
 
-def test_wrapper_builds_with_the_version_it_found_when_one_lookup_fails(
+def test_wrapper_refuses_to_build_when_the_pi_lookup_fails_and_no_image(
     tmp_path: Path,
 ) -> None:
-    """With no image and only one lookup answered, the build still uses the
-    version it found, and the message must not claim the lookup failed when a
-    version argument is being passed."""
+    """A build needs both versions, so the Pi lookup failing is enough to stop
+    a first launch even though Herdr answered."""
+
+    completed, invocations = _run(tmp_path, inspect_status="1", curl_pi="fail")
+
+    _assert_lookup_failure_stops_the_first_launch(completed, invocations)
+
+
+def test_wrapper_refuses_to_build_when_the_herdr_lookup_fails_and_no_image(
+    tmp_path: Path,
+) -> None:
+    """A build needs both versions, so the Herdr lookup failing is enough to
+    stop a first launch even though Pi answered."""
 
     completed, invocations = _run(tmp_path, inspect_status="1", curl_herdr="fail")
-    build = next(argv for argv in invocations if argv[0] == "build")
-    args = [build[index + 1] for index, arg in enumerate(build) if arg == "--build-arg"]
 
-    assert "PI_VERSION=0.87.0" in args
-    assert not any(arg.startswith("HERDR_VERSION=") for arg in args)
-    assert "registry lookup failed" not in completed.stderr
+    _assert_lookup_failure_stops_the_first_launch(completed, invocations)
 
 
 def test_wrapper_stops_when_the_build_fails(tmp_path: Path) -> None:
@@ -1647,11 +1664,14 @@ def test_image_does_not_seed_extensions_or_skills() -> None:
 
 def test_image_takes_pi_version_as_a_build_argument() -> None:
     """The wrapper passes the newest version npm reports, so Pi's version has
-    to be an argument rather than a literal in the install line."""
+    to be an argument rather than a literal in the install line. It has no
+    default, so a build without it fails before npm could install an empty
+    version."""
 
     dockerfile = (ROOT / "Dockerfile.pi").read_text()
 
-    assert "ARG PI_VERSION=" in dockerfile
+    assert "ARG PI_VERSION\n" in dockerfile
+    assert ': "${PI_VERSION:?' in dockerfile
     assert "@earendil-works/pi-coding-agent@$PI_VERSION" in dockerfile
 
 
@@ -1663,8 +1683,8 @@ def test_image_records_both_versions_in_one_label() -> None:
     label = 'LABEL pi-sandbox.versions="pi=$PI_VERSION herdr=$HERDR_VERSION"'
 
     assert label in dockerfile
-    assert dockerfile.index("ARG PI_VERSION=") < dockerfile.index(label)
-    assert dockerfile.index("ARG HERDR_VERSION=") < dockerfile.index(label)
+    assert dockerfile.index("ARG PI_VERSION\n") < dockerfile.index(label)
+    assert dockerfile.index("ARG HERDR_VERSION\n") < dockerfile.index(label)
 
 
 def test_image_builds_the_agent_user_with_build_argument_ids() -> None:
@@ -1699,7 +1719,8 @@ def test_image_verifies_herdr_against_the_manifest_digest() -> None:
 
     dockerfile = (ROOT / "Dockerfile.pi").read_text()
 
-    assert "ARG HERDR_VERSION=" in dockerfile
+    assert "ARG HERDR_VERSION\n" in dockerfile
+    assert ': "${HERDR_VERSION:?' in dockerfile
     assert "https://herdr.dev/latest.json" in dockerfile
     assert (
         "https://github.com/herdrdev/herdr/releases/download/v$HERDR_VERSION/"

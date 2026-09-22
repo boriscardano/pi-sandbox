@@ -30,8 +30,12 @@ RUN apt-get update \
 # rather than a reviewed pin, which means an upstream release reaches this
 # sandbox, and the API key it holds, without review. The wrapper passes the
 # version it found and compares the image's label to decide whether to rebuild.
-ARG PI_VERSION=0.86.1
-RUN npm install --global --ignore-scripts \
+# There is no default: the wrapper only builds after it looked a version up, so
+# a build without one fails here at once rather than installing an empty
+# version.
+ARG PI_VERSION
+RUN : "${PI_VERSION:?the wrapper must pass --build-arg PI_VERSION}" \
+    && npm install --global --ignore-scripts \
         @earendil-works/pi-coding-agent@$PI_VERSION \
     && npm cache clean --force
 
@@ -51,9 +55,13 @@ COPY --from=ghcr.io/astral-sh/uv:0.12.17@sha256:10787c682e4184e4f290de1171fd4703
 # corrupted or swapped download, not against a bad release. The asset URL has
 # to be the GitHub release for that version, so a manifest that points
 # elsewhere fails the build. The wrapper passes HERDR_VERSION and compares the
-# image's label to decide whether to rebuild.
-ARG HERDR_VERSION=0.9.1
+# image's label to decide whether to rebuild. There is no default: the manifest
+# only carries a digest for the release it names, so a default naming an older
+# release fails the check below as soon as Herdr moves on. A build without one
+# fails on the guard here rather than in the manifest comparison.
+ARG HERDR_VERSION
 RUN set -eu; \
+    : "${HERDR_VERSION:?the wrapper must pass --build-arg HERDR_VERSION}"; \
     case "$(dpkg --print-architecture)" in \
         amd64) target=linux-x86_64 ;; \
         arm64) target=linux-aarch64 ;; \

@@ -24,6 +24,13 @@
 # shellcheck disable=SC1007  # `CDPATH= cd` is a deliberate prefix assignment
 set -eu
 
+# Read the whole body before running any of it. sh reads a script as it goes,
+# and this wrapper stays alive for the whole session, so an edit or `git pull`
+# that replaces this file mid-session would otherwise leave the shell reading
+# the new file at the old byte offset and running whatever text is there. A
+# brace group is parsed in full before its first command runs. The closing
+# brace is never reached: the exit above it leaves the group.
+{
 script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 dockerfile=$script_dir/Dockerfile.pi
 
@@ -497,3 +504,4 @@ fi
 
 # Docker's status is the wrapper's. `set -e` must not skip the check above.
 exit "$docker_status"
+}

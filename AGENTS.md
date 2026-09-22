@@ -24,4 +24,5 @@ Notes for agents and contributors changing this repo, from the security work on
   style: every behaviour gets a test proven to fail when the fix is reverted.
 - The wrapper must stay POSIX sh that runs under dash, must not `exec docker`
   (Herdr identifies the pane by the `pi` process), and keeps docker's exit
-  status.
+  status. Its body stays in one brace group so an edit or `git pull` during a
+  session cannot change what the running wrapper executes.

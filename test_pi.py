@@ -8,6 +8,8 @@ import subprocess
 from pathlib import Path
 from typing import NamedTuple
 
+import pytest
+
 ROOT = Path(__file__).parent
 WRAPPER = ROOT / "pi"
 FAKE_KEY = "opencode-go-test-key-do-not-leak"
@@ -116,6 +118,7 @@ def _run(
     agent: str | None = None,
     run_status: str = "0",
     wrapper: Path | None = None,
+    interpreter: str | None = None,
     uname: str | None = None,
     fake_id: tuple[str, str] | None = None,
     fake_find: str | None = None,
@@ -188,8 +191,14 @@ def _run(
         env["TYPESAFE_API_KEY"] = "typesafe-test-key-do-not-leak"
     env.update(also or {})
 
+    command = [str(wrapper or WRAPPER), *args]
+    # The bug this test file proves is about how sh reads a script, and the
+    # shells differ, so a test can name the interpreter to run the wrapper
+    # with. The wrapper itself stays POSIX.
+    if interpreter is not None:
+        command = [interpreter, *command]
     completed = subprocess.run(
-        [str(wrapper or WRAPPER), *args],
+        command,
         capture_output=True,
         text=True,
         cwd=project,
@@ -1378,6 +1387,42 @@ def test_wrapper_changes_the_image_tag_when_a_build_input_changes(
     assert tag(tmp_path / "again") == unchanged
     for name in ("Dockerfile.pi", "entrypoint.sh", "herdr-fleet.md"):
         assert tag(tmp_path / name.replace(".", "-"), changed=name) != unchanged
+
+
+def test_wrapper_reads_the_whole_script_before_running_it(tmp_path: Path) -> None:
+    """A pull or edit during a session replaces the wrapper while it is still
+    alive for `docker run`. sh reads a script as it goes, so without the brace
+    group the shell resumed at the old byte offset in the new file, ran
+    whatever text was there, and never reached the checks and cleanup after
+    `docker run`. bash is where that was seen, as macOS /bin/sh, and it still
+    reads that way, so the copy is run under bash."""
+
+    bash = shutil.which("bash")
+    if bash is None:
+        pytest.skip("needs bash to reproduce a script replaced while it runs")
+
+    wrapper = _wrapper_with_inputs(tmp_path / "checkout")
+    replacement = tmp_path / "newer-pi"
+    # Longer than the wrapper and not shell, so the offset the shell resumes
+    # at lands inside a word that cannot resolve. A shorter file would only
+    # read as end of input and hide the bug.
+    replacement.write_text("not-a-command = not shell\n" * 5000)
+
+    completed, invocations = _run(
+        tmp_path / "run",
+        wrapper=wrapper,
+        interpreter=bash,
+        run_status="7",
+        tags="latest deadbeef",
+        agent=f'cat "{replacement}" > "{wrapper}"',
+    )
+
+    # Docker's status still comes back, and the cleanup after `docker run`
+    # still asked docker for the old tags: neither happens when the shell
+    # dies on the text the replacement left at its old offset.
+    assert completed.returncode == 7
+    assert "command not found" not in completed.stderr
+    assert any(argv and argv[0] == "images" for argv in invocations)
 
 
 def test_wrapper_builds_with_the_host_ids_on_linux(tmp_path: Path) -> None:

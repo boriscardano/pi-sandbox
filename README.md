@@ -59,12 +59,14 @@ install for every project.
 Edits to `Dockerfile.pi`, `entrypoint.sh` or `herdr-fleet.md` rebuild
 automatically on the next launch. The image is tagged by the contents of those
 files, so a changed file produces a tag that does not exist yet and the wrapper
-builds it before starting. It also rebuilds when npm has a newer Pi or
-`herdr.dev` a newer Herdr than the image's label records, and removes the older
-images after the session, so nothing accumulates. That removal reaches every
-other `pi-sandbox` image it can, including one built by another checkout of
-this repository or, on Linux, by another host user, whose next launch then
-rebuilds. The container itself is removed by `--rm` when Pi exits.
+builds it before starting. It also rebuilds when both npm and `herdr.dev`
+answer and either has a newer release than the image's label records. When
+either lookup fails it keeps the existing image, or builds with the Dockerfile
+defaults if there is none, and says so. It removes the older images after the
+session, so nothing accumulates. That removal reaches every other `pi-sandbox`
+image it can, including one built by another checkout of this repository or, on
+Linux, by another host user, whose next launch then rebuilds. The container
+itself is removed by `--rm` when Pi exits.
 
 ## What the container can and cannot see
 
@@ -207,22 +209,24 @@ They live in the agent's home, so they reach a project through that project's
 state volume. A new project's first start downloads them. Offline, that start
 proceeds without them, and the next start with a network installs them. The
 entrypoint reinstalls all four on every start, so an existing volume ends up at
-their newest releases even though an image rebuild does not reach it. Lifecycle
-scripts stay off for that install, so a new release cannot run one in a
-container holding the API key. Pi's own subcommands run against the volume
-rather than your host Pi, so `pi list` shows what a project actually has and
-`pi install npm:<package>` adds one. `install`, `remove`, `uninstall`, `list`,
-`config` and `auth` all work this way. So does `pi update --extensions`, but
-bare `pi update` targets Pi itself, which lives outside the volume in a
-root-owned directory the agent cannot write. Resetting the volume, as under
-State and reset, is the other way to pick up a change.
+their newest releases even though an image rebuild does not reach it. A
+`pi remove npm:<package>` inside the sandbox therefore lasts only until the next
+start, which installs it again. Lifecycle scripts stay off for that install, so
+a new release cannot run one in a container holding the API key. Pi's own
+subcommands run against the volume rather than your host Pi, so `pi list` shows
+what a project actually has and `pi install npm:<package>` adds one. `install`,
+`remove`, `uninstall`, `list`, `config` and `auth` all work this way. So does
+`pi update --extensions`, but bare `pi update` targets Pi itself, which lives
+outside the volume in a root-owned directory the agent cannot write. Resetting
+the volume, as under State and reset, is the other way to pick up a change.
 
-Change the set by editing the four names in `entrypoint.sh`, which is the one
-place they are listed. The owner chose to always run the newest releases rather
-than reviewed pins, which means a new upstream release reaches the sandbox, and
-the API key it holds, without review. Lifecycle scripts stay off, which limits
-what a release can run at install time but not what the extension code does
-once it is loaded.
+Change the set by editing the four names in `entrypoint.sh`, which is where the
+install list lives. To drop one for good, run `pi remove npm:<package>` and
+delete its name from that list, then relaunch, which rebuilds the image. The
+owner chose to always run the newest releases rather than reviewed pins, which
+means a new upstream release reaches the sandbox, and the API key it holds,
+without review. Lifecycle scripts stay off, which limits what a release can run
+at install time but not what the extension code does once it is loaded.
 
 ## Git
 

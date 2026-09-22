@@ -241,11 +241,11 @@ fi
 # Look up the newest release of Pi and Herdr so a newer one rebuilds the image
 # even though the content tag has not changed. The host may lack python3 and
 # jq, so sed pulls the version out of the JSON, and anything that is not a
-# plain semver is unknown rather than trusted. `--max-time 5` keeps an offline
-# or slow registry from delaying the launch, and a missing curl fails the same
-# way. One unknown version makes the whole comparison unknown: a newer Pi must
-# not rebuild an image whose Herdr version cannot be checked, so only a missing
-# image is built then.
+# plain semver is unknown rather than trusted. `--max-time 5` per lookup bounds
+# an offline or slow registry to a few seconds, and a missing curl fails the
+# same way. One unknown version makes the whole comparison unknown: a newer Pi
+# must not rebuild an image whose Herdr version cannot be checked, so only a
+# missing image is built then.
 lookup_version() {
     body=$(curl -fsS --max-time 5 "$1" 2>/dev/null) || return 0
     version=$(printf '%s' "$body" | sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')

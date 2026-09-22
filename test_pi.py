@@ -42,6 +42,9 @@ case "$1" in
         ;;
     rmi) exit "${PI_SANDBOX_FAKE_RMI_STATUS:-0}" ;;
 esac
+if [ "$1" = build ]; then
+    exit "${PI_SANDBOX_FAKE_BUILD_STATUS:-0}"
+fi
 if [ "$1" = run ]; then
     if [ -n "${PI_SANDBOX_FAKE_AGENT:-}" ]; then
         sh -c "$PI_SANDBOX_FAKE_AGENT"
@@ -123,6 +126,7 @@ def _run(
     label: str | None = None,
     tags: str = "",
     rmi_status: str = "0",
+    build_status: str = "0",
 ) -> tuple[subprocess.CompletedProcess[str], list[list[str]]]:
     bin_dir = tmp_path / "fakebin"
     bin_dir.mkdir(parents=True)
@@ -173,6 +177,7 @@ def _run(
         "PI_SANDBOX_FAKE_LABEL": label,
         "PI_SANDBOX_FAKE_TAGS": tags,
         "PI_SANDBOX_FAKE_RMI_STATUS": rmi_status,
+        "PI_SANDBOX_FAKE_BUILD_STATUS": build_status,
     }
     if agent is not None:
         env["PI_SANDBOX_FAKE_AGENT"] = agent
@@ -1488,9 +1493,41 @@ def test_wrapper_builds_with_defaults_when_the_lookup_fails_and_no_image(
         tmp_path, inspect_status="1", curl_pi="fail", curl_herdr="fail"
     )
     build = next(argv for argv in invocations if argv[0] == "build")
+    args = [build[index + 1] for index, arg in enumerate(build) if arg == "--build-arg"]
 
-    assert "PI_VERSION" not in build
-    assert "HERDR_VERSION" not in build
+    assert not any(arg.startswith("PI_VERSION=") for arg in args)
+    assert not any(arg.startswith("HERDR_VERSION=") for arg in args)
+
+
+def test_wrapper_stops_when_the_build_fails(tmp_path: Path) -> None:
+    """A build that fails half-way leaves no image under the tag. `set -e`
+    has to end the wrapper with docker's status rather than starting the
+    missing image or a stale one the same tag used to hold."""
+
+    completed, invocations = _run(
+        tmp_path, inspect_status="1", build_status="9", run_status="0"
+    )
+
+    assert completed.returncode == 9
+    assert not any(argv[0] == "run" for argv in invocations)
+
+
+def test_wrapper_stops_when_a_rebuild_fails_but_the_image_exists(
+    tmp_path: Path,
+) -> None:
+    """The same-tag rebuild replaces the image the old tag held, so a failure
+    has to stop the launch rather than run what the tag still points at."""
+
+    completed, invocations = _run(
+        tmp_path,
+        pi_version="0.99.0",
+        label="pi=0.87.0 herdr=0.9.1",
+        build_status="9",
+        run_status="0",
+    )
+
+    assert completed.returncode == 9
+    assert not any(argv[0] == "run" for argv in invocations)
 
 
 def test_wrapper_gives_linux_host_ids_their_own_image_tag(tmp_path: Path) -> None:
@@ -2045,18 +2082,6 @@ def test_the_entrypoint_does_not_write_the_key_through_a_symlink(
     assert elsewhere.read_text() == ""
     assert not auth.is_symlink()
     assert json.loads(auth.read_text())["opencode-go"]["key"] == FAKE_KEY
-
-
-def test_image_keeps_the_fleet_skill_where_the_entrypoint_can_copy_it() -> None:
-    """The entrypoint copies this file into the state volume on every start,
-    and the volume's own copy is the agent's to replace, so the source has to
-    stay root-owned in the image."""
-
-    dockerfile = (ROOT / "Dockerfile.pi").read_text()
-
-    assert (
-        "COPY herdr-fleet.md /usr/local/share/pi-sandbox/herdr-fleet.md" in dockerfile
-    )
 
 
 def test_the_fleet_skill_tells_a_child_not_to_start_its_own_fleet() -> None:

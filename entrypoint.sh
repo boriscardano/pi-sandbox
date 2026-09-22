@@ -56,24 +56,28 @@ fi
 # registry that is down or slow, or a home the agent has ruined, must cost the
 # update rather than the session.
 #
-# The four packages are also installed in Dockerfile.pi, which seeds a new
-# volume; keep the two lists in step. Lifecycle scripts stay off, as there.
-# `timeout` bounds the whole step so a hung registry cannot stop Pi from
+# The four packages are listed here and nowhere else, since this installs
+# them into a new volume and updates an existing one alike. Lifecycle scripts
+# stay off, so a new release cannot run one in a sandbox that holds the API
+# key. `timeout` bounds the whole step so a hung registry cannot stop Pi from
 # starting. Pi's own subcommands are passed through to it untouched, so they
 # must not trigger an install of their own.
 case "${1:-}" in
     install | remove | uninstall | update | list | config | auth) ;;
     *)
+        # shellcheck disable=SC2016  # $package expands when sh runs the script, not here
         if ! timeout 120 sh -c '
             export npm_config_ignore_scripts=true
+            failed=0
             for package in \
                 pi-subagents \
                 @tintinweb/pi-subagents \
                 pi-background-tasks \
                 pi-extension-manager
             do
-                pi install "npm:$package"
+                pi install "npm:$package" || failed=1
             done
+            exit "$failed"
         ' >/dev/null 2>&1; then
             printf '%s\n' "pi-sandbox: could not update the extensions" >&2
         fi

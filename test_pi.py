@@ -1296,9 +1296,7 @@ def test_wrapper_keeps_the_exit_status_when_image_removal_fails(
     """Another running session uses an image, so `docker rmi` fails there and
     the wrapper has to stay quiet about it and return docker's own status."""
 
-    completed, invocations = _run(
-        tmp_path, tags="aaaa", rmi_status="1", run_status="7"
-    )
+    completed, invocations = _run(tmp_path, tags="aaaa", rmi_status="1", run_status="7")
 
     assert completed.returncode == 7
     assert "pi-sandbox:aaaa" not in completed.stderr
@@ -1416,9 +1414,7 @@ def test_wrapper_rebuilds_the_same_tag_when_npm_has_a_newer_pi(
     wrapper has to notice the image's label differs and rebuild under the same
     tag with the new version as a build argument."""
 
-    _, invocations = _run(
-        tmp_path, pi_version="0.99.0", label="pi=0.87.0 herdr=0.9.1"
-    )
+    _, invocations = _run(tmp_path, pi_version="0.99.0", label="pi=0.87.0 herdr=0.9.1")
     inspect = invocations[0]
     build = next(argv for argv in invocations if argv[0] == "build")
     args = [build[index + 1] for index, arg in enumerate(build) if arg == "--build-arg"]
@@ -1461,9 +1457,12 @@ def test_wrapper_treats_a_failed_lookup_as_unknown(tmp_path: Path) -> None:
 
 def test_wrapper_treats_an_invalid_version_as_unknown(tmp_path: Path) -> None:
     """A registry answer that is not a plain semver must not become a build
-    argument or a tag the Dockerfile would use."""
+    argument or a tag the Dockerfile would use. The label differs from the
+    valid versions, so without the check this would rebuild."""
 
-    _, invocations = _run(tmp_path, pi_version="not a version")
+    _, invocations = _run(
+        tmp_path, pi_version="not a version", label="pi=0.87.0 herdr=0.9.1"
+    )
 
     assert [argv for argv in invocations if argv[0] == "build"] == []
 
@@ -1525,31 +1524,20 @@ def test_wrapper_stays_in_the_process_tree_so_herdr_can_identify_pi(
     assert str(WRAPPER) in _docker_run_parent(tmp_path / "docker.log")
 
 
-def test_image_installs_the_extensions_after_becoming_the_agent_user() -> None:
-    """Above `USER agent` they land root-owned in the layer that seeds the
-    state volume, leaving the agent unable to write its own Pi config. No
-    version is pinned: the owner chose to always run the newest release, and
-    the entrypoint reinstalls the same four on every start."""
+def test_image_does_not_seed_extensions_or_skills() -> None:
+    """The entrypoint installs the four extensions and rewrites both Herdr
+    skills into the state volume on every start, so seeding them in the image
+    would only duplicate the list and reach a new volume. The image keeps just
+    the root-owned fleet skill the entrypoint copies from."""
 
     dockerfile = (ROOT / "Dockerfile.pi").read_text()
-    lines = dockerfile.splitlines()
-    installs = [
-        index
-        for index, line in enumerate(lines)
-        if line.strip().startswith("&& pi install npm:")
-    ]
 
-    assert len(installs) == 4
-    assert min(installs) > lines.index("USER agent")
-    # No version is pinned on any of the four, including the scoped one.
-    for package in (
-        "pi-subagents@",
-        "@tintinweb/pi-subagents@",
-        "pi-background-tasks@",
-        "pi-extension-manager@",
-    ):
-        assert package not in dockerfile
-    assert "export npm_config_ignore_scripts=true" in dockerfile
+    assert "pi install" not in dockerfile
+    assert "herdr --skill >" not in dockerfile
+    assert "/home/agent/.pi" not in dockerfile
+    assert (
+        "COPY herdr-fleet.md /usr/local/share/pi-sandbox/herdr-fleet.md" in dockerfile
+    )
 
 
 def test_image_takes_pi_version_as_a_build_argument() -> None:
@@ -1591,7 +1579,7 @@ def test_image_builds_the_agent_user_with_build_argument_ids() -> None:
     )
     created = next(index for index, line in enumerate(lines) if "useradd" in line)
     assert removed < created
-    # One groupadd, always named agent, so the COPY --chown below resolves for
+    # One groupadd, always named agent, so `useradd --gid agent` resolves for
     # any gid without a second branch or a getent lookup.
     assert "getent" not in dockerfile
     assert 'groupadd --non-unique --gid "$AGENT_GID" agent' in dockerfile
@@ -1608,6 +1596,12 @@ def test_image_verifies_herdr_against_the_manifest_digest() -> None:
 
     assert "ARG HERDR_VERSION=" in dockerfile
     assert "https://herdr.dev/latest.json" in dockerfile
+    assert (
+        "https://github.com/herdrdev/herdr/releases/download/v$HERDR_VERSION/"
+        in dockerfile
+    )
+    # A manifest that names another host or release fails the build.
+    assert "herdr asset URL is not the expected release" in dockerfile
     assert "linux-x86_64" in dockerfile and "linux-aarch64" in dockerfile
     assert "sha256sum --check" in dockerfile
     # The digest is read from the manifest, not written into the Dockerfile.
@@ -1690,19 +1684,21 @@ def _run_entrypoint(
         f'printf "%s\\n" "$@" >>{calls_log}\n'
         f'printf "SCRIPTS=%s\\n" "${{npm_config_ignore_scripts:-}}" >>{calls_log}\n'
         f'printf "%s\\n" "$@" >{argv_log}\n'
-        f'env >{env_log}\n'
-        'if [ "$1" = install ] && [ "${PI_SANDBOX_FAKE_PI_INSTALL_STATUS:-0}" != 0 ]; then\n'
-        '    exit "${PI_SANDBOX_FAKE_PI_INSTALL_STATUS}"\n'
+        f"env >{env_log}\n"
+        'if [ "$1" = install ]; then\n'
+        '    if [ -n "${PI_SANDBOX_FAKE_PI_INSTALL_FAIL:-}" ] && [ "$2" = "${PI_SANDBOX_FAKE_PI_INSTALL_FAIL}" ]; then\n'
+        "        exit 1\n"
+        "    fi\n"
+        '    if [ "${PI_SANDBOX_FAKE_PI_INSTALL_STATUS:-0}" != 0 ]; then\n'
+        '        exit "${PI_SANDBOX_FAKE_PI_INSTALL_STATUS}"\n'
+        "    fi\n"
         "fi\n"
         "exit 0\n"
     )
     # The extension update is bounded by `timeout`, so log that it was used and
     # then run the command it wraps.
     (bin_dir / "timeout").write_text(
-        "#!/bin/sh\n"
-        f'printf "%s\\n" "$*" >>{timeout_log}\n'
-        "shift\n"
-        'exec "$@"\n'
+        f'#!/bin/sh\nprintf "%s\\n" "$*" >>{timeout_log}\nshift\nexec "$@"\n'
     )
     # The fleet skill is copied from a root-owned path the test cannot write,
     # so record the copy instead of performing it. A failure can be forced to
@@ -1733,10 +1729,14 @@ def _run_entrypoint(
         lines = block.strip().splitlines()
         scripts.append(lines[-1].removeprefix("SCRIPTS="))
         calls.append(lines[:-1])
-    copied = [
-        cp_log.read_text().splitlines()[index : index + 2]
-        for index in range(0, len(cp_log.read_text().splitlines()), 2)
-    ] if cp_log.exists() else []
+    copied = (
+        [
+            cp_log.read_text().splitlines()[index : index + 2]
+            for index in range(0, len(cp_log.read_text().splitlines()), 2)
+        ]
+        if cp_log.exists()
+        else []
+    )
 
     # Whatever it does, it must not print the key on the way.
     assert FAKE_KEY not in completed.stdout + completed.stderr
@@ -1859,6 +1859,22 @@ def test_the_entrypoint_starts_pi_when_the_extension_update_fails(
     started = _run_entrypoint(tmp_path, PI_SANDBOX_FAKE_PI_INSTALL_STATUS="1")
 
     assert started.argv == ["--model", "kimi-k3"]
+    assert "could not update the extensions" in started.stderr
+
+
+def test_the_entrypoint_reports_a_partial_extension_update_failure(
+    tmp_path: Path,
+) -> None:
+    """One package failing must be reported even though the other three
+    succeed, and the rest must still be attempted rather than skipped."""
+
+    started = _run_entrypoint(
+        tmp_path, PI_SANDBOX_FAKE_PI_INSTALL_FAIL="npm:pi-subagents"
+    )
+    installs = [call for call in started.calls if call[:1] == ["install"]]
+
+    assert started.argv == ["--model", "kimi-k3"]
+    assert len(installs) == 4
     assert "could not update the extensions" in started.stderr
 
 
@@ -2031,26 +2047,13 @@ def test_the_entrypoint_does_not_write_the_key_through_a_symlink(
     assert json.loads(auth.read_text())["opencode-go"]["key"] == FAKE_KEY
 
 
-def test_image_ships_both_herdr_skills_as_the_agent_user() -> None:
-    """Herdr's own skill for the CLI, and ours for what is different here. They
-    land in the home directory, so they follow the extensions' ownership rule,
-    and the copied one has to arrive owned by the user that reads it. A
-    root-owned copy is what the entrypoint refreshes an existing volume's
-    skill from."""
+def test_image_keeps_the_fleet_skill_where_the_entrypoint_can_copy_it() -> None:
+    """The entrypoint copies this file into the state volume on every start,
+    and the volume's own copy is the agent's to replace, so the source has to
+    stay root-owned in the image."""
 
     dockerfile = (ROOT / "Dockerfile.pi").read_text()
-    lines = dockerfile.splitlines()
-    skills = [
-        index
-        for index, line in enumerate(lines)
-        if "/home/agent/.pi/agent/skills/" in line
-    ]
 
-    assert min(skills) > lines.index("USER agent")
-    assert any("herdr --skill >" in line for line in lines)
-    assert any(
-        line.startswith("COPY --chown=agent:agent herdr-fleet.md") for line in lines
-    )
     assert (
         "COPY herdr-fleet.md /usr/local/share/pi-sandbox/herdr-fleet.md" in dockerfile
     )

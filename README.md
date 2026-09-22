@@ -61,8 +61,10 @@ automatically on the next launch. The image is tagged by the contents of those
 files, so a changed file produces a tag that does not exist yet and the wrapper
 builds it before starting. It also rebuilds when npm has a newer Pi or
 `herdr.dev` a newer Herdr than the image's label records, and removes the older
-images after the session, so nothing accumulates. The container itself is
-removed by `--rm` when Pi exits.
+images after the session, so nothing accumulates. That removal reaches every
+other `pi-sandbox` image it can, including one built by another checkout of
+this repository or, on Linux, by another host user, whose next launch then
+rebuilds. The container itself is removed by `--rm` when Pi exits.
 
 ## What the container can and cannot see
 
@@ -184,8 +186,7 @@ docker exec -it "$(docker ps -q --filter label=pi-sandbox=1 | head -1)" bash
 
 ## Extensions
 
-The image ships four Pi extensions, installed from npm at their newest
-release:
+The entrypoint installs four Pi extensions from npm at their newest release:
 
 - `npm:pi-subagents`, delegation to subagents and scripted multi-agent
   workflows, under `/subagents`.
@@ -203,24 +204,25 @@ The Herdr fleet below is a fourth way to do that, with whole Pi sessions
 instead of subagents. Everything still dies with the container.
 
 They live in the agent's home, so they reach a project through that project's
-state volume. The entrypoint reinstalls all four on every start, so an existing
-volume ends up at their newest releases even though an image rebuild does not
-reach it. Lifecycle scripts stay off for that install, as they do at build
-time, so a new release cannot run one in a container holding the API key. Pi's
-own subcommands run against the volume rather than your host Pi, so `pi list`
-shows what a project actually has and `pi install npm:<package>` adds one.
-`install`, `remove`, `uninstall`, `list`, `config` and `auth` all work this
-way. So does `pi update --extensions`, but bare `pi update` targets Pi itself,
-which lives outside the volume in a root-owned directory the agent cannot
-write. Resetting the volume, as under State and reset, is the other way to pick
-up a change.
+state volume. A new project's first start downloads them. Offline, that start
+proceeds without them, and the next start with a network installs them. The
+entrypoint reinstalls all four on every start, so an existing volume ends up at
+their newest releases even though an image rebuild does not reach it. Lifecycle
+scripts stay off for that install, so a new release cannot run one in a
+container holding the API key. Pi's own subcommands run against the volume
+rather than your host Pi, so `pi list` shows what a project actually has and
+`pi install npm:<package>` adds one. `install`, `remove`, `uninstall`, `list`,
+`config` and `auth` all work this way. So does `pi update --extensions`, but
+bare `pi update` targets Pi itself, which lives outside the volume in a
+root-owned directory the agent cannot write. Resetting the volume, as under
+State and reset, is the other way to pick up a change.
 
-Change the set by editing the `pi install` lines in `Dockerfile.pi` and in
-`entrypoint.sh`, which lists the same four. The owner chose to always run the
-newest releases rather than reviewed pins, which means a new upstream release
-reaches the sandbox, and the API key it holds, without review. Lifecycle
-scripts stay off, which limits what a release can run at install time but not
-what the extension code does once it is loaded.
+Change the set by editing the four names in `entrypoint.sh`, which is the one
+place they are listed. The owner chose to always run the newest releases rather
+than reviewed pins, which means a new upstream release reaches the sandbox, and
+the API key it holds, without review. Lifecycle scripts stay off, which limits
+what a release can run at install time but not what the extension code does
+once it is loaded.
 
 ## Git
 
@@ -382,9 +384,8 @@ volume, and checks `herdr.dev` for updates on a timer like any other Herdr.
   Measured, a Pi session costs about fifteen of the container's 512 processes
   and a few hundred megabytes, and `docker run` sets no memory limit, so a
   runaway fleet reaches the machine's memory before it reaches `--pids-limit`.
-- The image is roughly 1.3 GB, mostly Pi's npm dependency tree and the
-  extensions. It carries Node 24, Python 3.11, uv, Git, ripgrep, fd and the
-  23 MB Herdr binary.
+- The image is roughly 1.3 GB, mostly Pi's npm dependency tree. It carries
+  Node 24, Python 3.11, uv, Git, ripgrep, fd and the 23 MB Herdr binary.
 
 These are accepted limits, and [SECURITY.md](SECURITY.md) defines what does
 count as a vulnerability here and how to report it privately.

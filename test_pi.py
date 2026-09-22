@@ -1404,8 +1404,9 @@ def test_wrapper_reads_the_whole_script_before_running_it(tmp_path: Path) -> Non
     wrapper = _wrapper_with_inputs(tmp_path / "checkout")
     replacement = tmp_path / "newer-pi"
     # Longer than the wrapper and not shell, so the offset the shell resumes
-    # at lands inside a word that cannot resolve. A shorter file would only
-    # read as end of input and hide the bug.
+    # at lands inside a word that cannot resolve, which is the loud failure
+    # the owner saw. A shorter file only reads as end of input and stops
+    # silently.
     replacement.write_text("not-a-command = not shell\n" * 5000)
 
     completed, invocations = _run(
@@ -1416,6 +1417,10 @@ def test_wrapper_reads_the_whole_script_before_running_it(tmp_path: Path) -> Non
         tags="latest deadbeef",
         agent=f'cat "{replacement}" > "{wrapper}"',
     )
+
+    # The rewrite is the whole point, so fail here rather than pass vacuously
+    # if the fake docker's agent never replaced the wrapper.
+    assert wrapper.read_text() == replacement.read_text()
 
     # Docker's status still comes back, and the cleanup after `docker run`
     # still asked docker for the old tags: neither happens when the shell

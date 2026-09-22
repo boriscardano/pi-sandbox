@@ -48,42 +48,14 @@ RUN : "${PI_VERSION:?the wrapper must pass --build-arg PI_VERSION}" \
 COPY --from=ghcr.io/astral-sh/uv:0.12.17@sha256:10787c682e4184e4f290de1171fd4703dc63de99221f10fe1c99002ce7fa9acc \
     /uv /uvx /usr/local/bin/
 
-# Herdr, so the agent can run a fleet of Pi children inside the sandbox. The
-# binary and its SHA-256 both come from herdr.dev/latest.json at build time, so
-# the digest protects against a corrupted or swapped download and not against a
-# bad release, and the asset URL has to be the GitHub release for that version.
-# There is no default: the manifest only carries a digest for its current
-# release.
-ARG HERDR_VERSION
-RUN set -eu; \
-    : "${HERDR_VERSION:?the wrapper must pass --build-arg HERDR_VERSION}"; \
-    case "$(dpkg --print-architecture)" in \
-        amd64) target=linux-x86_64 ;; \
-        arm64) target=linux-aarch64 ;; \
-        *) printf 'no herdr release for %s\n' "$(dpkg --print-architecture)" >&2; \
-            exit 1 ;; \
-    esac; \
-    curl -LsSf -o /tmp/herdr-latest.json https://herdr.dev/latest.json; \
-    python3 -c 'import json,sys; m=json.load(open("/tmp/herdr-latest.json")); t,w=sys.argv[1:3]; assert m.get("version")==w, "herdr manifest is "+str(m.get("version"))+ ", not "+w; print(m["assets"][t]); print(m["sha256"][t])' "$target" "$HERDR_VERSION" > /tmp/herdr-release; \
-    url=$(sed -n 1p /tmp/herdr-release); \
-    case "$url" in \
-        "https://github.com/herdrdev/herdr/releases/download/v$HERDR_VERSION/"*) ;; \
-        *) printf 'herdr asset URL is not the expected release: %s\n' "$url" >&2; \
-            exit 1 ;; \
-    esac; \
-    curl -LsSf -o /usr/local/bin/herdr "$url"; \
-    printf '%s  %s\n' "$(sed -n 2p /tmp/herdr-release)" /usr/local/bin/herdr \
-        | sha256sum --check --quiet; \
-    chmod 0755 /usr/local/bin/herdr
+# The label holds the version the wrapper compares, so a newer Pi is detected
+# without a second inspect. `pi-sandbox.image=1` above stays the marker
+# `docker image prune` filters on.
+LABEL pi-sandbox.versions="pi=$PI_VERSION"
 
-# One label holds both versions the wrapper compares, so a rebuild of either
-# tool is detected without a second inspect. `pi-sandbox.image=1` above stays
-# the marker `docker image prune` filters on.
-LABEL pi-sandbox.versions="pi=$PI_VERSION herdr=$HERDR_VERSION"
-
-# The entrypoint, which starts this container's own Herdr server and writes the
-# subscription key Pi expects in auth.json before becoming Pi. Copied in while
-# still root, since /usr/local/bin is not writable by the agent.
+# The entrypoint, which writes the subscription key Pi expects in auth.json
+# before becoming Pi. Copied in while still root, since /usr/local/bin is not
+# writable by the agent.
 COPY --chmod=0755 entrypoint.sh /usr/local/bin/pi-sandbox-entrypoint
 
 # The bind-mounted checkout is owned by the host user, so Git needs /workspace
@@ -131,11 +103,6 @@ USER agent
 # Extensions. The entrypoint installs the four into the state volume on every
 # start, which is also what reaches a project whose volume already exists, so
 # that is the one place to change the set. Nothing is seeded here.
-
-# What the fleet is, since a model that cannot see the topology will not invent
-# it. The entrypoint copies this into the volume's skill directory on every
-# start, so it stays root-owned and out of the agent's reach.
-COPY herdr-fleet.md /usr/local/share/pi-sandbox/herdr-fleet.md
 
 WORKDIR /workspace
 ENTRYPOINT ["pi-sandbox-entrypoint"]

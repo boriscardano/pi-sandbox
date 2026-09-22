@@ -6,12 +6,6 @@
 # any other script.
 set -eu
 
-# A HERDR_SOCKET_PATH inherited from the host pane would move this container's
-# Herdr server onto that path, and a stray HERDR_PANE_ID would make Pi read
-# itself as one of the children it starts. The wrapper does not forward them,
-# but PI_SANDBOX_ENV takes names, so drop them here rather than trusting that.
-unset HERDR_SOCKET_PATH HERDR_PANE_ID HERDR_TAB_ID HERDR_WORKSPACE_ID
-
 # Pi reads the opencode-go subscription from auth.json rather than from the
 # environment, so the key arrives as a variable and is written out here, with
 # any other provider the agent authenticated left alone. It lands in the state
@@ -50,11 +44,11 @@ os.replace(pending, path)
     printf '%s\n' "pi-sandbox: could not write the subscription key to auth.json" >&2
 fi
 
-# Extensions and the two Herdr skills live in /home/agent, which is the
-# project's state volume, so an image rebuild does not reach a project whose
-# volume already exists. Bring both up to date on every start, best effort: a
-# registry that is down or slow, or a home the agent has ruined, must cost the
-# update rather than the session.
+# Extensions live in /home/agent, which is the project's state volume, so an
+# image rebuild does not reach a project whose volume already exists. Bring
+# them up to date on every start, best effort: a registry that is down or
+# slow, or a home the agent has ruined, must cost the update rather than the
+# session.
 #
 # The four packages are listed here and nowhere else. `pi install` without a
 # version adds a missing one and unpins a pinned one, but leaves an installed
@@ -88,27 +82,12 @@ case "${1:-}" in
         ;;
 esac
 
-# Herdr's own skill is printed by the binary and ours is copied from the
-# root-owned location in the image, so both describe the installed version
-# rather than a copy the volume froze at an earlier build. Local and cheap, so
-# no timeout: a failure prints one line and Pi still starts.
-if ! {
-    mkdir -p "$HOME/.pi/agent/skills/herdr" "$HOME/.pi/agent/skills/herdr-fleet" \
-        && herdr --skill > "$HOME/.pi/agent/skills/herdr/SKILL.md" \
-        && cp /usr/local/share/pi-sandbox/herdr-fleet.md \
-            "$HOME/.pi/agent/skills/herdr-fleet/SKILL.md"
-} 2>/dev/null; then
-    printf '%s\n' "pi-sandbox: could not refresh the herdr skills" >&2
-fi
+# Volumes made by earlier images still hold the two Herdr skills, which now
+# describe a tool this image does not carry. Remove them, best effort, so a
+# skill listing cannot point at a missing binary. This can go once the old
+# volumes are gone.
+rm -rf "$HOME/.pi/agent/skills/herdr" "$HOME/.pi/agent/skills/herdr-fleet" 2>/dev/null || true
 
-# Herdr's API commands do not start a server, so the agent's first one would be
-# told `server_not_running`. Its socket lives in the agent's home, and no host
-# socket is mounted, so the fleet it serves reaches nothing outside this
-# container. HERDR_ENV is what the herdr skill checks before it will act.
-export HERDR_ENV=1
-herdr server >/dev/null 2>&1 &
-
-# Not `herdr server` in the foreground and not Pi as a child: Pi replaces this
-# script, so the container's foreground process is Pi and a Herdr pane on the
-# host still sees a Pi agent.
+# Pi replaces this script, so the container's foreground process is Pi and a
+# Herdr pane on the host still sees a Pi agent.
 exec pi "$@"

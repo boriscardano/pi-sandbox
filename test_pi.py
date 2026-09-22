@@ -56,9 +56,9 @@ fi
 exit 0
 """
 
-# The wrapper looks up the newest Pi and Herdr releases before deciding to
-# rebuild. This answers both endpoints from env vars, and can fail, so no test
-# touches the network.
+# The wrapper looks up the newest Pi release before deciding to rebuild. This
+# answers that endpoint from an env var, and can fail, so no test touches the
+# network.
 FAKE_CURL = """#!/bin/sh
 url=''
 while [ $# -gt 0 ]; do
@@ -71,10 +71,6 @@ case "$url" in
     *pi-coding-agent/latest)
         [ "${PI_SANDBOX_FAKE_CURL_PI:-ok}" = fail ] && exit 22
         body='{"version":"'"${PI_SANDBOX_FAKE_PI_VERSION:-0.87.0}"'"}'
-        ;;
-    *herdr.dev/latest.json)
-        [ "${PI_SANDBOX_FAKE_CURL_HERDR:-ok}" = fail ] && exit 22
-        body='{"version":"'"${PI_SANDBOX_FAKE_HERDR_VERSION:-0.9.1}"'"}'
         ;;
     *) exit 22 ;;
 esac
@@ -117,9 +113,7 @@ def _run(
     fake_id: tuple[str, str] | None = None,
     fake_find: str | None = None,
     pi_version: str = "0.87.0",
-    herdr_version: str = "0.9.1",
     curl_pi: str = "ok",
-    curl_herdr: str = "ok",
     label: str | None = None,
     tags: str = "",
     rmi_status: str = "0",
@@ -160,7 +154,7 @@ def _run(
     project.mkdir(parents=True, exist_ok=True)
 
     if label is None:
-        label = f"pi={pi_version} herdr={herdr_version}"
+        label = f"pi={pi_version}"
     env = {
         "PATH": f"{bin_dir}:/usr/bin:/bin",
         "HOME": str(home if home is not None else tmp_path / "home"),
@@ -168,9 +162,7 @@ def _run(
         "PI_SANDBOX_FAKE_INSPECT": inspect_status,
         "PI_SANDBOX_FAKE_RUN_STATUS": run_status,
         "PI_SANDBOX_FAKE_PI_VERSION": pi_version,
-        "PI_SANDBOX_FAKE_HERDR_VERSION": herdr_version,
         "PI_SANDBOX_FAKE_CURL_PI": curl_pi,
-        "PI_SANDBOX_FAKE_CURL_HERDR": curl_herdr,
         "PI_SANDBOX_FAKE_LABEL": label,
         "PI_SANDBOX_FAKE_TAGS": tags,
         "PI_SANDBOX_FAKE_RMI_STATUS": rmi_status,
@@ -235,7 +227,7 @@ def _wrapper_with_inputs(directory: Path) -> Path:
     test can edit one input without touching the checkout."""
 
     directory.mkdir(parents=True, exist_ok=True)
-    for name in ("pi", "Dockerfile.pi", "entrypoint.sh", "herdr-fleet.md"):
+    for name in ("pi", "Dockerfile.pi", "entrypoint.sh"):
         shutil.copy(ROOT / name, directory / name)
     wrapper = directory / "pi"
     wrapper.chmod(0o755)
@@ -1364,9 +1356,9 @@ def test_wrapper_tags_the_image_by_content_and_uses_it_for_inspect_and_run(
 def test_wrapper_changes_the_image_tag_when_a_build_input_changes(
     tmp_path: Path,
 ) -> None:
-    """A pull that touches the Dockerfile, the entrypoint or the fleet skill
-    has to produce a tag that does not exist yet, or the build-if-missing
-    check keeps running the image built from the old files."""
+    """A pull that touches the Dockerfile or the entrypoint has to produce a
+    tag that does not exist yet, or the build-if-missing check keeps running
+    the image built from the old files."""
 
     def tag(directory: Path, changed: str | None = None) -> str:
         wrapper = _wrapper_with_inputs(directory)
@@ -1379,7 +1371,7 @@ def test_wrapper_changes_the_image_tag_when_a_build_input_changes(
     unchanged = tag(tmp_path / "unchanged")
     # Names and mtimes are not hashed, so the same contents give the same tag.
     assert tag(tmp_path / "again") == unchanged
-    for name in ("Dockerfile.pi", "entrypoint.sh", "herdr-fleet.md"):
+    for name in ("Dockerfile.pi", "entrypoint.sh"):
         assert tag(tmp_path / name.replace(".", "-"), changed=name) != unchanged
 
 
@@ -1453,7 +1445,6 @@ def test_wrapper_builds_without_the_host_ids_off_linux(tmp_path: Path) -> None:
 
     assert not any(arg.startswith("AGENT_") for arg in args)
     assert "PI_VERSION=0.87.0" in args
-    assert "HERDR_VERSION=0.9.1" in args
 
 
 def test_wrapper_rebuilds_the_same_tag_when_npm_has_a_newer_pi(
@@ -1463,33 +1454,20 @@ def test_wrapper_rebuilds_the_same_tag_when_npm_has_a_newer_pi(
     wrapper has to notice the image's label differs and rebuild under the same
     tag with the new version as a build argument."""
 
-    _, invocations = _run(tmp_path, pi_version="0.99.0", label="pi=0.87.0 herdr=0.9.1")
+    _, invocations = _run(tmp_path, pi_version="0.99.0", label="pi=0.87.0")
     inspect = invocations[0]
     build = next(argv for argv in invocations if argv[0] == "build")
     args = [build[index + 1] for index, arg in enumerate(build) if arg == "--build-arg"]
 
     assert build[build.index("--tag") + 1] == inspect[2]
     assert "PI_VERSION=0.99.0" in args
-    assert "HERDR_VERSION=0.9.1" in args
-
-
-def test_wrapper_rebuilds_when_herdr_has_a_newer_release(tmp_path: Path) -> None:
-    """Herdr is tracked the same way as Pi, from herdr.dev/latest.json."""
-
-    _, invocations = _run(
-        tmp_path, herdr_version="1.2.3", label="pi=0.87.0 herdr=0.9.1"
-    )
-    build = next(argv for argv in invocations if argv[0] == "build")
-    args = [build[index + 1] for index, arg in enumerate(build) if arg == "--build-arg"]
-
-    assert "HERDR_VERSION=1.2.3" in args
 
 
 def test_wrapper_does_not_rebuild_when_the_versions_match(tmp_path: Path) -> None:
-    """The image the content tag names already carries the newest versions, so
+    """The image the content tag names already carries the newest version, so
     the launch goes straight to docker run."""
 
-    _, invocations = _run(tmp_path, pi_version="0.87.0", herdr_version="0.9.1")
+    _, invocations = _run(tmp_path, pi_version="0.87.0")
 
     assert [argv for argv in invocations if argv[0] == "build"] == []
 
@@ -1498,7 +1476,7 @@ def test_wrapper_treats_a_failed_lookup_as_unknown(tmp_path: Path) -> None:
     """Offline, the existing image is used as it is, and no build argument the
     wrapper could not verify is passed."""
 
-    _, invocations = _run(tmp_path, curl_pi="fail", curl_herdr="fail")
+    _, invocations = _run(tmp_path, curl_pi="fail")
 
     assert [argv for argv in invocations if argv[0] == "build"] == []
     assert _docker_run(invocations)
@@ -1509,20 +1487,7 @@ def test_wrapper_treats_an_invalid_version_as_unknown(tmp_path: Path) -> None:
     argument or a tag the Dockerfile would use. The label differs from the
     valid versions, so without the check this would rebuild."""
 
-    _, invocations = _run(
-        tmp_path, pi_version="not a version", label="pi=0.87.0 herdr=0.9.1"
-    )
-
-    assert [argv for argv in invocations if argv[0] == "build"] == []
-
-
-def test_wrapper_does_not_rebuild_when_only_one_version_is_known(
-    tmp_path: Path,
-) -> None:
-    """A newer Pi must not rebuild an image whose Herdr version could not be
-    checked, since the comparison as a whole is unknown."""
-
-    _, invocations = _run(tmp_path, curl_herdr="fail", pi_version="0.99.0")
+    _, invocations = _run(tmp_path, pi_version="not a version", label="pi=0.87.0")
 
     assert [argv for argv in invocations if argv[0] == "build"] == []
 
@@ -1536,42 +1501,18 @@ def _assert_lookup_failure_stops_the_first_launch(
     assert completed.returncode == 1
     assert [argv for argv in invocations if argv[0] == "build"] == []
     assert [argv for argv in invocations if argv[0] == "run"] == []
-    assert "could not look up the newest Pi and Herdr" in completed.stderr
+    assert "could not look up the newest Pi" in completed.stderr
     assert "no image to fall back to" in completed.stderr
 
 
-def test_wrapper_refuses_to_build_when_both_lookups_fail_and_no_image(
+def test_wrapper_refuses_to_build_when_the_lookup_fails_and_no_image(
     tmp_path: Path,
 ) -> None:
-    """The Dockerfile has no default versions, so a build with neither one
-    would fail at once. Offline with no image there is nothing to fall back
-    to, so the wrapper must stop instead of building or running."""
-
-    completed, invocations = _run(
-        tmp_path, inspect_status="1", curl_pi="fail", curl_herdr="fail"
-    )
-
-    _assert_lookup_failure_stops_the_first_launch(completed, invocations)
-
-
-def test_wrapper_refuses_to_build_when_the_pi_lookup_fails_and_no_image(
-    tmp_path: Path,
-) -> None:
-    """A build needs both versions, so the Pi lookup failing is enough to stop
-    a first launch even though Herdr answered."""
+    """The Dockerfile has no default version, so a build without one would
+    fail at once. Offline with no image there is nothing to fall back to, so
+    the wrapper must stop instead of building or running."""
 
     completed, invocations = _run(tmp_path, inspect_status="1", curl_pi="fail")
-
-    _assert_lookup_failure_stops_the_first_launch(completed, invocations)
-
-
-def test_wrapper_refuses_to_build_when_the_herdr_lookup_fails_and_no_image(
-    tmp_path: Path,
-) -> None:
-    """A build needs both versions, so the Herdr lookup failing is enough to
-    stop a first launch even though Pi answered."""
-
-    completed, invocations = _run(tmp_path, inspect_status="1", curl_herdr="fail")
 
     _assert_lookup_failure_stops_the_first_launch(completed, invocations)
 
@@ -1599,7 +1540,7 @@ def test_wrapper_starts_the_existing_image_when_a_rebuild_fails(
     completed, invocations = _run(
         tmp_path,
         pi_version="0.99.0",
-        label="pi=0.87.0 herdr=0.9.1",
+        label="pi=0.87.0",
         build_status="9",
         run_status="7",
     )
@@ -1640,20 +1581,15 @@ def test_wrapper_stays_in_the_process_tree_so_herdr_can_identify_pi(
     assert str(WRAPPER) in _docker_run_parent(tmp_path / "docker.log")
 
 
-def test_image_does_not_seed_extensions_or_skills() -> None:
-    """The entrypoint installs the four extensions and rewrites both Herdr
-    skills into the state volume on every start, so seeding them in the image
-    would only duplicate the list and reach a new volume. The image keeps just
-    the root-owned fleet skill the entrypoint copies from."""
+def test_image_does_not_seed_extensions() -> None:
+    """The entrypoint installs the four extensions into the state volume on
+    every start, so seeding them in the image would only duplicate the list
+    and reach a new volume."""
 
     dockerfile = (ROOT / "Dockerfile.pi").read_text()
 
     assert "pi install" not in dockerfile
-    assert "herdr --skill >" not in dockerfile
     assert "/home/agent/.pi" not in dockerfile
-    assert (
-        "COPY herdr-fleet.md /usr/local/share/pi-sandbox/herdr-fleet.md" in dockerfile
-    )
 
 
 def test_image_takes_pi_version_as_a_build_argument() -> None:
@@ -1669,16 +1605,15 @@ def test_image_takes_pi_version_as_a_build_argument() -> None:
     assert "@earendil-works/pi-coding-agent@$PI_VERSION" in dockerfile
 
 
-def test_image_records_both_versions_in_one_label() -> None:
-    """The wrapper compares this one label against the versions it looked up,
-    so a newer release of either tool rebuilds under the same content tag."""
+def test_image_records_the_pi_version_in_one_label() -> None:
+    """The wrapper compares this label against the version it looked up, so a
+    newer Pi rebuilds under the same content tag."""
 
     dockerfile = (ROOT / "Dockerfile.pi").read_text()
-    label = 'LABEL pi-sandbox.versions="pi=$PI_VERSION herdr=$HERDR_VERSION"'
+    label = 'LABEL pi-sandbox.versions="pi=$PI_VERSION"'
 
     assert label in dockerfile
     assert dockerfile.index("ARG PI_VERSION\n") < dockerfile.index(label)
-    assert dockerfile.index("ARG HERDR_VERSION\n") < dockerfile.index(label)
 
 
 def test_image_builds_the_agent_user_with_build_argument_ids() -> None:
@@ -1703,30 +1638,6 @@ def test_image_builds_the_agent_user_with_build_argument_ids() -> None:
     assert "getent" not in dockerfile
     assert 'groupadd --non-unique --gid "$AGENT_GID" agent' in dockerfile
     assert "--gid agent agent" in dockerfile
-
-
-def test_image_verifies_herdr_against_the_manifest_digest() -> None:
-    """The binary and its SHA-256 both come from herdr.dev/latest.json, so the
-    digest protects against a corrupted or swapped download, not against a bad
-    release. The hard-coded digests are gone, and the version is a build
-    argument the wrapper passes."""
-
-    dockerfile = (ROOT / "Dockerfile.pi").read_text()
-
-    assert "ARG HERDR_VERSION\n" in dockerfile
-    assert ': "${HERDR_VERSION:?' in dockerfile
-    assert "https://herdr.dev/latest.json" in dockerfile
-    assert (
-        "https://github.com/herdrdev/herdr/releases/download/v$HERDR_VERSION/"
-        in dockerfile
-    )
-    # A manifest that names another host or release fails the build.
-    assert "herdr asset URL is not the expected release" in dockerfile
-    assert "linux-x86_64" in dockerfile and "linux-aarch64" in dockerfile
-    assert "sha256sum --check" in dockerfile
-    # The digest is read from the manifest, not written into the Dockerfile.
-    assert not re.search(r"sha=[0-9a-f]{64}", dockerfile)
-    assert "manifest" in dockerfile
 
 
 def test_image_pins_uv_to_a_digest_instead_of_piping_install_sh() -> None:
@@ -1770,7 +1681,6 @@ class _Entrypoint(NamedTuple):
     calls: list[list[str]]
     scripts: list[str]
     timeouts: list[str]
-    copied: list[list[str]]
 
 
 def _run_entrypoint(
@@ -1786,15 +1696,6 @@ def _run_entrypoint(
     env_log = tmp_path / "pi.env"
     calls_log = tmp_path / "pi.calls"
     timeout_log = tmp_path / "timeout.log"
-    cp_log = tmp_path / "cp.log"
-    # `herdr --skill` prints the skill the entrypoint writes into the volume.
-    (bin_dir / "herdr").write_text(
-        "#!/bin/sh\n"
-        'case "$1" in\n'
-        "    --skill) printf '%s\\n' '# herdr skill from the binary' ;;\n"
-        "esac\n"
-        "exit 0\n"
-    )
     # Every pi call is appended, with the lifecycle-script setting it saw, so a
     # test can tell the extension installs from the final exec. An install can
     # be made to fail to check the best-effort path.
@@ -1820,14 +1721,6 @@ def _run_entrypoint(
     (bin_dir / "timeout").write_text(
         f'#!/bin/sh\nprintf "%s\\n" "$*" >>{timeout_log}\nshift\nexec "$@"\n'
     )
-    # The fleet skill is copied from a root-owned path the test cannot write,
-    # so record the copy instead of performing it. A failure can be forced to
-    # check the best-effort path.
-    (bin_dir / "cp").write_text(
-        "#!/bin/sh\n"
-        f'printf "%s\\n%s\\n" "$1" "$2" >>{cp_log}\n'
-        'exit "${PI_SANDBOX_FAKE_CP_STATUS:-0}"\n'
-    )
     for stub in bin_dir.iterdir():
         stub.chmod(0o755)
 
@@ -1849,14 +1742,6 @@ def _run_entrypoint(
         lines = block.strip().splitlines()
         scripts.append(lines[-1].removeprefix("SCRIPTS="))
         calls.append(lines[:-1])
-    copied = (
-        [
-            cp_log.read_text().splitlines()[index : index + 2]
-            for index in range(0, len(cp_log.read_text().splitlines()), 2)
-        ]
-        if cp_log.exists()
-        else []
-    )
 
     # Whatever it does, it must not print the key on the way.
     assert FAKE_KEY not in completed.stdout + completed.stderr
@@ -1872,7 +1757,6 @@ def _run_entrypoint(
         calls=calls,
         scripts=scripts,
         timeouts=timeout_log.read_text().splitlines() if timeout_log.exists() else [],
-        copied=copied,
     )
 
 
@@ -1892,44 +1776,17 @@ def test_the_entrypoint_is_a_valid_shell_script() -> None:
     assert checked.returncode == 0, checked.stderr
 
 
-def test_the_entrypoint_starts_a_herdr_server_and_then_becomes_pi() -> None:
-    """Herdr's API commands do not start a server, so without this the agent's
-    first herdr call is told `server_not_running`. The server has to be
-    backgrounded and Pi has to replace the script: a server left in the
-    foreground means Pi never starts at all, and running Pi as a child means
-    the container's foreground process is a shell, which stops Herdr on the
-    host from seeing a Pi agent in the pane."""
+def test_the_entrypoint_becomes_pi() -> None:
+    """Pi has to replace the script rather than run as its child, so the
+    container's foreground process is Pi and a Herdr pane on the host still
+    sees a Pi agent in the pane."""
 
     script = ENTRYPOINT.read_text()
     dockerfile = (ROOT / "Dockerfile.pi").read_text()
-    start = script[script.index("herdr server") :].split("\n")[0]
 
     assert 'ENTRYPOINT ["pi-sandbox-entrypoint"]' in dockerfile
     assert "COPY --chmod=0755 entrypoint.sh" in dockerfile
-    assert start.rstrip().endswith(" &")
-    assert script.index("herdr server") < script.index('exec pi "$@"')
-    # A HERDR_SOCKET_PATH that survived would move this server's socket, and a
-    # HERDR_PANE_ID would make Pi read itself as one of its own children.
-    assert script.index("unset HERDR_SOCKET_PATH HERDR_PANE_ID") < script.index(
-        "herdr server"
-    )
-
-
-def test_the_entrypoint_hands_pi_a_clean_herdr_environment(tmp_path: Path) -> None:
-    """Read from Pi's own environment, since a variable that survived would
-    point its herdr calls at the host pane's socket."""
-
-    started = _run_entrypoint(
-        tmp_path,
-        HERDR_SOCKET_PATH="/tmp/elsewhere/custom.sock",
-        HERDR_PANE_ID="hostpane:p9",
-        HERDR_TAB_ID="hostpane:t1",
-        HERDR_WORKSPACE_ID="hostpane",
-    )
-
-    assert started.argv == ["--model", "kimi-k3"]
-    assert started.env["HERDR_ENV"] == "1"
-    assert [name for name in started.env if name.startswith("HERDR_")] == ["HERDR_ENV"]
+    assert script.rstrip().endswith('exec pi "$@"')
 
 
 def test_the_entrypoint_updates_the_extensions_on_start(tmp_path: Path) -> None:
@@ -2001,34 +1858,37 @@ def test_the_entrypoint_reports_a_partial_extension_update_failure(
     assert "could not update the extensions" in started.stderr
 
 
-def test_the_entrypoint_refreshes_both_herdr_skills_on_start(
-    tmp_path: Path,
-) -> None:
-    """Both skills live in the state volume, so a project whose volume predates
-    the image keeps old copies forever unless they are rewritten every start."""
+def test_the_entrypoint_removes_the_stale_herdr_skills(tmp_path: Path) -> None:
+    """A volume made by an earlier image still holds the two Herdr skills,
+    which now describe a tool this image does not carry. The entrypoint has to
+    remove them, and a removal that fails must cost the stale files rather
+    than the session."""
 
+    skills = tmp_path / "home/.pi/agent/skills"
+    for name in ("herdr", "herdr-fleet"):
+        (skills / name).mkdir(parents=True)
+        (skills / name / "SKILL.md").write_text("stale")
     started = _run_entrypoint(tmp_path)
-    skill = tmp_path / "home/.pi/agent/skills/herdr/SKILL.md"
-
-    assert "# herdr skill from the binary" in skill.read_text()
-    assert started.copied == [
-        [
-            "/usr/local/share/pi-sandbox/herdr-fleet.md",
-            str(tmp_path / "home/.pi/agent/skills/herdr-fleet/SKILL.md"),
-        ]
-    ]
-    assert "could not refresh" not in started.stderr
-
-
-def test_the_entrypoint_starts_pi_when_the_skill_refresh_fails(
-    tmp_path: Path,
-) -> None:
-    """The refresh is local and best effort, like the rest of the entrypoint."""
-
-    started = _run_entrypoint(tmp_path, PI_SANDBOX_FAKE_CP_STATUS="1")
 
     assert started.argv == ["--model", "kimi-k3"]
-    assert "could not refresh the herdr skills" in started.stderr
+    assert not (skills / "herdr").exists()
+    assert not (skills / "herdr-fleet").exists()
+
+    # A skills directory the agent made unwritable makes the removal fail. Pi
+    # still has to start, since the stale files are cosmetic and Pi is the
+    # point of the container.
+    blocked = tmp_path / "blocked"
+    blocked_skills = blocked / "home/.pi/agent/skills"
+    for name in ("herdr", "herdr-fleet"):
+        (blocked_skills / name).mkdir(parents=True)
+    blocked_skills.chmod(0o500)
+    try:
+        started = _run_entrypoint(blocked)
+    finally:
+        blocked_skills.chmod(0o700)
+
+    assert started.argv == ["--model", "kimi-k3"]
+    assert (blocked_skills / "herdr").exists()
 
 
 def test_the_entrypoint_writes_the_subscription_key_where_pi_reads_it(
@@ -2168,15 +2028,3 @@ def test_the_entrypoint_does_not_write_the_key_through_a_symlink(
     assert elsewhere.read_text() == ""
     assert not auth.is_symlink()
     assert json.loads(auth.read_text())["opencode-go"]["key"] == FAKE_KEY
-
-
-def test_the_fleet_skill_tells_a_child_not_to_start_its_own_fleet() -> None:
-    """Children load the same global skills directory, so the file has to be
-    true for them too. A pane Herdr creates has HERDR_PANE_ID set; the
-    container's foreground Pi does not."""
-
-    skill = (ROOT / "herdr-fleet.md").read_text()
-
-    assert skill.startswith("---\nname: herdr-fleet\n")
-    assert "HERDR_PANE_ID" in skill.split("## ")[1]
-    assert "do not start a fleet of your" in skill

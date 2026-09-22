@@ -4,8 +4,8 @@ Run the [Pi coding agent](https://pi.dev) in a Docker container that can see one
 project and nothing else on your machine. Intended for untrusted or
 lightly-trusted models, such as Chinese-hosted ones reached through OpenCode.
 
-One shell script, one Dockerfile, an entrypoint and a skill file. Nothing to
-install or configure.
+One shell script, one Dockerfile and an entrypoint. Nothing to install or
+configure.
 
 ## Requirements
 
@@ -56,21 +56,20 @@ alias pis='/path/to/pi-sandbox/pi'
 Do not put the script on your `PATH` as `pi`, or it will shadow a host Pi
 install for every project.
 
-Edits to `Dockerfile.pi`, `entrypoint.sh` or `herdr-fleet.md` rebuild
-automatically on the next launch. The image is tagged by the contents of those
-files, so a changed file produces a tag that does not exist yet and the wrapper
-builds it before starting. It also rebuilds when both npm and `herdr.dev`
-answer and either has a newer release than the image's label records. When
-either lookup fails it keeps the existing image and says so. With no image
-there is nothing to fall back to and the Dockerfile carries no default
-versions, so the wrapper stops and says the newest Pi and Herdr could not be
-looked up. The first launch therefore needs both lookups to answer. A rebuild
-that fails keeps the image the tag already held and starts it, so a registry
-blip does not leave you without Pi, while a first build that fails stops with
-docker's status. It removes the older images after the session, so nothing
-accumulates. That removal reaches every other `pi-sandbox` image it can,
-including one built by another checkout of this repository or, on Linux, by
-another host user, whose next launch then rebuilds. The container itself is
+Edits to `Dockerfile.pi` or `entrypoint.sh` rebuild automatically on the next
+launch. The image is tagged by the contents of those files, so a changed file
+produces a tag that does not exist yet and the wrapper builds it before
+starting. It also rebuilds when npm answers with a newer release than the
+image's label records. When that lookup fails it keeps the existing image and
+says so. With no image there is nothing to fall back to and the Dockerfile
+carries no default version, so the wrapper stops and says the newest Pi could
+not be looked up. The first launch therefore needs that lookup to answer. A
+rebuild that fails keeps the image the tag already held and starts it, so a
+registry blip does not leave you without Pi, while a first build that fails
+stops with docker's status. It removes the older images after the session, so
+nothing accumulates. That removal reaches every other `pi-sandbox` image it
+can, including one built by another checkout of this repository or, on Linux,
+by another host user, whose next launch then rebuilds. The container itself is
 removed by `--rm` when Pi exits.
 
 ## What the container can and cannot see
@@ -207,8 +206,7 @@ The entrypoint installs four Pi extensions from npm at their newest release:
 The subagent and background-task extensions let the agent start work that
 keeps running while you are not watching the pane, with the same key and the
 same open network as the foreground session, and sharing its `--pids-limit`.
-The Herdr fleet below is a fourth way to do that, with whole Pi sessions
-instead of subagents. Everything still dies with the container.
+Everything still dies with the container.
 
 They live in the agent's home, so they reach a project through that project's
 state volume. A new project's first start downloads them. Offline, that start
@@ -304,13 +302,11 @@ marker. Inspect those and abort the operation rather than continuing it.
 
 ## Herdr
 
-Two Herdrs are involved, and they never meet.
-
-Yours, on the host: the script is named `pi` on purpose.
-[Herdr](https://herdr.dev) identifies a pane's agent from the foreground job's
-process arguments, so running this script in a pane makes it a first-class Pi
-agent, with the agent list, idle and working detection, `herdr agent prompt`
-and Ctrl-C all behaving as they do for a host agent.
+The script is named `pi` on purpose. [Herdr](https://herdr.dev) identifies a
+pane's agent from the foreground job's process arguments, so running this
+script in a pane makes it a first-class Pi agent, with the agent list, idle and
+working detection, `herdr agent prompt` and Ctrl-C all behaving as they do for
+a host agent.
 
 ```sh
 herdr pane split --current --direction right --cwd ~/any/project --no-focus
@@ -319,51 +315,9 @@ herdr pane run <pane-id> '/path/to/pi-sandbox/pi'
 
 For the same reason the script must not `exec docker`: that would replace the
 `pi`-named process with `docker` and Herdr would see a plain shell. `test_pi.py`
-pins both properties, and that the wrapper ignores the pane's own
-`HERDR_SOCKET_PATH`. Mounting your socket would undo the sandbox rather than
-extend it, since `herdr pane run` executes on the host, outside the container.
-
-The container's own, for the agent: the image carries the `herdr` binary and
-the entrypoint starts a server inside the container before Pi. That server
-manages panes in the container and nothing else, so the agent can run a fleet
-of Pi children of its own.
-
-```sh
-herdr workspace create --cwd /workspace --label review --no-focus
-herdr agent start reviewer --kind pi --pane <pane-id> \
-    -- --provider opencode-go --model deepseek-v4.1-flash
-herdr agent prompt reviewer "Review the diff on this branch" --wait
-herdr pane read <pane-id>
-```
-
-The provider and model flags are not optional: only the host wrapper applies
-the default, and `deepseek-v4.1-flash` is on the opencode-go subscription
-rather than on OpenCode Zen, so the provider has to be named with it.
-Two skills teach the agent all this: Herdr's own, printed by the installed
-binary, and `herdr-fleet.md` from this repository, which covers what is
-different here, including telling a child agent not to start a fleet of its
-own. The entrypoint rewrites both from the image on every start, so a project
-whose state volume predates this image still gets the current instructions.
-
-The binary is downloaded at build time from the release `herdr.dev/latest.json`
-names, and checked against the SHA-256 in that manifest. The owner chose to
-track the newest release, so the digest comes from the same publisher as the
-binary: it protects against a corrupted or swapped download, not against a bad
-release.
-
-You cannot see these panes from your own Herdr, so ask the container:
-
-```sh
-container=$(docker ps -q --filter label=pi-sandbox=1 | head -1)
-docker exec "$container" herdr agent list
-docker exec "$container" herdr pane read <pane-id>
-```
-
-`docker exec -it "$container" herdr` attaches a real client instead, which puts
-a Herdr TUI inside your Herdr pane and gives the prefix key two owners.
-
-The server keeps its state in `/home/agent/.config/herdr`, inside the project's
-volume, and checks `herdr.dev` for updates on a timer like any other Herdr.
+pins that, and that the wrapper ignores the pane's own `HERDR_SOCKET_PATH`.
+Mounting your socket would undo the sandbox rather than extend it, since
+`herdr pane run` executes on the host, outside the container.
 
 ## Limitations
 
@@ -389,15 +343,13 @@ volume, and checks `herdr.dev` for updates on a timer like any other Herdr.
   launch. Keeping it in its own directory, as here, avoids that.
 - A container is not a virtual machine. A container escape defeats this
   boundary. On macOS and Windows, Docker Desktop's own VM is a second layer.
-- The agent can start other agents, through the extensions or the Herdr server
-  in the container, and they spend the same key on work nobody is watching.
-  That is the point of the feature, and also the cost of it. A child can start
-  children of its own: the skill tells it not to, and nothing enforces that.
-  Measured, a Pi session costs about fifteen of the container's 512 processes
-  and a few hundred megabytes, and `docker run` sets no memory limit, so a
-  runaway fleet reaches the machine's memory before it reaches `--pids-limit`.
+- The agent can start other agents through the extensions, and they spend the
+  same key on work nobody is watching. That is the point of the feature, and
+  also the cost of it. A child can start children of its own, and nothing
+  enforces a limit. `docker run` sets no memory limit, so a runaway fan-out
+  reaches the machine's memory before it reaches `--pids-limit`.
 - The image is roughly 1.3 GB, mostly Pi's npm dependency tree. It carries
-  Node 24, Python 3.11, uv, Git, ripgrep, fd and the 23 MB Herdr binary.
+  Node 24, Python 3.11, uv, Git, ripgrep and fd.
 
 These are accepted limits, and [SECURITY.md](SECURITY.md) defines what does
 count as a vulnerability here and how to report it privately.

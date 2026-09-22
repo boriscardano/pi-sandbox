@@ -5,14 +5,13 @@
 #
 # Only that repository is mounted (at /workspace). The container gets no host
 # home directory, no SSH or cloud credentials, no Docker socket and no Herdr
-# socket: it runs a Herdr server of its own instead, so the fleet the agent can
-# start there reaches nothing on this machine. The host secrets it receives are
-# OPENCODE_GO_API_KEY, which the default model needs, and OPENCODE_API_KEY if
-# you have one, both forwarded by name so their values never land in the
-# command line or an image layer. That first key is required only for the
-# default: naming another provider with --provider or a provider/model string
-# runs without it, and that provider's own key then comes through
-# OPENCODE_API_KEY or PI_SANDBOX_ENV.
+# socket, so nothing in it can reach your host's Docker daemon or agents. The
+# host secrets it receives are OPENCODE_GO_API_KEY, which the default model
+# needs, and OPENCODE_API_KEY if you have one, both forwarded by name so their
+# values never land in the command line or an image layer. That first key is
+# required only for the default: naming another provider with --provider or a
+# provider/model string runs without it, and that provider's own key then comes
+# through OPENCODE_API_KEY or PI_SANDBOX_ENV.
 #
 #   export OPENCODE_GO_API_KEY=$(pi auth print-api-key --provider opencode-go)
 # Forward further host variables by naming them in PI_SANDBOX_ENV, for example
@@ -70,8 +69,7 @@ fi
 image_tag=$(
     {
         cat "$dockerfile" \
-            "$script_dir/entrypoint.sh" \
-            "$script_dir/herdr-fleet.md"
+            "$script_dir/entrypoint.sh"
         printf '%s' "$host_ids"
     } \
         | "$hash_cmd" \
@@ -246,14 +244,13 @@ if [ -n "${needs_key:-}" ] && [ -z "${wants_info:-}" ] && [ -z "${OPENCODE_GO_AP
     exit 2
 fi
 
-# Look up the newest release of Pi and Herdr so a newer one rebuilds the image
-# even though the content tag has not changed. The host may lack python3 and
-# jq, so sed pulls the version out of the JSON, and anything that is not a
-# plain semver is unknown rather than trusted. `--max-time 5` per lookup bounds
-# an offline or slow registry to a few seconds, and a missing curl fails the
-# same way. One unknown version makes the whole comparison unknown: a newer
-# Pi must not rebuild an image whose Herdr version cannot be checked, so an
-# existing image is kept, and a launch with no image stops.
+# Look up the newest release of Pi so a newer one rebuilds the image even
+# though the content tag has not changed. The host may lack python3 and jq, so
+# sed pulls the version out of the JSON, and anything that is not a plain
+# semver is unknown rather than trusted. `--max-time 5` bounds an offline or
+# slow registry to a few seconds, and a missing curl fails the same way. An
+# unknown version means the comparison cannot be made, so an existing image is
+# kept, and a launch with no image stops.
 lookup_version() {
     body=$(curl -fsS --max-time 5 "$1" 2>/dev/null) || return 0
     version=$(printf '%s' "$body" | sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')
@@ -265,9 +262,8 @@ lookup_version() {
 }
 
 pi_latest=$(lookup_version https://registry.npmjs.org/@earendil-works/pi-coding-agent/latest)
-herdr_latest=$(lookup_version https://herdr.dev/latest.json)
-if [ -n "$pi_latest" ] && [ -n "$herdr_latest" ]; then
-    want_versions="pi=$pi_latest herdr=$herdr_latest"
+if [ -n "$pi_latest" ]; then
+    want_versions="pi=$pi_latest"
 else
     want_versions=''
 fi
@@ -277,13 +273,13 @@ if docker image inspect "$image" >/dev/null 2>&1; then
     image_exists=1
 fi
 
-# A build needs both versions, since the Dockerfile carries no defaults.
+# A build needs the version, since the Dockerfile carries no default.
 if [ "$image_exists" -eq 0 ] && [ -z "$want_versions" ]; then
-    printf '%s\n' "pi-sandbox: could not look up the newest Pi and Herdr, and there is no image to fall back to" >&2
+    printf '%s\n' "pi-sandbox: could not look up the newest Pi, and there is no image to fall back to" >&2
     exit 1
 fi
 
-# The label is only read when both lookups worked, since it is only compared
+# The label is only read when the lookup worked, since it is only compared
 # then. A missing label or a failed inspect reads as empty and rebuilds.
 build=0
 have_versions=''
@@ -298,7 +294,7 @@ elif [ -n "$want_versions" ]; then
 fi
 
 if [ "$build" -eq 1 ]; then
-    # Both lookups answered, since otherwise no build was requested above.
+    # The lookup answered, since otherwise no build was requested above.
     if [ "$image_exists" -eq 1 ]; then
         printf '%s\n' "pi-sandbox: rebuilding $image: $have_versions -> $want_versions" >&2
     else
@@ -308,7 +304,6 @@ if [ "$build" -eq 1 ]; then
     # shellcheck disable=SC2086  # empty off Linux
     docker build --file "$dockerfile" --tag "$image" $build_args \
         --build-arg "PI_VERSION=$pi_latest" \
-        --build-arg "HERDR_VERSION=$herdr_latest" \
         "$(dirname -- "$dockerfile")" || build_status=$?
     # A same-tag build that fails leaves the image the tag already held, so a
     # registry blip must not leave the user unable to start Pi. There is no
@@ -324,7 +319,7 @@ if [ "$build" -eq 1 ]; then
 fi
 
 if [ "$image_exists" -eq 1 ] && [ -z "$want_versions" ]; then
-    printf '%s\n' "pi-sandbox: could not check the newest Pi and Herdr, using the existing image" >&2
+    printf '%s\n' "pi-sandbox: could not check the newest Pi, using the existing image" >&2
 fi
 
 # Allocate a TTY only when there is one, so the same wrapper serves a Herdr

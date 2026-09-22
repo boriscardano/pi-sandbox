@@ -261,17 +261,11 @@ lookup_version() {
     esac
 }
 
-pi_latest=$(lookup_version https://registry.npmjs.org/@earendil-works/pi-coding-agent/latest)
-if [ -n "$pi_latest" ]; then
-    want_version=$pi_latest
-else
-    want_version=''
-fi
+want_version=$(lookup_version https://registry.npmjs.org/@earendil-works/pi-coding-agent/latest)
 
 # One inspect both checks that the image exists and reads the version label.
 # A failed inspect means the image is missing, and an image without the label
 # reads as empty and rebuilds.
-have_version=''
 image_exists=0
 if have_version=$(docker image inspect --format '{{index .Config.Labels "pi-sandbox.version"}}' "$image" 2>/dev/null); then
     image_exists=1
@@ -302,7 +296,7 @@ if [ "$build" -eq 1 ]; then
     build_status=0
     # shellcheck disable=SC2086  # empty off Linux
     docker build --file "$dockerfile" --tag "$image" $build_args \
-        --build-arg "PI_VERSION=$pi_latest" \
+        --build-arg "PI_VERSION=$want_version" \
         "$(dirname -- "$dockerfile")" || build_status=$?
     # A same-tag build that fails leaves the image the tag already held, so a
     # registry blip must not leave the user unable to start Pi. There is no

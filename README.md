@@ -63,8 +63,9 @@ starting. It also rebuilds when npm answers with a newer release than the
 image's label records. When that lookup fails it keeps the existing image and
 says so. With no image there is nothing to fall back to and the Dockerfile
 carries no default version, so the wrapper stops and says the newest Pi could
-not be looked up. The first launch therefore needs that lookup to answer. A
-rebuild that fails keeps the image the tag already held and starts it, so a
+not be looked up. Any launch with no image under the current tag, the first
+one or the first after an edit to `Dockerfile.pi` or `entrypoint.sh`, therefore
+needs that lookup to answer. A rebuild that fails keeps the image the tag already held and starts it, so a
 registry blip does not leave you without Pi, while a first build that fails
 stops with docker's status. It removes the older images after the session, so
 nothing accumulates. That removal reaches every other `pi-sandbox` image it
@@ -218,9 +219,9 @@ any extension you added without a version, while one installed as
 `npm:<package>@<version>` stays at it. A `pi remove npm:<package>` of one of the
 four therefore lasts only until the next start, which installs it again.
 Lifecycle scripts stay off for that install, so a new release cannot run one in
-a container holding the API key. Pi's own
-subcommands run against the volume rather than your host Pi, so `pi list` shows
-what a project actually has and `pi install npm:<package>` adds one. `install`,
+a container holding the API key. Pi's own subcommands run against the volume
+rather than your host Pi, so `pi list` shows what a project actually has and
+`pi install npm:<package>` adds one. `install`,
 `remove`, `uninstall`, `list`, `config` and `auth` all work this way. So does
 `pi update --extensions`, but bare `pi update` targets Pi itself, which lives
 outside the volume in a root-owned directory the agent cannot write. Resetting
@@ -338,9 +339,9 @@ Mounting your socket would undo the sandbox rather than extend it, since
   starting another agent, in a checkout the agent has touched.
 - The agent can write escape sequences to the terminal you launched it from.
   The container's terminal device is owned by the user Pi and its tools run
-  as, so any command the agent runs can open it. A
-  sequence can retitle the pane, draw text that looks like your shell, add
-  links, and on a terminal that honours OSC 52, replace your clipboard. Turn
+  as, so any command the agent runs can open it. A sequence can retitle the
+  pane, draw text that looks like your shell, add links, and on a terminal
+  that honours OSC 52, replace your clipboard. Turn
   off OSC 52 clipboard writes in your terminal, and do not paste from a
   clipboard you did not fill yourself after a session.
 - Nested repositories, and the rebase, merge or cherry-pick state the agent

@@ -25,14 +25,10 @@ RUN apt-get update \
         ripgrep \
     && rm -rf /var/lib/apt/lists/*
 
-# Pi's version is a build argument so the wrapper can rebuild this image when
-# npm publishes a newer release. The owner chose to always run the newest Pi
-# rather than a reviewed pin, which means an upstream release reaches this
-# sandbox, and the API key it holds, without review. The wrapper passes the
-# version it found and compares the image's label to decide whether to rebuild.
-# There is no default: the wrapper only builds after it looked a version up, so
+# The wrapper passes the Pi version it looked up, and there is no default, so
 # a build without one fails here at once rather than installing an empty
-# version.
+# version. The README explains why the newest release runs rather than a
+# reviewed pin.
 ARG PI_VERSION
 RUN : "${PI_VERSION:?the wrapper must pass --build-arg PI_VERSION}" \
     && npm install --global --ignore-scripts \
@@ -48,10 +44,10 @@ RUN : "${PI_VERSION:?the wrapper must pass --build-arg PI_VERSION}" \
 COPY --from=ghcr.io/astral-sh/uv:0.12.17@sha256:10787c682e4184e4f290de1171fd4703dc63de99221f10fe1c99002ce7fa9acc \
     /uv /uvx /usr/local/bin/
 
-# The label holds the version the wrapper compares, so a newer Pi is detected
-# without a second inspect. `pi-sandbox.image=1` above stays the marker
-# `docker image prune` filters on.
-LABEL pi-sandbox.versions="pi=$PI_VERSION"
+# The label holds the version the wrapper compares against the one it looked
+# up, so a newer Pi rebuilds the image. `pi-sandbox.image=1` above stays the
+# marker `docker image prune` filters on.
+LABEL pi-sandbox.version="$PI_VERSION"
 
 # The entrypoint, which writes the subscription key Pi expects in auth.json
 # before becoming Pi. Copied in while still root, since /usr/local/bin is not

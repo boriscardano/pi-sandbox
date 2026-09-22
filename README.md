@@ -358,7 +358,7 @@ Mounting your socket would undo the sandbox rather than extend it, since
   also the cost of it. A child can start children of its own, and nothing
   enforces a limit. `docker run` sets no memory limit, so a runaway fan-out
   reaches the machine's memory before it reaches `--pids-limit`.
-- The image is roughly 1.3 GB, mostly Pi's npm dependency tree. It carries
+- The image is roughly 1.2 GB, mostly Pi's npm dependency tree. It carries
   Node 24, Python 3.11, uv, Git, ripgrep and fd.
 
 These are accepted limits, and [SECURITY.md](SECURITY.md) defines what does

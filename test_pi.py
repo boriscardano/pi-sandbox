@@ -26,14 +26,18 @@ case "$1" in
     image)
         case "$2" in
             inspect)
-                # The wrapper checks existence with a plain inspect, then
-                # reads the versions label with --format. A failed inspect
-                # means the image is missing and the wrapper builds it.
+                # One inspect both checks that the image exists and reads
+                # the version label with --format. A non-zero status means
+                # the image is missing, and a successful inspect of an image
+                # without the label prints nothing.
+                if [ "${PI_SANDBOX_FAKE_INSPECT:-0}" -ne 0 ]; then
+                    exit "${PI_SANDBOX_FAKE_INSPECT}"
+                fi
                 if [ "$3" = "--format" ]; then
                     printf '%s\\n' "${PI_SANDBOX_FAKE_LABEL:-}"
                     exit 0
                 fi
-                exit "${PI_SANDBOX_FAKE_INSPECT:-0}"
+                exit 0
                 ;;
             prune) exit 0 ;;
         esac
@@ -154,7 +158,7 @@ def _run(
     project.mkdir(parents=True, exist_ok=True)
 
     if label is None:
-        label = f"pi={pi_version}"
+        label = pi_version
     env = {
         "PATH": f"{bin_dir}:/usr/bin:/bin",
         "HOME": str(home if home is not None else tmp_path / "home"),
@@ -1261,6 +1265,22 @@ def test_wrapper_passes_pi_subcommands_through_untouched(tmp_path: Path) -> None
     ]
 
 
+def test_wrapper_and_entrypoint_agree_on_pi_subcommands() -> None:
+    """The wrapper prepends a default model unless the first argument is one
+    of Pi's subcommands, and the entrypoint skips the extension install for
+    the same list. If the lists drift, the wrapper would add a model to
+    something the entrypoint treats as a subcommand, or the reverse."""
+
+    def subcommands(path: Path) -> str:
+        match = re.search(
+            r"^\s*(install \| remove[^)]*)\)", path.read_text(), re.MULTILINE
+        )
+        assert match is not None, path
+        return match.group(1)
+
+    assert subcommands(ROOT / "pi") == subcommands(ROOT / "entrypoint.sh")
+
+
 def test_wrapper_builds_the_image_only_when_it_is_missing(tmp_path: Path) -> None:
     _, present = _run(tmp_path)
     _, missing = _run(tmp_path / "missing", inspect_status="1")
@@ -1276,8 +1296,12 @@ def test_wrapper_removes_old_images_after_the_session(tmp_path: Path) -> None:
     keeps storage bounded without the user running anything, and the current
     tag has to survive so this launch's image is not deleted."""
 
-    completed, invocations = _run(tmp_path, tags="aaaa bbbb")
-    current = _image(_docker_run(invocations)).removeprefix("pi-sandbox:")
+    # The fake image list does not carry the current tag, so compute it from a
+    # first launch and put it among the older tags the second run sees.
+    _, first = _run(tmp_path)
+    current = _image(_docker_run(first)).removeprefix("pi-sandbox:")
+
+    completed, invocations = _run(tmp_path / "second", tags=f"aaaa {current} bbbb")
     removed = [argv[1] for argv in invocations if argv[0] == "rmi"]
     prunes = [argv for argv in invocations if argv[:2] == ["image", "prune"]]
 
@@ -1345,7 +1369,7 @@ def test_wrapper_tags_the_image_by_content_and_uses_it_for_inspect_and_run(
     _, invocations = _run(tmp_path, inspect_status="1")
 
     assert [argv[0] for argv in invocations[:3]] == ["image", "build", "run"]
-    inspected = invocations[0][2]
+    inspected = invocations[0][-1]
     built = invocations[1][invocations[1].index("--tag") + 1]
     ran = _image(invocations[2])
 
@@ -1454,12 +1478,12 @@ def test_wrapper_rebuilds_the_same_tag_when_npm_has_a_newer_pi(
     wrapper has to notice the image's label differs and rebuild under the same
     tag with the new version as a build argument."""
 
-    _, invocations = _run(tmp_path, pi_version="0.99.0", label="pi=0.87.0")
+    _, invocations = _run(tmp_path, pi_version="0.99.0", label="0.87.0")
     inspect = invocations[0]
     build = next(argv for argv in invocations if argv[0] == "build")
     args = [build[index + 1] for index, arg in enumerate(build) if arg == "--build-arg"]
 
-    assert build[build.index("--tag") + 1] == inspect[2]
+    assert build[build.index("--tag") + 1] == inspect[-1]
     assert "PI_VERSION=0.99.0" in args
 
 
@@ -1487,7 +1511,7 @@ def test_wrapper_treats_an_invalid_version_as_unknown(tmp_path: Path) -> None:
     argument or a tag the Dockerfile would use. The label differs from the
     valid versions, so without the check this would rebuild."""
 
-    _, invocations = _run(tmp_path, pi_version="not a version", label="pi=0.87.0")
+    _, invocations = _run(tmp_path, pi_version="not a version", label="0.87.0")
 
     assert [argv for argv in invocations if argv[0] == "build"] == []
 
@@ -1540,7 +1564,7 @@ def test_wrapper_starts_the_existing_image_when_a_rebuild_fails(
     completed, invocations = _run(
         tmp_path,
         pi_version="0.99.0",
-        label="pi=0.87.0",
+        label="0.87.0",
         build_status="9",
         run_status="7",
     )
@@ -1610,7 +1634,7 @@ def test_image_records_the_pi_version_in_one_label() -> None:
     newer Pi rebuilds under the same content tag."""
 
     dockerfile = (ROOT / "Dockerfile.pi").read_text()
-    label = 'LABEL pi-sandbox.versions="pi=$PI_VERSION"'
+    label = 'LABEL pi-sandbox.version="$PI_VERSION"'
 
     assert label in dockerfile
     assert dockerfile.index("ARG PI_VERSION\n") < dockerfile.index(label)

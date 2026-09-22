@@ -263,40 +263,39 @@ lookup_version() {
 
 pi_latest=$(lookup_version https://registry.npmjs.org/@earendil-works/pi-coding-agent/latest)
 if [ -n "$pi_latest" ]; then
-    want_versions="pi=$pi_latest"
+    want_version=$pi_latest
 else
-    want_versions=''
+    want_version=''
 fi
 
+# One inspect both checks that the image exists and reads the version label.
+# A failed inspect means the image is missing, and an image without the label
+# reads as empty and rebuilds.
+have_version=''
 image_exists=0
-if docker image inspect "$image" >/dev/null 2>&1; then
+if have_version=$(docker image inspect --format '{{index .Config.Labels "pi-sandbox.version"}}' "$image" 2>/dev/null); then
     image_exists=1
 fi
 
 # A build needs the version, since the Dockerfile carries no default.
-if [ "$image_exists" -eq 0 ] && [ -z "$want_versions" ]; then
+if [ "$image_exists" -eq 0 ] && [ -z "$want_version" ]; then
     printf '%s\n' "pi-sandbox: could not look up the newest Pi, and there is no image to fall back to" >&2
     exit 1
 fi
 
-# The label is only read when the lookup worked, since it is only compared
-# then. A missing label or a failed inspect reads as empty and rebuilds.
+# The label is only compared when the lookup worked, since it says nothing
+# otherwise. A missing label reads as empty and rebuilds.
 build=0
-have_versions=''
 if [ "$image_exists" -eq 0 ]; then
     build=1
-elif [ -n "$want_versions" ]; then
-    have_versions=$(docker image inspect \
-        --format '{{index .Config.Labels "pi-sandbox.versions"}}' "$image" 2>/dev/null || true)
-    if [ "$have_versions" != "$want_versions" ]; then
-        build=1
-    fi
+elif [ -n "$want_version" ] && [ "$have_version" != "$want_version" ]; then
+    build=1
 fi
 
 if [ "$build" -eq 1 ]; then
     # The lookup answered, since otherwise no build was requested above.
     if [ "$image_exists" -eq 1 ]; then
-        printf '%s\n' "pi-sandbox: rebuilding $image: $have_versions -> $want_versions" >&2
+        printf '%s\n' "pi-sandbox: rebuilding $image: $have_version -> $want_version" >&2
     else
         printf '%s\n' "building $image" >&2
     fi
@@ -318,7 +317,7 @@ if [ "$build" -eq 1 ]; then
     fi
 fi
 
-if [ "$image_exists" -eq 1 ] && [ -z "$want_versions" ]; then
+if [ "$image_exists" -eq 1 ] && [ -z "$want_version" ]; then
     printf '%s\n' "pi-sandbox: could not check the newest Pi, using the existing image" >&2
 fi
 

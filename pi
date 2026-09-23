@@ -9,7 +9,10 @@
 # start there reaches nothing on this machine. The host secrets it receives are
 # OPENCODE_GO_API_KEY, which the default model needs, and OPENCODE_API_KEY if
 # you have one, both forwarded by name so their values never land in the
-# command line or an image layer.
+# command line or an image layer. That first key is required only for the
+# default: naming another provider with --provider or a provider/model string
+# runs without it, and that provider's own key then comes through
+# OPENCODE_API_KEY or PI_SANDBOX_ENV.
 #
 #   export OPENCODE_GO_API_KEY=$(pi auth print-api-key --provider opencode-go)
 # Forward further host variables by naming them in PI_SANDBOX_ENV, for example
@@ -21,16 +24,73 @@
 # shellcheck disable=SC1007  # `CDPATH= cd` is a deliberate prefix assignment
 set -eu
 
-image=pi-sandbox:local
 script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 dockerfile=$script_dir/Dockerfile.pi
 
-# The repository to mount: the git root when there is one, else the cwd. This
-# is what makes the script work for any project instead of one checkout.
-if project=$(git rev-parse --show-toplevel 2>/dev/null) && [ -n "$project" ]; then
-    :
+# shasum first, sha1sum as the fallback where shasum is absent. Keep this
+# order: changing the digest would rename every existing volume and orphan the
+# state in it, and would change the image tag for no reason.
+if command -v shasum >/dev/null 2>&1; then
+    hash_cmd=shasum
+elif command -v sha1sum >/dev/null 2>&1; then
+    hash_cmd=sha1sum
 else
-    project=$(pwd)
+    printf '%s\n' "need shasum or sha1sum to name the image and state volume" >&2
+    exit 2
+fi
+
+# On Linux the bind mount keeps the host uid and gid, so build the image with
+# them and append them to the tag input: two host users, or a changed uid, get
+# their own image. Docker Desktop maps the mounted files to the container user,
+# so there the defaults keep the images and volumes that already exist. Running
+# as root would make the container user uid 0 and leave root-owned files in the
+# project, so refuse it.
+build_args=''
+host_ids=''
+if [ "$(uname -s)" = Linux ]; then
+    if [ "$(id -u)" -eq 0 ]; then
+        printf '%s\n' "refusing to run as root: the container user would be uid 0 and the project's files would end up root-owned" >&2
+        exit 2
+    fi
+    host_ids=$(id -u):$(id -g)
+    build_args="--build-arg AGENT_UID=$(id -u) --build-arg AGENT_GID=$(id -g)"
+fi
+
+# Tag the image by the contents of the files that build it, so a `git pull`
+# that changes one produces a tag that does not exist yet and the build below
+# rebuilds it instead of silently running the old image. The files are hashed
+# in this fixed order, and the Linux host ids are appended to the same list.
+image_tag=$(
+    {
+        cat "$dockerfile" \
+            "$script_dir/entrypoint.sh" \
+            "$script_dir/herdr-fleet.md"
+        printf '%s' "$host_ids"
+    } \
+        | "$hash_cmd" \
+        | cut -c1-12
+)
+image=pi-sandbox:$image_tag
+
+# The repository to mount: the nearest directory at or above the launch
+# directory that holds a `.git`, either the directory itself or the file a
+# linked worktree or submodule checkout uses, else the launch directory. This
+# is what makes the script work for any project instead of one checkout.
+#
+# Git is deliberately not asked. `git rev-parse --show-toplevel` honours
+# `core.worktree` in .git/config and the `gitdir` in a `.git` file, and both
+# live in the project, so the container can write them. A value the agent left
+# there made git name any host directory and the wrapper mounted it: with
+# `core.worktree = /etc` the next launch bind-mounted the host's /etc at
+# /workspace, and a path under the home directory would have exposed it the
+# same way. The nearest `.git` cannot be moved by a config value.
+launch_dir=$(pwd)
+project=$launch_dir
+while [ "$project" != / ] && [ ! -e "$project/.git" ]; do
+    project=$(dirname -- "$project")
+done
+if [ ! -e "$project/.git" ]; then
+    project=$launch_dir
 fi
 project=$(CDPATH= cd -- "$project" && pwd)
 
@@ -44,9 +104,47 @@ if [ "$project" = "${HOME%/}" ] || case "${HOME%/}/" in "$project"/*) true ;; *)
     exit 2
 fi
 
+# Docker parses --mount as comma-separated fields, so a comma anywhere in the
+# project path would split the source and mount something else.
+case "$project" in
+    *,*)
+        printf '%s\n' "refusing to mount $project: the path contains a comma" >&2
+        exit 2
+        ;;
+esac
+
+# A symlink at any of these is followed by Git, by the mkdir below and by the
+# bind mounts, so the agent can point the host's Git at a config it wrote, or
+# make this script create directories outside the project. The `.git` symlink
+# was reproduced: the next launch mounted the target read-write and the agent
+# read a host key from it. Refuse one rather than follow it, before the image
+# build and every mount, and whether or not this is a repository.
+for link in .git .git/config .git/hooks .git/modules .git/worktrees .git/config.worktree; do
+    if [ -L "$project/$link" ]; then
+        printf '%s\n' "refusing to run: $project/$link is a symlink, which Git and this script would follow outside the project, so inspect and remove it" >&2
+        exit 2
+    fi
+done
+
+# `.git/config.worktree` is created with `: >` below and then bind-mounted as
+# a file. `set -C` does not save that write from a FIFO, which dash opens and
+# blocks on waiting for a reader, and Docker cannot mount a directory or a
+# socket as a file either, so refuse anything there that is not an ordinary
+# file. A symlink was caught above, and `[ -e ]` follows one, so a dangling
+# link cannot slip past this.
+if [ -e "$project/.git/config.worktree" ] && [ ! -f "$project/.git/config.worktree" ]; then
+    printf '%s\n' "refusing to run: $project/.git/config.worktree is not a regular file, which this script would create or mount as one, so inspect and remove it" >&2
+    exit 2
+fi
+
 # Extra host variables to forward, by name only. Names are validated so a
-# stray value cannot smuggle in another docker flag.
+# stray value cannot smuggle in another docker flag. The command substitution
+# is word-split and would also be pathname-expanded, so `set -f` stops a value
+# like `*` from being replaced by the project's filenames: without it, a glob
+# could forward a variable the caller never named, which the README says
+# cannot happen.
 extra_env=''
+set -f
 for name in $(printf '%s' "${PI_SANDBOX_ENV:-}" | tr ',' ' '); do
     case "$name" in
         [A-Za-z_]*) ;;
@@ -58,35 +156,13 @@ for name in $(printf '%s' "${PI_SANDBOX_ENV:-}" | tr ',' ' '); do
     fi
     extra_env="$extra_env --env $name"
 done
-
-if [ -z "${OPENCODE_GO_API_KEY:-}" ]; then
-    printf '%s\n' "OPENCODE_GO_API_KEY is required" >&2
-    printf '%s\n' \
-        "get it with: pi auth print-api-key --provider opencode-go" >&2
-    exit 2
-fi
+set +f
 
 # One state volume per project, so sessions and `pi --resume` stay separate.
 # Inside the container every project is /workspace, which would otherwise make
 # them share one session history.
-# shasum first, sha1sum as the fallback where shasum is absent. Keep this
-# order: changing the digest would rename every existing volume and orphan the
-# state in it.
-if command -v shasum >/dev/null 2>&1; then
-    project_hash=shasum
-elif command -v sha1sum >/dev/null 2>&1; then
-    project_hash=sha1sum
-else
-    printf '%s\n' "need shasum or sha1sum to name the state volume" >&2
-    exit 2
-fi
-project_tag=$(printf '%s' "$project" | "$project_hash" | cut -c1-8)
+project_tag=$(printf '%s' "$project" | "$hash_cmd" | cut -c1-8)
 state_volume=pi-sandbox-$(basename "$project" | tr -c 'A-Za-z0-9_.-' '-')-$project_tag
-
-if ! docker image inspect "$image" >/dev/null 2>&1; then
-    printf '%s\n' "building $image (first run only)" >&2
-    docker build --file "$dockerfile" --tag "$image" "$(dirname -- "$dockerfile")"
-fi
 
 # Default to a Chinese-hosted model through OpenCode, unless the caller picks
 # one. `deepseek-v4.1-flash` is on the opencode-go subscription and not on
@@ -107,19 +183,37 @@ case "${1:-}" in
         # rest of the name to the wrong API.
         chose_model=''
         chose_provider=''
+        needs_key=''
+        wants_info=''
         model_next=''
+        provider_next=''
         for arg in "$@"; do
             if [ -n "$model_next" ]; then
                 model_next=''
-                case "$arg" in */*) chose_provider=1 ;; esac
+                # A `provider/model` string names its own provider, and one
+                # under opencode-go needs the key without the flag too.
+                case "$arg" in
+                    opencode-go/*) chose_provider=1; needs_key=1 ;;
+                    */*) chose_provider=1 ;;
+                esac
+                continue
+            fi
+            if [ -n "$provider_next" ]; then
+                provider_next=''
+                case "$arg" in opencode-go) needs_key=1 ;; esac
                 continue
             fi
             case "$arg" in
                 --) break ;;  # everything after this is a message, not a flag
+                # Pi prints these and exits without a model call.
+                --help | -h | --version | -v) wants_info=1 ;;
                 --model) chose_model=1; model_next=1 ;;
+                --model=opencode-go/*) chose_model=1; chose_provider=1; needs_key=1 ;;
                 --model=*/*) chose_model=1; chose_provider=1 ;;
                 --model=*) chose_model=1 ;;
-                --provider | --provider=*) chose_provider=1 ;;
+                --provider) chose_provider=1; provider_next=1 ;;
+                --provider=opencode-go) chose_provider=1; needs_key=1 ;;
+                --provider=*) chose_provider=1 ;;
             esac
         done
         # Both are supplied, because naming one and leaving the other to Pi
@@ -128,9 +222,29 @@ case "${1:-}" in
         # answering from Zen instead. Naming another provider without a model
         # is the caller's to get right.
         [ -n "$chose_model" ] || set -- --model deepseek-v4.1-flash "$@"
+        [ -n "$chose_provider" ] || needs_key=1
         [ -n "$chose_provider" ] || set -- --provider opencode-go "$@"
         ;;
 esac
+
+# Required only when this run reaches opencode-go: the default provider the
+# case above supplies, the flag naming it, or a model under it. Another
+# provider's missing key is Pi's to complain about, not this wrapper's, and
+# --help, -h, --version and -v print and exit without a model call.
+if [ -n "${needs_key:-}" ] && [ -z "${wants_info:-}" ] && [ -z "${OPENCODE_GO_API_KEY:-}" ]; then
+    printf '%s\n' "OPENCODE_GO_API_KEY is required" >&2
+    printf '%s\n' \
+        "get it with: pi auth print-api-key --provider opencode-go" >&2
+    exit 2
+fi
+
+if ! docker image inspect "$image" >/dev/null 2>&1; then
+    printf '%s\n' "building $image" >&2
+    printf '%s\n' \
+        "older pi-sandbox images can be removed with: docker image prune -a --filter label=pi-sandbox.image=1 (this also removes the current image, which the next launch rebuilds)" >&2
+    # shellcheck disable=SC2086  # empty off Linux, two words on it
+    docker build --file "$dockerfile" --tag "$image" $build_args "$(dirname -- "$dockerfile")"
+fi
 
 # Allocate a TTY only when there is one, so the same wrapper serves a Herdr
 # pane and a non-interactive check. Unquoted on purpose: these are two words.
@@ -147,6 +261,71 @@ fi
 # SIGINT's default disposition.
 trap : INT
 
+# The tail of the docker command, the mounts and then the image and Pi's
+# arguments, is built in the positional parameters. A variable holding the
+# mounts would split on the spaces in a path like `/Users/x/my project`, and
+# POSIX sh has no arrays. Prepend in reverse, because each `set --` puts its
+# arguments first and the last mount must end up closest to the project.
+set -- "$image" "$@"
+set -- --mount "type=volume,source=$state_volume,target=/home/agent" "$@"
+if [ -d "$project/.git" ]; then
+    # Remembered for the exit check: a root `.git` this launch protected is the
+    # one the container could not have replaced, and is the only one to prune.
+    protected_git=1
+    # Mounting .git itself makes it a mount point, which cannot be renamed or
+    # removed. Without it the agent can `mv .git .git-old`, build a fresh .git
+    # with its own config and hooks, and the host runs what it names. The parts
+    # that can name a command are then layered read-only over that writable
+    # mount, so the index, objects and refs stay writable and `git add` and
+    # `git commit` still work. A .git file (a linked worktree or a submodule
+    # checkout) gets nothing: the real git directory is outside the mount and
+    # git does not work in the container for it anyway.
+    #
+    # Created first on purpose. Without the directory the agent could make its
+    # own and leave a hook in it for the host to run.
+    mkdir -p "$project/.git/hooks"
+    # A linked worktree keeps its git directory at .git/worktrees/<name>, and
+    # files there redirect Git: `commondir` names the common directory a
+    # worktree reads its config and hooks from, `gitdir` names the worktree
+    # metadata, and `config.worktree` names a command through core.fsmonitor.
+    # Any of them lets the agent point the host's Git at a config it wrote, so
+    # the whole directory is read-only like the hooks. Created first for the
+    # same reason, since a missing directory is not skipped. `git worktree add`
+    # cannot work in the sandbox anyway: the paths in those files are host
+    # paths.
+    mkdir -p "$project/.git/worktrees"
+    # Submodule configs carry the same hook and filter keys as .git/config,
+    # and a git directory the agent builds at .git/modules/<name> is one the
+    # host's Git reaches through the submodule's `.git` file and can run a
+    # command from. Created first for the same reason as the hooks, so a
+    # missing directory cannot be left for the agent to fill: the protected
+    # `.git` is pruned at exit, so nothing there would be reported.
+    mkdir -p "$project/.git/modules"
+    set -- --mount "type=bind,source=$project/.git/modules,target=/workspace/.git/modules,readonly" "$@"
+    set -- --mount "type=bind,source=$project/.git/worktrees,target=/workspace/.git/worktrees,readonly" "$@"
+    set -- --mount "type=bind,source=$project/.git/hooks,target=/workspace/.git/hooks,readonly" "$@"
+    # `git sparse-checkout init --cone` sets extensions.worktreeConfig, and git
+    # then reads .git/config.worktree, which can name a command through
+    # core.fsmonitor just as .git/config can. It is writable through the .git
+    # mount above unless it is covered too, so it gets the hooks' treatment
+    # whether or not the extension is on. Git ignores an empty config.worktree
+    # while it is off, so creating it changes nothing for the host. `set -C`
+    # creates the file only when it is missing and refuses an existing one, so
+    # a real config.worktree is not truncated. A non-regular file there was
+    # refused above, before this write could block on a FIFO.
+    (set -C; : > "$project/.git/config.worktree") 2>/dev/null || true
+    set -- --mount "type=bind,source=$project/.git/config.worktree,target=/workspace/.git/config.worktree,readonly" "$@"
+    set -- --mount "type=bind,source=$project/.git/config,target=/workspace/.git/config,readonly" "$@"
+    set -- --mount "type=bind,source=$project/.git,target=/workspace/.git" "$@"
+fi
+
+# A nested repository cannot be stopped by a mount: the agent can `git init
+# sub`, the host user owns what it writes, and host git trusts the config and
+# hooks there. Warn about it at exit instead. ctime is compared because
+# `touch` cannot forge it.
+marker=$(mktemp)
+
+docker_status=0
 # shellcheck disable=SC2086
 docker run \
     --rm \
@@ -164,5 +343,63 @@ docker run \
     --env TERM=xterm-256color \
     --env COLORTERM=truecolor \
     --mount "type=bind,source=$project,target=/workspace" \
-    --mount "type=volume,source=$state_volume,target=/home/agent" \
-    "$image" "$@"
+    "$@" || docker_status=$?
+
+# Prune the project's own .git, but only when this launch protected it with a
+# mount, and look for nested git metadata the container created. Warn only,
+# never delete.
+#
+# In a project that was not a repository at launch nothing was mounted over
+# `.git`, so the container can create a root `.git`, file or directory, whose
+# config, hooks or `core.worktree` the host would then trust. Pruning the root
+# unconditionally hid it. An empty pattern matches nothing, so find descends
+# into it and reports it like a nested one.
+#
+# `-path` takes a glob, so a `[`, `*` or `?` in the project path would stop the
+# prune from matching the root `.git`: with `[x]` the protected root is
+# reported as nested, and with `*` a real nested one is pruned away and missed.
+# Escape those characters before building the pattern.
+git_path=$(printf '%s' "$project" | sed 's/[][*?\\]/\\&/g')
+git_prune=''
+if [ -n "${protected_git:-}" ]; then
+    git_prune=$git_path/.git
+fi
+nested=''
+if ! found=$(find "$project" -path "$git_prune" -prune -o \
+    \( -name .git -o -path '*/.git/config' -o -path '*/.git/hooks/*' \) \
+    -cnewer "$marker" -print 2>/dev/null); then
+    printf '%s\n' "pi-sandbox: warning: the nested-git check could not run because find failed, so the project was not scanned for nested git metadata" >&2
+else
+    # A `git init sub` writes sub/.git, its config and a hooks/*.sample for
+    # every hook, so one repository printed fifteen lines. Keep the `.git`
+    # path once and drop what is under it, matching the last `/.git` so a
+    # project path that itself contains one still names the right repository.
+    nested=$(printf '%s\n' "$found" | sed 's#\(.*\)/\.git/.*#\1/.git#' | sort -u)
+fi
+# A rebase, merge or cherry-pick the container planted makes the host's Git
+# report an operation in progress, and `git rebase --continue` then runs the
+# `exec` lines the todo holds. The paths cannot be blocked, since an empty
+# rebase-merge directory would itself make Git think a rebase is in progress,
+# so warn instead. ctime again, and the whole directory is checked so a file
+# the agent edited inside one already there counts too.
+interrupted=''
+for state in rebase-merge rebase-apply sequencer MERGE_HEAD CHERRY_PICK_HEAD; do
+    candidate=$project/.git/$state
+    if [ -e "$candidate" ] && [ -n "$(find "$candidate" -cnewer "$marker" -print 2>/dev/null)" ]; then
+        interrupted=$(printf '%s%s\n' "$interrupted" "$candidate")
+    fi
+done
+rm -f "$marker"
+if [ -n "$nested" ]; then
+    printf '%s\n' "pi-sandbox: warning: the container left nested git metadata in the project:" >&2
+    printf '%s\n' "$nested" >&2
+    printf '%s\n' "your host git trusts it and would run the commands it names, so inspect it before running git there" >&2
+fi
+if [ -n "$interrupted" ]; then
+    printf '%s\n' "pi-sandbox: warning: the container left a git operation in progress:" >&2
+    printf '%s\n' "$interrupted" >&2
+    printf '%s\n' "your host git will report a rebase, merge or cherry-pick, and continuing it can run commands stored in those files, so inspect and abort it rather than continue" >&2
+fi
+
+# Docker's status is the wrapper's. `set -e` must not skip the check above.
+exit "$docker_status"

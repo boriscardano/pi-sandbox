@@ -23,8 +23,31 @@ FAKE_DOCKER = """#!/bin/sh
 case "$1" in
     image) exit "${PI_SANDBOX_FAKE_INSPECT:-0}" ;;
 esac
+if [ "$1" = run ]; then
+    if [ -n "${PI_SANDBOX_FAKE_AGENT:-}" ]; then
+        sh -c "$PI_SANDBOX_FAKE_AGENT"
+    fi
+    exit "${PI_SANDBOX_FAKE_RUN_STATUS:-0}"
+fi
 exit 0
 """
+
+# Simulates what an agent can leave behind in the mounted project. A nested
+# repository cannot be prevented by a mount, so the wrapper looks for it at
+# exit instead.
+NESTED_GIT = (
+    "mkdir -p sub/.git/hooks && "
+    "printf '[core]\\n\\tfsmonitor = true\\n' > sub/.git/config && "
+    "printf '#!/bin/sh\\n' > sub/.git/hooks/pre-commit.sample && "
+    "printf '#!/bin/sh\\n' > sub/.git/hooks/post-commit.sample"
+)
+
+# Simulates a rebase the agent can plant. `exec` lines in the todo run when the
+# host continues the rebase this makes git report.
+PLANTED_REBASE = (
+    "mkdir -p .git/rebase-merge && "
+    "printf 'exec true\\n' > .git/rebase-merge/git-rebase-todo"
+)
 
 
 def _run(
@@ -36,12 +59,38 @@ def _run(
     home: Path | None = None,
     forward: str | None = None,
     also: dict[str, str] | None = None,
+    agent: str | None = None,
+    run_status: str = "0",
+    wrapper: Path | None = None,
+    uname: str | None = None,
+    fake_id: tuple[str, str] | None = None,
+    fake_find: str | None = None,
 ) -> tuple[subprocess.CompletedProcess[str], list[list[str]]]:
     bin_dir = tmp_path / "fakebin"
     bin_dir.mkdir(parents=True)
     docker = bin_dir / "docker"
     docker.write_text(FAKE_DOCKER)
     docker.chmod(0o755)
+    # Only when a test asks for a platform, so every other test sees the host.
+    if uname is not None:
+        fake = bin_dir / "uname"
+        fake.write_text(f"#!/bin/sh\nprintf '%s\\n' '{uname}'\n")
+        fake.chmod(0o755)
+    if fake_id is not None:
+        uid, gid = fake_id
+        fake = bin_dir / "id"
+        fake.write_text(
+            "#!/bin/sh\n"
+            'case "$1" in\n'
+            f"    -u) printf '%s\\n' '{uid}' ;;\n"
+            f"    -g) printf '%s\\n' '{gid}' ;;\n"
+            "esac\n"
+        )
+        fake.chmod(0o755)
+    if fake_find is not None:
+        fake = bin_dir / "find"
+        fake.write_text(fake_find)
+        fake.chmod(0o755)
     log = tmp_path / "docker.log"
 
     project = cwd if cwd is not None else tmp_path / "project"
@@ -52,7 +101,10 @@ def _run(
         "HOME": str(home if home is not None else tmp_path / "home"),
         "PI_SANDBOX_FAKE_LOG": str(log),
         "PI_SANDBOX_FAKE_INSPECT": inspect_status,
+        "PI_SANDBOX_FAKE_RUN_STATUS": run_status,
     }
+    if agent is not None:
+        env["PI_SANDBOX_FAKE_AGENT"] = agent
     if key is not None:
         env["OPENCODE_GO_API_KEY"] = key
     if forward is not None:
@@ -61,11 +113,12 @@ def _run(
     env.update(also or {})
 
     completed = subprocess.run(
-        [str(WRAPPER), *args],
+        [str(wrapper or WRAPPER), *args],
         capture_output=True,
         text=True,
         cwd=project,
         env=env,
+        check=False,
     )
     invocations = [
         [line for line in block.splitlines() if line and not line.startswith("PARENT=")]
@@ -91,6 +144,25 @@ def _docker_run(invocations: list[list[str]]) -> list[str]:
     raise AssertionError(f"no docker run invocation in {invocations}")
 
 
+def _image(argv: list[str]) -> str:
+    """The image is the argument right after the last --mount value."""
+
+    last_mount = max(index for index, arg in enumerate(argv) if arg == "--mount")
+    return argv[last_mount + 2]
+
+
+def _wrapper_with_inputs(directory: Path) -> Path:
+    """Copy the wrapper and the files it hashes into a fresh directory, so a
+    test can edit one input without touching the checkout."""
+
+    directory.mkdir(parents=True, exist_ok=True)
+    for name in ("pi", "Dockerfile.pi", "entrypoint.sh", "herdr-fleet.md"):
+        shutil.copy(ROOT / name, directory / name)
+    wrapper = directory / "pi"
+    wrapper.chmod(0o755)
+    return wrapper
+
+
 def test_wrapper_is_named_pi_so_herdr_identifies_the_pane_agent() -> None:
     assert WRAPPER.name == "pi"
     assert os.access(WRAPPER, os.X_OK)
@@ -102,6 +174,71 @@ def test_wrapper_fails_closed_without_the_opencode_key(tmp_path: Path) -> None:
     assert completed.returncode == 2
     assert "OPENCODE_GO_API_KEY is required" in completed.stderr
     assert invocations == []
+
+
+def test_wrapper_requires_the_opencode_key_only_for_opencode_go(
+    tmp_path: Path,
+) -> None:
+    """The wrapper supplies the default provider, so that run needs the key.
+    Another provider is Pi's to authenticate, and the wrapper still forwards
+    both keys by name for docker to drop when they are unset."""
+
+    other, other_calls = _run(
+        tmp_path, "--provider", "opencode", "--model", "kimi-k3", key=None
+    )
+    slashed, slashed_calls = _run(
+        tmp_path / "b", "--model", "opencode/glm-5.3", key=None
+    )
+    subcommand, subcommand_calls = _run(tmp_path / "c", "list", key=None)
+
+    for completed in (other, slashed, subcommand):
+        assert completed.returncode == 0
+        assert "OPENCODE_GO_API_KEY is required" not in completed.stderr
+    for calls in (other_calls, slashed_calls, subcommand_calls):
+        argv = _docker_run(calls)
+        assert argv[argv.index("--env") + 1] == "OPENCODE_GO_API_KEY"
+        assert "OPENCODE_API_KEY" in argv
+
+
+def test_wrapper_requires_the_key_for_an_opencode_go_model_or_provider(
+    tmp_path: Path,
+) -> None:
+    model, model_calls = _run(
+        tmp_path, "--model", "opencode-go/deepseek-v4.1-flash", key=None
+    )
+    flag, flag_calls = _run(
+        tmp_path / "b", "--provider=opencode-go", "--model", "x", key=None
+    )
+
+    assert model.returncode == 2
+    assert "OPENCODE_GO_API_KEY is required" in model.stderr
+    assert model_calls == []
+    assert flag.returncode == 2
+    assert "OPENCODE_GO_API_KEY is required" in flag.stderr
+    assert flag_calls == []
+
+
+def test_wrapper_does_not_require_the_key_for_pi_help_or_version(
+    tmp_path: Path,
+) -> None:
+    """Pi prints these and exits without a model call, so requiring the key
+    would make the wrapper's own help and version unreachable without one.
+    The default provider and model are still prepended, as for any prompt."""
+
+    for index, flag in enumerate(("--help", "-h", "--version", "-v")):
+        completed, invocations = _run(tmp_path / f"run-{index}", flag, key=None)
+
+        assert completed.returncode == 0, flag
+        assert "OPENCODE_GO_API_KEY is required" not in completed.stderr, flag
+        argv = _docker_run(invocations)
+        image = _image(argv)
+        assert argv[argv.index(image) + 1 :] == [
+            "--provider",
+            "opencode-go",
+            "--model",
+            "deepseek-v4.1-flash",
+            flag,
+        ]
 
 
 def test_wrapper_mounts_only_the_chosen_project_and_a_state_volume(
@@ -129,6 +266,646 @@ def test_wrapper_mounts_the_git_root_when_run_from_a_subdirectory(
     _, invocations = _run(tmp_path, cwd=repo / "pkg" / "deep")
 
     assert f"type=bind,source={repo},target=/workspace" in _docker_run(invocations)
+
+
+def test_wrapper_mounts_the_launch_directory_not_a_planted_worktree(
+    tmp_path: Path,
+) -> None:
+    """The repository is found from the nearest `.git`, not from git.
+    `git rev-parse --show-toplevel` honours `core.worktree`, which lives in
+    .git/config and so can be written by the container. It was reproduced:
+    after the agent set `core.worktree = /etc`, the next launch bind-mounted
+    the host's /etc at /workspace with no warning. An ancestor with no `.git`
+    of its own is the same escape with a narrower target, and containment
+    alone would not stop it."""
+
+    home = tmp_path / "home"
+    outer = tmp_path / "outer"
+    for index, target in enumerate(("/etc", str(outer))):
+        repo = outer / f"repo-{index}"
+        repo.mkdir(parents=True)
+        subprocess.run(["git", "init", "--quiet", str(repo)], check=True)
+        subprocess.run(
+            ["git", "-C", str(repo), "config", "core.worktree", target],
+            check=True,
+        )
+
+        completed, invocations = _run(tmp_path / f"run-{index}", cwd=repo, home=home)
+        argv = _docker_run(invocations)
+        mounts = [
+            argv[position + 1] for position, arg in enumerate(argv) if arg == "--mount"
+        ]
+
+        assert completed.returncode == 0, target
+        assert f"type=bind,source={repo},target=/workspace" in mounts, target
+        assert not any(f"source={target}," in mount for mount in mounts), target
+
+
+def test_wrapper_ignores_a_dot_git_file_that_redirects_the_worktree(
+    tmp_path: Path,
+) -> None:
+    """A `.git` file names a git directory the container can build inside the
+    project, and `core.worktree` there makes git report a host directory. The
+    launch directory's own `.git` names the repository instead."""
+
+    project = tmp_path / "project"
+    project.mkdir()
+    gitdir = project / "built"
+    subprocess.run(["git", "init", "--quiet", str(gitdir)], check=True)
+    subprocess.run(
+        ["git", "-C", str(gitdir), "config", "core.worktree", "/etc"],
+        check=True,
+    )
+    (project / ".git").write_text(f"gitdir: {gitdir}/.git\n")
+
+    completed, invocations = _run(tmp_path / "run", cwd=project)
+    argv = _docker_run(invocations)
+    mounts = [
+        argv[position + 1] for position, arg in enumerate(argv) if arg == "--mount"
+    ]
+
+    assert completed.returncode == 0
+    assert f"type=bind,source={project},target=/workspace" in mounts
+    assert not any("source=/etc," in mount for mount in mounts)
+
+
+def test_wrapper_mounts_git_config_and_hooks_read_only(tmp_path: Path) -> None:
+    """A writable .git/config, config.worktree or hook is a command the host
+    runs the next time the owner touches the checkout: `git status` and `git
+    commit` honour core.fsmonitor, core.pager, core.hooksPath and
+    filter.<name>.clean."""
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "--quiet", str(repo)], check=True)
+
+    _, invocations = _run(tmp_path, cwd=repo)
+    argv = _docker_run(invocations)
+    mounts = [argv[index + 1] for index, arg in enumerate(argv) if arg == "--mount"]
+
+    assert mounts[0] == f"type=bind,source={repo},target=/workspace"
+    assert mounts[1] == f"type=bind,source={repo}/.git,target=/workspace/.git"
+    assert mounts[2] == (
+        f"type=bind,source={repo}/.git/config,target=/workspace/.git/config,readonly"
+    )
+    assert mounts[3] == (
+        f"type=bind,source={repo}/.git/config.worktree,"
+        "target=/workspace/.git/config.worktree,readonly"
+    )
+    assert mounts[4] == (
+        f"type=bind,source={repo}/.git/hooks,target=/workspace/.git/hooks,readonly"
+    )
+    assert mounts[5] == (
+        f"type=bind,source={repo}/.git/worktrees,"
+        "target=/workspace/.git/worktrees,readonly"
+    )
+    assert mounts[6] == (
+        f"type=bind,source={repo}/.git/modules,target=/workspace/.git/modules,readonly"
+    )
+    # A fresh repository has no modules, they are created empty, and the
+    # state volume is still last.
+    assert len(mounts) == 8
+    assert mounts[7].startswith("type=volume,source=pi-sandbox-")
+    assert mounts[7].endswith(",target=/home/agent")
+
+
+def test_wrapper_mounts_git_worktrees_read_only(tmp_path: Path) -> None:
+    """A linked worktree keeps its git directory at .git/worktrees/<name>,
+    where `commondir`, `gitdir` and `config.worktree` can redirect the host's
+    Git at a config the agent wrote, so the whole directory is read-only."""
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "--quiet", str(repo)], check=True)
+
+    _, invocations = _run(tmp_path / "a", cwd=repo)
+    argv = _docker_run(invocations)
+    mounts = [argv[index + 1] for index, arg in enumerate(argv) if arg == "--mount"]
+
+    worktrees = (
+        f"type=bind,source={repo}/.git/worktrees,"
+        "target=/workspace/.git/worktrees,readonly"
+    )
+    assert worktrees in mounts
+    # Layered over .git and before the state volume, like the hooks.
+    assert mounts.index(worktrees) > mounts.index(
+        f"type=bind,source={repo}/.git,target=/workspace/.git"
+    )
+    assert mounts.index(worktrees) < mounts.index(
+        next(mount for mount in mounts if mount.startswith("type=volume"))
+    )
+
+
+def test_wrapper_creates_a_missing_git_worktrees_directory(tmp_path: Path) -> None:
+    """Skipping the mount because the directory is absent would leave the
+    agent free to create it and point the host's Git at a config it wrote,
+    the same as a missing hooks directory."""
+
+    project = tmp_path / "project"
+    (project / ".git").mkdir(parents=True)
+    (project / ".git/config").write_text("[core]\n\trepositoryformatversion = 0\n")
+
+    _, invocations = _run(tmp_path, cwd=project)
+    argv = _docker_run(invocations)
+    mounts = [argv[index + 1] for index, arg in enumerate(argv) if arg == "--mount"]
+
+    assert (project / ".git/worktrees").is_dir()
+    assert (
+        f"type=bind,source={project}/.git/worktrees,"
+        "target=/workspace/.git/worktrees,readonly"
+    ) in mounts
+
+
+def test_wrapper_mounts_dot_git_itself_so_it_cannot_be_replaced(
+    tmp_path: Path,
+) -> None:
+    """Read-only mounts on .git/config and .git/hooks do not stop `mv .git
+    .git-old`: nothing is mounted at .git itself, so the rename succeeds and
+    the agent builds a fresh .git with its own config. Mounting .git makes it
+    a mount point, which cannot be renamed or removed."""
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "--quiet", str(repo)], check=True)
+
+    _, invocations = _run(tmp_path, cwd=repo)
+    argv = _docker_run(invocations)
+    mounts = [argv[index + 1] for index, arg in enumerate(argv) if arg == "--mount"]
+
+    # After the workspace mount and before the read-only parts, so they layer
+    # over it rather than the other way round.
+    assert mounts[1] == f"type=bind,source={repo}/.git,target=/workspace/.git"
+    assert "readonly" not in mounts[1]
+    assert mounts[2].endswith(",target=/workspace/.git/config,readonly")
+    assert mounts[3].endswith(",target=/workspace/.git/config.worktree,readonly")
+    assert mounts[4].endswith(",target=/workspace/.git/hooks,readonly")
+
+
+def test_wrapper_creates_a_missing_git_hooks_directory(tmp_path: Path) -> None:
+    """Skipping the mount because the directory is absent would leave the
+    agent free to create it and put a hook there for the host to run."""
+
+    project = tmp_path / "project"
+    (project / ".git").mkdir(parents=True)
+    (project / ".git/config").write_text("[core]\n\trepositoryformatversion = 0\n")
+
+    _, invocations = _run(tmp_path, cwd=project)
+    argv = _docker_run(invocations)
+    mounts = [argv[index + 1] for index, arg in enumerate(argv) if arg == "--mount"]
+
+    assert (project / ".git/hooks").is_dir()
+    assert (
+        f"type=bind,source={project}/.git/hooks,target=/workspace/.git/hooks,readonly"
+    ) in mounts
+
+
+def test_wrapper_mounts_git_modules_read_only(tmp_path: Path) -> None:
+    """A `core.fsmonitor` or hook planted at .git/modules/<name>/config runs
+    when the host's Git reaches that git directory through the submodule's
+    `.git` file. The protected `.git` is pruned at exit, so nothing there is
+    reported, and a missing directory can no longer be left for the agent to
+    fill: it is created and mounted read-only like the hooks."""
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "--quiet", str(repo)], check=True)
+
+    _, invocations = _run(tmp_path / "a", cwd=repo)
+    argv = _docker_run(invocations)
+    mounts = [argv[index + 1] for index, arg in enumerate(argv) if arg == "--mount"]
+
+    modules = (
+        f"type=bind,source={repo}/.git/modules,target=/workspace/.git/modules,readonly"
+    )
+    assert (repo / ".git/modules").is_dir()
+    assert modules in mounts
+    # Layered over .git and under the state volume, like the other read-only
+    # parts.
+    assert mounts.index(modules) > mounts.index(
+        f"type=bind,source={repo}/.git,target=/workspace/.git"
+    )
+    assert mounts.index(modules) < mounts.index(
+        next(mount for mount in mounts if mount.startswith("type=volume"))
+    )
+
+
+def test_wrapper_mounts_config_worktree_read_only(tmp_path: Path) -> None:
+    """`git sparse-checkout init --cone` sets extensions.worktreeConfig, and
+    git then reads .git/config.worktree, which names a command through
+    core.fsmonitor just as .git/config does. It is writable through the .git
+    mount unless it is covered too, so it is created empty when missing and
+    mounted read-only like the hooks, whether or not the extension is on. Git
+    ignores the empty file while it is off, so the host sees no change."""
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "--quiet", str(repo)], check=True)
+
+    _, invocations = _run(tmp_path / "a", cwd=repo)
+    argv = _docker_run(invocations)
+    mounts = [argv[index + 1] for index, arg in enumerate(argv) if arg == "--mount"]
+
+    worktree = (
+        f"type=bind,source={repo}/.git/config.worktree,"
+        "target=/workspace/.git/config.worktree,readonly"
+    )
+    assert worktree in mounts
+    # Layered over .git like the other read-only parts.
+    assert mounts.index(worktree) > mounts.index(
+        f"type=bind,source={repo}/.git,target=/workspace/.git"
+    )
+    assert (repo / ".git/config.worktree").is_file()
+    assert (repo / ".git/config.worktree").read_text() == ""
+
+
+def test_wrapper_keeps_an_existing_config_worktree(tmp_path: Path) -> None:
+    """`set -C` must create the file only when it is missing: truncating a
+    config.worktree git really reads would drop the host's own settings."""
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "--quiet", str(repo)], check=True)
+    subprocess.run(["git", "sparse-checkout", "init", "--cone"], cwd=repo, check=True)
+    (repo / ".git/config.worktree").write_text("[core]\n\tsparseCheckout = true\n")
+
+    _, invocations = _run(tmp_path / "a", cwd=repo)
+
+    assert (
+        f"type=bind,source={repo}/.git/config.worktree,"
+        "target=/workspace/.git/config.worktree,readonly"
+    ) in _docker_run(invocations)
+    assert (repo / ".git/config.worktree").read_text() == (
+        "[core]\n\tsparseCheckout = true\n"
+    )
+
+
+def test_wrapper_refuses_a_config_worktree_symlink(tmp_path: Path) -> None:
+    """Git would follow the symlink and run what it names, and the mount would
+    follow it too, so a link the agent left is refused rather than trusted."""
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "--quiet", str(repo)], check=True)
+    (repo / ".git/config.worktree").symlink_to(repo / "evil")
+
+    completed, invocations = _run(tmp_path / "a", cwd=repo)
+
+    assert completed.returncode == 2
+    assert "symlink" in completed.stderr
+    assert not any(argv[0] == "run" for argv in invocations)
+
+
+def test_wrapper_refuses_a_non_regular_config_worktree(tmp_path: Path) -> None:
+    """Creating the file with `: >` blocks on a FIFO, which dash opens and
+    waits on for a reader, so a non-regular file there is refused before the
+    write and before Docker mounts it as a file."""
+
+    for index, make in enumerate((os.mkfifo, lambda path: path.mkdir())):
+        repo = tmp_path / f"repo-{index}"
+        repo.mkdir()
+        subprocess.run(["git", "init", "--quiet", str(repo)], check=True)
+        make(repo / ".git/config.worktree")
+
+        completed, invocations = _run(tmp_path / f"run-{index}", cwd=repo)
+
+        assert completed.returncode == 2, index
+        assert "not a regular file" in completed.stderr, index
+        assert invocations == [], index
+
+
+def test_wrapper_refuses_a_symlinked_git_path(tmp_path: Path) -> None:
+    """Git, the `mkdir` below and the bind mounts all follow a symlink, so the
+    agent can make the next launch create directories outside the project or
+    mount a host directory read-write. The `.git` case was reproduced: the
+    target's id_rsa was readable from the second session. Every path is
+    refused before anything is created or run."""
+
+    for index, relative in enumerate(
+        (
+            ".git",
+            ".git/config",
+            ".git/hooks",
+            ".git/modules",
+            ".git/worktrees",
+            ".git/config.worktree",
+        )
+    ):
+        project = tmp_path / f"project-{index}"
+        project.mkdir()
+        if relative != ".git":
+            (project / ".git").mkdir()
+        target = tmp_path / f"target-{index}"
+        target.mkdir()
+        (target / "keep").write_text("unchanged")
+        (project / relative).symlink_to(target)
+
+        completed, invocations = _run(tmp_path / f"run-{index}", cwd=project)
+
+        assert completed.returncode == 2, relative
+        assert "symlink" in completed.stderr, relative
+        assert str(project / relative) in completed.stderr, relative
+        assert invocations == [], relative
+        # Nothing was created through the link.
+        assert sorted(path.name for path in target.iterdir()) == ["keep"], relative
+
+
+def test_wrapper_still_runs_a_repository_without_symlinked_git_paths(
+    tmp_path: Path,
+) -> None:
+    """The refusal is only for symlinks: an ordinary repository still runs."""
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "--quiet", str(repo)], check=True)
+
+    completed, invocations = _run(tmp_path / "run", cwd=repo)
+
+    assert completed.returncode == 0
+    assert _docker_run(invocations)
+
+
+def test_wrapper_leaves_a_git_file_and_a_plain_directory_alone(
+    tmp_path: Path,
+) -> None:
+    """A linked worktree or a submodule checkout has .git as a file pointing
+    outside the mount, so there is nothing inside it to protect, and a
+    non-repository gets no extra mounts at all."""
+
+    linked = tmp_path / "linked"
+    plain = tmp_path / "plain"
+    linked.mkdir()
+    plain.mkdir()
+    (linked / ".git").write_text("gitdir: /elsewhere/.git/worktrees/linked\n")
+
+    _, linked_calls = _run(tmp_path / "a", cwd=linked)
+    _, plain_calls = _run(tmp_path / "b", cwd=plain)
+
+    for invocations in (linked_calls, plain_calls):
+        argv = _docker_run(invocations)
+        mounts = [argv[index + 1] for index, arg in enumerate(argv) if arg == "--mount"]
+        assert len(mounts) == 2
+
+
+def test_wrapper_keeps_a_project_path_with_a_space_in_one_mount(
+    tmp_path: Path,
+) -> None:
+    """An unquoted mount variable split `/Users/x/my project` into broken
+    --mount arguments, so the tail of the command is built with `set --`."""
+
+    repo = tmp_path / "my project"
+    repo.mkdir()
+    subprocess.run(["git", "init", "--quiet", str(repo)], check=True)
+
+    _, invocations = _run(tmp_path, cwd=repo)
+    argv = _docker_run(invocations)
+    mounts = [argv[index + 1] for index, arg in enumerate(argv) if arg == "--mount"]
+
+    assert f"type=bind,source={repo},target=/workspace" in mounts
+    assert f"type=bind,source={repo}/.git,target=/workspace/.git" in mounts
+    assert (
+        f"type=bind,source={repo}/.git/config,target=/workspace/.git/config,readonly"
+    ) in mounts
+    assert (
+        f"type=bind,source={repo}/.git/config.worktree,"
+        "target=/workspace/.git/config.worktree,readonly"
+    ) in mounts
+    assert (
+        f"type=bind,source={repo}/.git/worktrees,"
+        "target=/workspace/.git/worktrees,readonly"
+    ) in mounts
+    assert (
+        f"type=bind,source={repo}/.git/modules,target=/workspace/.git/modules,readonly"
+    ) in mounts
+    assert len(mounts) == 8
+    assert all("target=" in mount for mount in mounts)
+
+
+def test_wrapper_refuses_a_project_path_with_a_comma(tmp_path: Path) -> None:
+    """Docker parses --mount as comma-separated fields, so a comma in the path
+    splits the source. That breaks the original mounts as much as the git
+    ones, so the path is refused rather than mounted wrongly."""
+
+    completed, invocations = _run(tmp_path, cwd=tmp_path / "a,b")
+
+    assert completed.returncode == 2
+    assert "comma" in completed.stderr
+    assert invocations == []
+
+
+def test_wrapper_warns_about_nested_git_metadata_the_container_left(
+    tmp_path: Path,
+) -> None:
+    """A nested `git init sub` cannot be stopped by a mount, and on Docker
+    Desktop the host user owns what the agent writes, so host git trusts a
+    config or hook there. Detect it at exit instead of preventing it, and
+    print each repository once: its .git, not its config and every hook."""
+
+    completed, _ = _run(tmp_path, agent=NESTED_GIT)
+
+    assert completed.returncode == 0
+    lines = completed.stderr.splitlines()
+    start = lines.index(
+        "pi-sandbox: warning: the container left nested git metadata in the project:"
+    )
+    assert lines[start + 1] == str(tmp_path / "project/sub/.git")
+    assert lines[start + 2].startswith("your host git trusts it")
+    assert "sub/.git/config" not in completed.stderr
+    assert "sub/.git/hooks" not in completed.stderr
+
+
+def test_wrapper_warns_about_a_root_git_the_container_created(
+    tmp_path: Path,
+) -> None:
+    """In a project that is not a repository at launch nothing is mounted over
+    `.git`, so the container can `git init .` and leave a root `.git` whose
+    config or hooks the host would trust. Pruning the root `.git`
+    unconditionally, as when it was protected, hid it. It is reported like a
+    nested one instead."""
+
+    completed, _ = _run(
+        tmp_path,
+        agent="git init -q . && git config core.fsmonitor true",
+    )
+
+    lines = completed.stderr.splitlines()
+    start = lines.index(
+        "pi-sandbox: warning: the container left nested git metadata in the project:"
+    )
+    assert lines[start + 1] == str(tmp_path / "project/.git")
+    assert lines[start + 2].startswith("your host git trusts it")
+
+
+def test_wrapper_does_not_report_the_protected_root_git(tmp_path: Path) -> None:
+    """The repository's own `.git` is mounted over at launch, so its ctime
+    moving when the agent commits is expected and must not be reported as
+    nested metadata the container left."""
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "--quiet", str(repo)], check=True)
+
+    completed, _ = _run(tmp_path / "run", cwd=repo, agent="touch .git")
+
+    assert completed.returncode == 0
+    assert "nested git metadata" not in completed.stderr
+
+
+def test_wrapper_prints_one_line_per_nested_repository(tmp_path: Path) -> None:
+    """Deduplicating by `.git` path keeps two repositories to two lines even
+    though find reports each one's config and hooks too."""
+
+    completed, _ = _run(
+        tmp_path,
+        agent=(
+            "mkdir -p one/.git/hooks two/.git/hooks && "
+            "touch one/.git/config two/.git/config "
+            "one/.git/hooks/pre-commit.sample two/.git/hooks/pre-commit.sample"
+        ),
+    )
+
+    lines = completed.stderr.splitlines()
+    start = lines.index(
+        "pi-sandbox: warning: the container left nested git metadata in the project:"
+    )
+    assert lines[start + 1 : start + 3] == [
+        str(tmp_path / "project/one/.git"),
+        str(tmp_path / "project/two/.git"),
+    ]
+    assert lines[start + 3].startswith("your host git trusts it")
+
+
+def test_wrapper_stays_quiet_when_the_container_leaves_no_nested_git(
+    tmp_path: Path,
+) -> None:
+    completed, _ = _run(tmp_path)
+
+    assert completed.returncode == 0
+    assert "nested git metadata" not in completed.stderr
+
+
+def test_wrapper_does_not_call_the_root_git_nested_when_the_path_has_globs(
+    tmp_path: Path,
+) -> None:
+    """`-path` takes a glob, so an unescaped project path with `[x]`, `*` or
+    `?` fails to prune the protected root `.git`, whose ctime changes on every
+    commit, and reports it as a nested repository the container left."""
+
+    for index, name in enumerate(("a[x]b", "a*b", "a?b")):
+        repo = tmp_path / name
+        repo.mkdir()
+        subprocess.run(["git", "init", "--quiet", str(repo)], check=True)
+        # The root .git is a genuine git directory, not one the agent made.
+        completed, _ = _run(tmp_path / f"clean-{index}", cwd=repo, agent="touch .git")
+
+        assert completed.returncode == 0
+        assert "nested git metadata" not in completed.stderr
+
+
+def test_wrapper_still_finds_nested_git_when_the_path_has_a_glob(
+    tmp_path: Path,
+) -> None:
+    """The escape is not only about false positives: an unescaped `*` matches
+    across the separator, so `-path` prunes a real nested `.git` and a
+    repository the agent created goes unreported."""
+
+    repo = tmp_path / "a*b"
+    repo.mkdir()
+    subprocess.run(["git", "init", "--quiet", str(repo)], check=True)
+
+    completed, _ = _run(tmp_path / "run", cwd=repo, agent=NESTED_GIT + " && touch .git")
+
+    assert completed.returncode == 0
+    assert f"{repo}/sub/.git" in completed.stderr
+    assert "nested git metadata" in completed.stderr
+
+
+def test_wrapper_reports_when_find_cannot_check_for_nested_git(
+    tmp_path: Path,
+) -> None:
+    """The check must not fail open: BusyBox find has no -cnewer and prints
+    its usage, which must not reach the terminal in place of a warning."""
+
+    completed, _ = _run(
+        tmp_path,
+        run_status="7",
+        fake_find=(
+            "#!/bin/sh\n"
+            "printf '%s\\n' 'find: unrecognized: -cnewer' >&2\n"
+            "printf '%s\\n' 'Usage: find [-HL] [PATH]...' >&2\n"
+            "exit 1\n"
+        ),
+    )
+
+    assert "nested-git check could not run" in completed.stderr
+    assert "Usage: find" not in completed.stderr
+    assert "unrecognized" not in completed.stderr
+    # The check is warn only, so docker's status still reaches the caller.
+    assert completed.returncode == 7
+
+
+def test_wrapper_keeps_docker_status_through_the_nested_git_check(
+    tmp_path: Path,
+) -> None:
+    """`set -e` would otherwise end the script on docker's non-zero status
+    before the check runs and change the status the caller sees."""
+
+    warning, _ = _run(tmp_path, agent=NESTED_GIT, run_status="7")
+    quiet, _ = _run(tmp_path / "b", run_status="7")
+
+    assert warning.returncode == 7
+    assert "nested git metadata" in warning.stderr
+    assert quiet.returncode == 7
+    assert "nested git metadata" not in quiet.stderr
+
+
+def test_wrapper_warns_about_a_git_operation_left_in_progress(
+    tmp_path: Path,
+) -> None:
+    """A planted rebase makes the host's git report one in progress, and
+    `git rebase --continue` then runs the `exec` lines its todo holds. An
+    empty rebase-merge directory cannot be mounted over, because git would
+    read the empty directory as a rebase in progress, so the wrapper names it
+    at exit instead."""
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "--quiet", str(repo)], check=True)
+
+    completed, _ = _run(tmp_path / "run", cwd=repo, agent=PLANTED_REBASE)
+
+    assert completed.returncode == 0
+    assert "git operation in progress" in completed.stderr
+    assert str(repo / ".git/rebase-merge") in completed.stderr
+    assert "abort" in completed.stderr
+
+
+def test_wrapper_warns_about_a_planted_merge_or_cherry_pick(
+    tmp_path: Path,
+) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "--quiet", str(repo)], check=True)
+
+    completed, _ = _run(
+        tmp_path / "run",
+        cwd=repo,
+        agent="touch .git/MERGE_HEAD .git/CHERRY_PICK_HEAD",
+    )
+
+    assert completed.returncode == 0
+    assert str(repo / ".git/MERGE_HEAD") in completed.stderr
+    assert str(repo / ".git/CHERRY_PICK_HEAD") in completed.stderr
+
+
+def test_wrapper_stays_quiet_about_a_clean_git_state(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "--quiet", str(repo)], check=True)
+
+    completed, _ = _run(tmp_path / "run", cwd=repo)
+
+    assert completed.returncode == 0
+    assert "git operation in progress" not in completed.stderr
 
 
 def test_wrapper_gives_each_project_its_own_state_volume(tmp_path: Path) -> None:
@@ -201,6 +978,31 @@ def test_wrapper_rejects_a_bogus_variable_name(tmp_path: Path) -> None:
     assert spaced_calls == []
 
 
+def test_wrapper_does_not_glob_the_variable_names_it_forwards(
+    tmp_path: Path,
+) -> None:
+    """The names are word-split from PI_SANDBOX_ENV, and an unquoted expansion
+    is also pathname-expanded, so a value like `*` was replaced by the
+    project's filenames. A file named after a secret then forwarded that host
+    variable, which the README says cannot happen: nothing is forwarded unless
+    named."""
+
+    project = tmp_path / "project"
+    project.mkdir()
+    (project / "LEAKED_SECRET").write_text("")
+
+    completed, invocations = _run(
+        tmp_path,
+        cwd=project,
+        forward="*",
+        also={"LEAKED_SECRET": "leaked-value"},
+    )
+
+    assert completed.returncode == 2
+    assert "invalid variable name" in completed.stderr
+    assert invocations == []
+
+
 def test_wrapper_keeps_the_container_unprivileged(tmp_path: Path) -> None:
     """Asserted rather than assumed: dropping one of these costs nothing that
     the rest of the suite would notice."""
@@ -267,8 +1069,8 @@ def test_wrapper_runs_pi_in_workspace_with_the_caller_arguments(
     argv = _docker_run(invocations)
 
     assert argv[argv.index("--workdir") + 1] == "/workspace"
-    assert argv[-3:] == [
-        "pi-sandbox:local",
+    image = _image(argv)
+    assert argv[argv.index(image) + 1 :] == [
         "--model",
         "opencode/glm-5.3",
     ]
@@ -279,7 +1081,7 @@ def test_wrapper_runs_pi_in_workspace_with_the_caller_arguments(
 def test_wrapper_defaults_to_a_chinese_hosted_model(tmp_path: Path) -> None:
     _, invocations = _run(tmp_path)
     argv = _docker_run(invocations)
-    image = "pi-sandbox:local"
+    image = _image(argv)
 
     assert argv[argv.index(image) + 1 :] == [
         "--provider",
@@ -296,9 +1098,9 @@ def test_wrapper_keeps_a_model_the_caller_asked_for(tmp_path: Path) -> None:
     _, chosen = _run(tmp_path, "--model", "kimi-k3")
     _, other_flag = _run(tmp_path / "b", "--models", "glm-5.3,kimi-k3")
 
-    image = "pi-sandbox:local"
     chosen_argv = _docker_run(chosen)
     other_argv = _docker_run(other_flag)
+    image = _image(chosen_argv)
 
     assert chosen_argv[chosen_argv.index(image) + 1 :] == [
         "--provider",
@@ -318,12 +1120,12 @@ def test_wrapper_leaves_a_provider_the_caller_named_alone(tmp_path: Path) -> Non
     _, joined = _run(tmp_path / "b", "--model=opencode/glm-5.3")
     _, explicit = _run(tmp_path / "c", "--provider", "opencode", "--model", "kimi-k3")
 
-    image = "pi-sandbox:local"
     for invocations in (slashed, joined):
         argv = _docker_run(invocations)
         assert "opencode-go" not in " ".join(argv)
 
     explicit_argv = _docker_run(explicit)
+    image = _image(explicit_argv)
     assert explicit_argv[explicit_argv.index(image) + 1 :] == [
         "--provider",
         "opencode",
@@ -341,8 +1143,9 @@ def test_wrapper_names_the_model_even_when_the_provider_is_given(
 
     _, invocations = _run(tmp_path, "--provider", "opencode-go")
     argv = _docker_run(invocations)
+    image = _image(argv)
 
-    assert argv[argv.index("pi-sandbox:local") + 1 :] == [
+    assert argv[argv.index(image) + 1 :] == [
         "--model",
         "deepseek-v4.1-flash",
         "--provider",
@@ -368,16 +1171,17 @@ def test_wrapper_passes_pi_subcommands_through_untouched(tmp_path: Path) -> None
     _, subcommand = _run(tmp_path, "install", "npm:example")
     _, prompt = _run(tmp_path / "b", "installed?")
 
-    image = "pi-sandbox:local"
     subcommand_argv = _docker_run(subcommand)
     prompt_argv = _docker_run(prompt)
+    subcommand_image = _image(subcommand_argv)
+    prompt_image = _image(prompt_argv)
 
-    assert subcommand_argv[subcommand_argv.index(image) + 1 :] == [
+    assert subcommand_argv[subcommand_argv.index(subcommand_image) + 1 :] == [
         "install",
         "npm:example",
     ]
     # A word that merely looks like one is still an ordinary prompt.
-    assert prompt_argv[prompt_argv.index(image) + 1 :] == [
+    assert prompt_argv[prompt_argv.index(prompt_image) + 1 :] == [
         "--provider",
         "opencode-go",
         "--model",
@@ -393,6 +1197,129 @@ def test_wrapper_builds_the_image_only_when_it_is_missing(tmp_path: Path) -> Non
     assert [argv[0] for argv in present] == ["image", "run"]
     assert [argv[0] for argv in missing] == ["image", "build", "run"]
     assert any(arg.endswith("/Dockerfile.pi") for arg in missing[1])
+
+
+def test_wrapper_and_readme_agree_on_how_to_remove_old_images(
+    tmp_path: Path,
+) -> None:
+    """`docker image prune` without -a removes only dangling images, and every
+    old pi-sandbox tag is still referenced, so the printed command did
+    nothing. The README and the wrapper have to give the same working one."""
+
+    completed, _ = _run(tmp_path, inspect_status="1")
+    command = "docker image prune -a --filter label=pi-sandbox.image=1"
+
+    assert command in completed.stderr
+    assert command in (ROOT / "README.md").read_text()
+    assert "docker image prune --filter" not in completed.stderr
+    assert "docker image prune --filter" not in (ROOT / "README.md").read_text()
+
+
+def test_ci_smoke_mirrors_the_wrapper_git_mounts(tmp_path: Path) -> None:
+    """The smoke job repeats the wrapper's mount list by hand, so it has to
+    name every part the wrapper protects. A part it omits is left writable
+    through the .git mount, and the smoke test then checks nothing there.
+    config.worktree was missed once the wrapper began mounting it
+    unconditionally."""
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "--quiet", str(repo)], check=True)
+
+    _, invocations = _run(tmp_path / "run", cwd=repo)
+    argv = _docker_run(invocations)
+    mounts = [
+        argv[index + 1]
+        for index, arg in enumerate(argv)
+        if arg == "--mount" and argv[index + 1].startswith("type=bind")
+    ]
+
+    workflow = (ROOT / ".github/workflows/ci.yml").read_text()
+    for mount in mounts:
+        assert mount.replace(str(repo), "/tmp/proj") in workflow, mount
+
+
+def test_wrapper_tags_the_image_by_content_and_uses_it_for_inspect_and_run(
+    tmp_path: Path,
+) -> None:
+    _, invocations = _run(tmp_path, inspect_status="1")
+
+    assert [argv[0] for argv in invocations] == ["image", "build", "run"]
+    inspected = invocations[0][2]
+    built = invocations[1][invocations[1].index("--tag") + 1]
+    ran = _image(invocations[2])
+
+    assert re.fullmatch(r"pi-sandbox:[0-9a-f]{12}", inspected)
+    assert inspected == built == ran
+
+
+def test_wrapper_changes_the_image_tag_when_a_build_input_changes(
+    tmp_path: Path,
+) -> None:
+    """A pull that touches the Dockerfile, the entrypoint or the fleet skill
+    has to produce a tag that does not exist yet, or the build-if-missing
+    check keeps running the image built from the old files."""
+
+    def tag(directory: Path, changed: str | None = None) -> str:
+        wrapper = _wrapper_with_inputs(directory)
+        if changed is not None:
+            with (directory / changed).open("a") as handle:
+                handle.write("\nchanged by the test\n")
+        _, invocations = _run(directory, wrapper=wrapper)
+        return _image(_docker_run(invocations))
+
+    unchanged = tag(tmp_path / "unchanged")
+    # Names and mtimes are not hashed, so the same contents give the same tag.
+    assert tag(tmp_path / "again") == unchanged
+    for name in ("Dockerfile.pi", "entrypoint.sh", "herdr-fleet.md"):
+        assert tag(tmp_path / name.replace(".", "-"), changed=name) != unchanged
+
+
+def test_wrapper_builds_with_the_host_ids_on_linux(tmp_path: Path) -> None:
+    """A bind mount keeps the host uid and gid on Linux, so the image has to
+    be built with them for the agent to write /workspace."""
+
+    _, invocations = _run(tmp_path, inspect_status="1", uname="Linux")
+    build = invocations[1]
+    real_uid = subprocess.run(
+        ["id", "-u"], capture_output=True, text=True, check=True
+    ).stdout.strip()
+    real_gid = subprocess.run(
+        ["id", "-g"], capture_output=True, text=True, check=True
+    ).stdout.strip()
+
+    args = [build[index + 1] for index, arg in enumerate(build) if arg == "--build-arg"]
+    assert args == [f"AGENT_UID={real_uid}", f"AGENT_GID={real_gid}"]
+
+
+def test_wrapper_builds_without_the_host_ids_off_linux(tmp_path: Path) -> None:
+    """Docker Desktop maps the mounted files to the container user, so the
+    defaults, and the state volumes already owned as 1001, still fit."""
+
+    _, invocations = _run(tmp_path, inspect_status="1", uname="Darwin")
+
+    assert "--build-arg" not in invocations[1]
+
+
+def test_wrapper_gives_linux_host_ids_their_own_image_tag(tmp_path: Path) -> None:
+    """A changed uid, or a second host user, must not reuse the image built
+    for the first one."""
+
+    _, linux = _run(tmp_path / "linux", uname="Linux")
+    _, darwin = _run(tmp_path / "darwin", uname="Darwin")
+
+    assert _image(_docker_run(linux)) != _image(_docker_run(darwin))
+
+
+def test_wrapper_refuses_to_run_as_root_on_linux(tmp_path: Path) -> None:
+    """A root uid would make the container user uid 0 and leave root-owned
+    files in the project it mounts."""
+
+    completed, invocations = _run(tmp_path, uname="Linux", fake_id=("0", "0"))
+
+    assert completed.returncode == 2
+    assert "root" in completed.stderr
+    assert invocations == []
 
 
 def test_wrapper_stays_in_the_process_tree_so_herdr_can_identify_pi(
@@ -420,6 +1347,30 @@ def test_image_installs_the_extensions_after_becoming_the_agent_user() -> None:
     assert min(installs) > lines.index("USER agent")
 
 
+def test_image_builds_the_agent_user_with_build_argument_ids() -> None:
+    """The wrapper passes the host uid and gid on Linux, so the defaults stay
+    at the Docker Desktop value and the base image's node user, which sits at
+    the common host uid, is removed before agent takes those ids."""
+
+    dockerfile = (ROOT / "Dockerfile.pi").read_text()
+    lines = dockerfile.splitlines()
+
+    assert "ARG AGENT_UID=1001" in dockerfile
+    assert "ARG AGENT_GID=1001" in dockerfile
+    removed = next(
+        index
+        for index, line in enumerate(lines)
+        if "userdel" in line and "node" in line
+    )
+    created = next(index for index, line in enumerate(lines) if "useradd" in line)
+    assert removed < created
+    # One groupadd, always named agent, so the COPY --chown below resolves for
+    # any gid without a second branch or a getent lookup.
+    assert "getent" not in dockerfile
+    assert 'groupadd --non-unique --gid "$AGENT_GID" agent' in dockerfile
+    assert "--gid agent agent" in dockerfile
+
+
 def test_image_pins_herdr_and_checks_it_against_a_digest() -> None:
     """An unpinned or unverified download would put unreviewed code in a
     container that holds the API key."""
@@ -432,6 +1383,36 @@ def test_image_pins_herdr_and_checks_it_against_a_digest() -> None:
     assert len({digest for _, digest in digests}) == 2
     assert "releases/download/v$version/herdr-$target" in dockerfile
     assert "sha256sum --check" in dockerfile
+
+
+def test_image_pins_uv_to_a_digest_instead_of_piping_install_sh() -> None:
+    """An install script piped into a shell runs whatever the network returns
+    at build time, which must not happen in a container that holds the API
+    key. uv's official distroless image comes pinned by the digest of its
+    multi-arch index instead."""
+
+    dockerfile = (ROOT / "Dockerfile.pi").read_text()
+
+    assert re.search(
+        r"COPY --from=ghcr\.io/astral-sh/uv:[^@\s]+@sha256:[0-9a-f]{64}",
+        dockerfile,
+    )
+    assert "/uv /uvx /usr/local/bin/" in dockerfile
+    assert "install.sh" not in dockerfile
+
+
+def test_image_pins_the_node_base_image_by_tag_and_digest() -> None:
+    """A digest with no tag gives Dependabot no version to compare, so it
+    never proposes an update. The tag in front of the same digest keeps the
+    pin and lets the version move."""
+
+    dockerfile = (ROOT / "Dockerfile.pi").read_text()
+
+    assert re.search(
+        r"^FROM node:[^@\s]+@sha256:[0-9a-f]{64}$",
+        dockerfile,
+        re.MULTILINE,
+    )
 
 
 ENTRYPOINT = ROOT / "entrypoint.sh"

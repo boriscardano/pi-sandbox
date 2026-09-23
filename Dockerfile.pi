@@ -1,7 +1,15 @@
 # Sandbox image for running Pi against Chinese-hosted models via OpenCode.
-# The repository is bind-mounted at /workspace by bin/pi, never copied in, so
-# this image stays valid across commits and holds no project state.
-FROM node@sha256:0e0ff40c39bc087845bfb27465a0df4ea419520094bc35842ff83dd8cbe6f9b6
+# The repository is bind-mounted at /workspace by the pi wrapper at the
+# repository root, never copied in, so this image stays valid across commits
+# and holds no project state.
+# The tag carries the version Dependabot compares, and the digest pins the
+# build to the index it was reviewed at, so the two move together.
+FROM node:24.21.0-bookworm-slim@sha256:0e0ff40c39bc087845bfb27465a0df4ea419520094bc35842ff83dd8cbe6f9b6
+
+# The wrapper tags each build by the contents of its inputs, so older images
+# accumulate. This one line is what `docker image prune -a --filter
+# label=pi-sandbox.image=1` targets.
+LABEL pi-sandbox.image=1
 
 RUN apt-get update \
     && apt-get install --yes --no-install-recommends \
@@ -15,11 +23,18 @@ RUN apt-get update \
         python3-venv \
         ripgrep \
     && rm -rf /var/lib/apt/lists/* \
-    && curl -LsSf https://astral.sh/uv/install.sh \
-        | env UV_VERSION=0.12.17 UV_INSTALL_DIR=/usr/local/bin sh \
     && npm install --global --ignore-scripts \
         @earendil-works/pi-coding-agent@0.86.1 \
     && npm cache clean --force
+
+# uv, for the Python tooling the agent runs, from uv's official distroless
+# image, which is what uv's Docker docs recommend. Pinned by the digest
+# ghcr.io/astral-sh/uv reported for the multi-arch index of tag 0.12.17 on
+# 2026-09-21, for the same reason the npm install above is pinned: a rebuild
+# must not pull unreviewed code into a container holding an API key. Bump the
+# version and digest together, re-reading the digest from the registry.
+COPY --from=ghcr.io/astral-sh/uv:0.12.17@sha256:10787c682e4184e4f290de1171fd4703dc63de99221f10fe1c99002ce7fa9acc \
+    /uv /uvx /usr/local/bin/
 
 # Herdr, so the agent can run a fleet of Pi children inside the sandbox. The
 # binary comes from the release that herdr.dev/latest.json pins, against the
@@ -54,9 +69,26 @@ RUN git config --system --add safe.directory /workspace \
     && git config --system user.name 'Pi Sandbox' \
     && git config --system user.email 'pi-sandbox@localhost'
 
+# The base image carries a node user and group at 1000:1000, the common Linux
+# host uid and gid. Remove them so agent can take those ids rather than have a
+# second user sharing them.
+RUN userdel --remove node 2>/dev/null || true; \
+    groupdel node 2>/dev/null || true
+
+# On Linux the wrapper builds with the host uid and gid, because a bind mount
+# keeps the host ownership. The defaults leave Docker Desktop images, and the
+# state volumes they already own as 1001, unchanged.
+ARG AGENT_UID=1001
+ARG AGENT_GID=1001
+
 # Own the home directory in the image layer so the first run of the named state
-# volume inherits that ownership instead of coming back root-owned.
-RUN useradd --create-home --shell /bin/bash agent
+# volume inherits that ownership instead of coming back root-owned. The group is
+# always named agent so the COPY --chown below resolves for any gid. --non-unique
+# lets it take a gid that already exists in the image (gid 100 is users) without
+# refusing to build.
+RUN groupadd --non-unique --gid "$AGENT_GID" agent \
+    && useradd --create-home --shell /bin/bash --uid "$AGENT_UID" \
+        --gid agent agent
 ENV HOME=/home/agent
 
 # Keep uv's virtualenv out of /workspace: the host checkout carries a macOS

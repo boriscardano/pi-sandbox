@@ -9,21 +9,30 @@ install or configure.
 
 ## Requirements
 
-Docker, and the opencode-go subscription key exported in your shell:
+Docker. For the default model, the opencode-go subscription key exported in
+your shell:
 
 ```sh
 export OPENCODE_GO_API_KEY=$(pi auth print-api-key --provider opencode-go)
 ```
 
-The wrapper requires it even when you mean to use a model from somewhere else,
-since it is what the default needs.
+That key is needed for the default model only. Naming another provider with
+`--provider` or a `provider/model` string runs without it, and Pi then uses
+that provider's own key, forwarded through `OPENCODE_API_KEY` or
+`PI_SANDBOX_ENV`:
 
-Developed and verified on macOS with Docker Desktop. It should work on Windows
-with Docker Desktop for the same reason: both map bind-mount ownership to the
-container user, so the agent can write to `/workspace`. On native Linux there
-is no such mapping, the mounted files keep their host UID, and the container
-user (1001) would find `/workspace` read-only. Linux needs UID handling that
-this script does not yet do, so treat it as unsupported for now.
+```sh
+export OPENCODE_API_KEY=your-opencode-key
+pi --model opencode/glm-5.3
+```
+
+Developed and verified on macOS with Docker Desktop. Windows with Docker
+Desktop works the same way: both map bind-mount ownership to the container
+user, so the agent can write to `/workspace`. On native Linux the mounted files
+keep their host UID and GID, so the wrapper builds the image with your own, and
+the container user matches you. Each pair of ids gets its own image tag. Do not
+run it as root on Linux: that would make the container user UID 0 and leave
+root-owned files in the project. Rootless Docker and Podman are untested.
 
 ## Use
 
@@ -47,11 +56,12 @@ alias pis='/path/to/pi-sandbox/pi'
 Do not put the script on your `PATH` as `pi`, or it will shadow a host Pi
 install for every project.
 
-Rebuild after editing the Dockerfile:
-
-```sh
-docker build --file Dockerfile.pi --tag pi-sandbox:local .
-```
+Edits to `Dockerfile.pi`, `entrypoint.sh` or `herdr-fleet.md` rebuild
+automatically on the next launch. The image is tagged by the contents of those
+files, so a changed file produces a tag that does not exist yet and the wrapper
+builds it before starting. Each build leaves the older images behind. Remove
+them with `docker image prune -a --filter label=pi-sandbox.image=1`, which also
+removes the current image, and the next launch rebuilds it.
 
 ## What the container can and cannot see
 
@@ -59,16 +69,24 @@ Mounted:
 
 - the project you launched from, at `/workspace`, read-write. Inside a Git
   repository this is the repository root, even when you launch from a
-  subdirectory.
+  subdirectory. It is found from the nearest `.git` up the tree, not from
+  `git rev-parse --show-toplevel`, whose answer a planted `core.worktree` or
+  `.git` file can point at any host directory.
 - a per-project Docker volume at `/home/agent` for Pi's own state.
+- inside a Git repository, `.git` itself is bind-mounted over the project, so
+  it cannot be renamed away, and the parts of it that can name a command are
+  then mounted read-only inside it: `.git/config`, `.git/config.worktree`,
+  `.git/hooks`, `.git/worktrees` and `.git/modules`.
 
 Not mounted, and unreachable: your home directory, `~/.ssh`, `~/.aws`,
 `~/.config`, the system keychain, every other project, the Docker socket, your
 Herdr socket, and `~/.pi` on the host, which holds Pi's provider OAuth tokens.
 The script refuses to start if the directory it would mount is your home
-directory, contains it, or is `/`.
+directory, contains it, is `/`, or has a comma in its path, which Docker's
+`--mount` syntax would read as another field.
 
-The container runs as non-root (`agent`, uid 1001) with `--cap-drop ALL`,
+The container runs as non-root (`agent`, your own uid and gid on Linux and
+1001 on Docker Desktop) with `--cap-drop ALL`,
 `--security-opt no-new-privileges` and `--pids-limit 512`. No `--privileged`,
 and no host PID, IPC or network namespace. Outbound networking is on, since the
 agent has to reach the model API. No port is published.
@@ -206,8 +224,62 @@ because the mounted files belong to the host user, and commits use the identity
 `Pi Sandbox <pi-sandbox@localhost>` rather than yours. Override it per commit
 with `git -c user.name=... -c user.email=...`.
 
+`.git` itself is bind-mounted over the project, and then `.git/config`,
+`.git/config.worktree`, `.git/hooks`, `.git/worktrees` and `.git/modules` are
+mounted read-only inside it. The hooks, worktrees and modules directories are
+created first if they are missing, and so is the worktree config, as an empty
+file. Git ignores an empty `.git/config.worktree` while
+`extensions.worktreeConfig` is off, which is the default, so creating it
+changes nothing for the host, and an existing one is left untouched. A symlink
+at `.git` or at any of those five paths is refused before the wrapper creates
+or mounts anything, because Git, the mount and the `mkdir` would all follow it
+outside the project. A `.git/config.worktree` that exists but is not an
+ordinary file, such as a FIFO, is refused for the same reason: creating or
+mounting it as a file would block or fail. Git runs
+commands named in those places, through `core.fsmonitor`,
+`core.pager`, `core.hooksPath` and `filter.<name>.clean`, so leaving them
+writable would let the agent leave a command behind that you run yourself with
+the next `git status`. A linked worktree keeps its git directory at
+`.git/worktrees/<name>`, and `commondir`, `gitdir` and `config.worktree` there
+redirect Git to the config and hooks it reads, so the whole directory is
+read-only too. `git worktree add` therefore fails in the sandbox, which costs
+nothing because the paths in those files are host paths.
+
+Mounting `.git` matters on its own. Read-only mounts on the files inside it do
+not stop `mv .git .git-old`, which succeeds while `.git` is still an ordinary
+directory of the project, and the agent can then build a fresh `.git` with its
+own config. A bind mount makes `.git` a mount point, which cannot be renamed
+or removed, so that move fails with `Device or resource busy`.
+
+The cost is that anything writing there fails in the sandbox: `git config`,
+`git remote add`, installing a hook and most `git submodule` operations. Do
+those on the host. `git add`, `git commit` and the rest still work, because
+they write to `.git/index`, `.git/objects` and `.git/refs`, which stay
+writable. A linked worktree or a submodule checkout keeps its real Git
+directory outside the mount and gets no such protection, and Git does not work
+in the sandbox for it anyway.
+
+A repository the agent creates inside the project is not covered by any mount.
+`git init sub` leaves `sub/.git/config` in your checkout, and on Docker Desktop
+the host user owns the files the agent writes, so host Git trusts them and
+would run a command named there. The wrapper cannot prevent that, so it warns
+instead: when the container exits it looks for `.git` entries, `.git/config`
+files and `.git/hooks` entries under the project whose ctime is newer than a
+marker made before the container started, and prints what it found. It only
+warns, and deletes nothing.
+
 No credentials are mounted, so `git push` fails inside the sandbox by design.
 Push from the host after reviewing the diff.
+
+A planted rebase, merge or cherry-pick is not prevented either. The agent can
+write `.git/rebase-merge/git-rebase-todo` with `exec` lines in it, or the
+files the other backends read, so the next host `git status` reports an
+operation in progress and `git rebase --continue` would run what the file
+names. An empty directory there cannot be blocked, because Git reads the empty
+directory as a rebase in progress, so the wrapper warns instead: at exit it
+names `.git/rebase-merge`, `.git/rebase-apply`, `.git/sequencer`,
+`.git/MERGE_HEAD` or `.git/CHERRY_PICK_HEAD` when its ctime is newer than the
+marker. Inspect those and abort the operation rather than continuing it.
 
 ## Herdr
 
@@ -277,6 +349,15 @@ volume, and checks `herdr.dev` for updates on a timer like any other Herdr.
 - The mounted project is fully readable and writable by the agent. Only launch
   it from a project whose contents you are willing to send to the model
   provider, and keep a remote you can restore from.
+- Protecting `.git` does not make the checkout safe to run. The agent can still
+  write `.envrc` for direnv, a `Makefile`, `package.json` scripts, editor task
+  files and the code itself, all of which your host may execute later. Review
+  the diff before running anything from a checkout the agent has touched.
+- Nested repositories, and the rebase, merge or cherry-pick state the agent
+  can plant in `.git`, are detected at exit, not prevented. The checks run
+  after `docker run` returns, so they do not run at all if the wrapper itself
+  is killed, and anything they find has already been written to your checkout.
+  They warn rather than fixing.
 - If the script lives inside the project it mounts, the agent can edit the
   script that defines its own sandbox, which would take effect on the next
   launch. Keeping it in its own directory, as here, avoids that.
@@ -293,6 +374,9 @@ volume, and checks `herdr.dev` for updates on a timer like any other Herdr.
   extensions. It carries Node 24, Python 3.11, uv, Git, ripgrep, fd and the
   23 MB Herdr binary.
 
+These are accepted limits, and [SECURITY.md](SECURITY.md) defines what does
+count as a vulnerability here and how to report it privately.
+
 ## Tests
 
 ```sh
@@ -300,13 +384,13 @@ uv run --with pytest pytest
 ```
 
 The tests use a fake `docker` on `PATH`, so they neither build an image nor
-start a container. They assert the isolation properties: only the two expected
-mounts, the keys forwarded by name and never by value, the sandboxing flags
-present and no privileged or host namespace flags, the home-directory refusal,
-and that a Herdr pane's socket stays on the host. The rest read `Dockerfile.pi`
-or run `entrypoint.sh` against stub binaries and a throwaway home, for the
-default model, where the subscription key is written, and what happens when the
-agent has ruined the file it is written to.
+start a container. They assert the isolation properties: the expected mounts
+and no others, the keys forwarded by name and never by value, the sandboxing
+flags present and no privileged or host namespace flags, the home-directory
+refusal, and that a Herdr pane's socket stays on the host. The rest read
+`Dockerfile.pi` or run `entrypoint.sh` against stub binaries and a throwaway
+home, for the default model, where the subscription key is written, and what
+happens when the agent has ruined the file it is written to.
 
 ## License
 

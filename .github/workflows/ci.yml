@@ -1,0 +1,86 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+# The workflow only reads the repository. Persist-credentials is off on checkout
+# too, so nothing can push with the job's token.
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+      - run: uv run --with pytest pytest -q
+
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # Since `uvx ruff` is how ruff runs, uv has to be installed for it.
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+      - run: shellcheck pi entrypoint.sh
+      - run: uvx ruff check test_pi.py
+      - run: uvx ruff format --check test_pi.py
+
+  # The wrapper is only really tested on Linux here: it builds the image on the
+  # runner's own Docker, runs Pi as the runner user, and checks the two mounts
+  # that make the sandbox. No API key and no model call.
+  smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Start the wrapper in a throwaway project
+        run: |
+          mkdir /tmp/proj
+          cd /tmp/proj
+          git init -q
+          "$GITHUB_WORKSPACE/pi" --provider opencode --model x --version
+      - name: The agent can write /workspace but not the git config or hooks
+        run: |
+          image=$(docker images --format '{{.Repository}}:{{.Tag}}' | grep -m1 '^pi-sandbox:')
+          # The mounts that make the sandbox, in the same order: the project,
+          # then .git over it, then its config, config.worktree, hooks,
+          # worktrees and modules read-only. `--entrypoint sh` skips the
+          # entrypoint, which would exec Pi.
+          docker run --rm --entrypoint sh \
+            --mount "type=bind,source=/tmp/proj,target=/workspace" \
+            --mount "type=bind,source=/tmp/proj/.git,target=/workspace/.git" \
+            --mount "type=bind,source=/tmp/proj/.git/config,target=/workspace/.git/config,readonly" \
+            --mount "type=bind,source=/tmp/proj/.git/config.worktree,target=/workspace/.git/config.worktree,readonly" \
+            --mount "type=bind,source=/tmp/proj/.git/hooks,target=/workspace/.git/hooks,readonly" \
+            --mount "type=bind,source=/tmp/proj/.git/worktrees,target=/workspace/.git/worktrees,readonly" \
+            --mount "type=bind,source=/tmp/proj/.git/modules,target=/workspace/.git/modules,readonly" \
+            "$image" -c '
+              set -eu
+              touch /workspace/pi-sandbox-write-test
+              rm /workspace/pi-sandbox-write-test
+              if printf x >> /workspace/.git/config 2>/dev/null; then
+                echo ".git/config is writable, the sandbox is broken" >&2
+                exit 1
+              fi
+              if printf x >> /workspace/.git/config.worktree 2>/dev/null; then
+                echo ".git/config.worktree is writable, the sandbox is broken" >&2
+                exit 1
+              fi
+              if printf x >> /workspace/.git/worktrees/x 2>/dev/null; then
+                echo ".git/worktrees is writable, the sandbox is broken" >&2
+                exit 1
+              fi
+              if printf x >> /workspace/.git/modules/x 2>/dev/null; then
+                echo ".git/modules is writable, the sandbox is broken" >&2
+                exit 1
+              fi
+            '

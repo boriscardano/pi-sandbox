@@ -1776,7 +1776,7 @@ def test_image_provides_fd_under_the_name_the_readme_uses() -> None:
 
     assert "fd-find" in install_step
     assert "ln -s /usr/bin/fdfind /usr/local/bin/fd" in install_step
-    assert "ripgrep and fd" in readme
+    assert "ripgrep and fd." in readme
 
 
 ENTRYPOINT = ROOT / "entrypoint.sh"

@@ -13,6 +13,9 @@ Notes for agents and contributors changing this repo, from the security work on
   redirection, planted rebase todos. Git reads `.git/commondir` in a plain
   repository too, not only in a worktree, and a planted one made host
   `git status` run a command (2026-09-23), so it is mounted read-only too.
+  A hard link cannot get around these read-only file mounts: `ln` from one to
+  the writable project fails with `Invalid cross-device link` (checked on
+  Docker Desktop, 2026-09-23).
 - Never follow a project path the agent could have planted. Symlinks at the
   mounted `.git` paths are refused, because a planted `.git` symlink made a
   later launch mount a host directory read-write (round 3).

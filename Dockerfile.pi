@@ -2,8 +2,8 @@
 # The repository is bind-mounted at /workspace by the pi wrapper at the
 # repository root, never copied in, so this image stays valid across commits
 # and holds no project state.
-# The tag carries the version Dependabot compares, and the digest pins the
-# build to the index it was reviewed at, so the two move together.
+# The tag names the version and the digest pins the build to the index it was
+# reviewed at. Bump both together, re-reading the digest from the registry.
 FROM node:24.21.0-bookworm-slim@sha256:0e0ff40c39bc087845bfb27465a0df4ea419520094bc35842ff83dd8cbe6f9b6
 
 # The wrapper tags each build by the contents of its inputs. This label marks

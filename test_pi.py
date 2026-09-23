@@ -670,7 +670,11 @@ def test_wrapper_creates_commondir_as_dot_and_git_still_works(tmp_path: Path) ->
     ) in _docker_run(invocations)
     assert (repo / ".git/commondir").read_text() == ".\n"
     status = subprocess.run(
-        ["git", "status", "--short"], cwd=repo, capture_output=True, text=True
+        ["git", "status", "--short"],
+        cwd=repo,
+        capture_output=True,
+        text=True,
+        check=False,
     )
     assert status.returncode == 0, status.stderr
 

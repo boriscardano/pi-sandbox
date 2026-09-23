@@ -18,6 +18,7 @@ count as a vulnerability.
 
 ```sh
 cd ~/any/project
+# needs Pi installed on the host, see Requirements for other ways
 export OPENCODE_GO_API_KEY=$(pi auth print-api-key --provider opencode-go)
 /path/to/pi-sandbox/pi
 ```

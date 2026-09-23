@@ -15,8 +15,9 @@ set -eu
 # JSON is replaced rather than allowed to stop the write, and the new file is
 # renamed over the old one, which is atomic, replaces a symlink instead of
 # following it, and cannot leave a mode the umask would not have set. Only a
-# regular file is read, since read_text() on a FIFO the agent left would block
-# forever and the atomic replace would never get the chance to repair it.
+# regular file, or a link to one, is read, since read_text() on a FIFO the
+# agent left would block forever and the atomic replace would never get the
+# chance to repair it.
 #
 # The whole thing is best effort. Pi is what this container is for, and a home
 # directory the agent has ruined must cost it the subscription key, not the

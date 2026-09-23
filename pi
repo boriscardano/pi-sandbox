@@ -5,14 +5,13 @@
 #
 # Only that repository is mounted (at /workspace). The container gets no host
 # home directory, no SSH or cloud credentials, no Docker socket and no Herdr
-# socket: it runs a Herdr server of its own instead, so the fleet the agent can
-# start there reaches nothing on this machine. The host secrets it receives are
-# OPENCODE_GO_API_KEY, which the default model needs, and OPENCODE_API_KEY if
-# you have one, both forwarded by name so their values never land in the
-# command line or an image layer. That first key is required only for the
-# default: naming another provider with --provider or a provider/model string
-# runs without it, and that provider's own key then comes through
-# OPENCODE_API_KEY or PI_SANDBOX_ENV.
+# socket, so nothing in it can reach your host's Docker daemon or agents. The
+# host secrets it receives are OPENCODE_GO_API_KEY, which the default model
+# needs, and OPENCODE_API_KEY if you have one, both forwarded by name so their
+# values never land in the command line or an image layer. That first key is
+# required only for the default: naming another provider with --provider or a
+# provider/model string runs without it, and that provider's own key then comes
+# through OPENCODE_API_KEY or PI_SANDBOX_ENV.
 #
 #   export OPENCODE_GO_API_KEY=$(pi auth print-api-key --provider opencode-go)
 # Forward further host variables by naming them in PI_SANDBOX_ENV, for example
@@ -24,6 +23,13 @@
 # shellcheck disable=SC1007  # `CDPATH= cd` is a deliberate prefix assignment
 set -eu
 
+# Read the whole body before running any of it. sh reads a script as it goes,
+# and this wrapper stays alive for the whole session, so an edit or `git pull`
+# that replaces this file mid-session would otherwise leave the shell reading
+# the new file at the old byte offset and running whatever text is there. A
+# brace group is parsed in full before its first command runs. The closing
+# brace is never reached: the exit above it leaves the group.
+{
 script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 dockerfile=$script_dir/Dockerfile.pi
 
@@ -63,8 +69,7 @@ fi
 image_tag=$(
     {
         cat "$dockerfile" \
-            "$script_dir/entrypoint.sh" \
-            "$script_dir/herdr-fleet.md"
+            "$script_dir/entrypoint.sh"
         printf '%s' "$host_ids"
     } \
         | "$hash_cmd" \
@@ -170,6 +175,7 @@ state_volume=pi-sandbox-$(basename "$project" | tr -c 'A-Za-z0-9_.-' '-')-$proje
 # Pi's subcommands are recognised only as the first argument, so prepending the
 # default to `pi install npm:...` would send it to the model as a chat message
 # instead of installing anything. Leave those alone.
+# Keep this list in step with the same list in entrypoint.sh.
 case "${1:-}" in
     install | remove | uninstall | update | list | config | auth) ;;
     *)
@@ -238,12 +244,75 @@ if [ -n "${needs_key:-}" ] && [ -z "${wants_info:-}" ] && [ -z "${OPENCODE_GO_AP
     exit 2
 fi
 
-if ! docker image inspect "$image" >/dev/null 2>&1; then
-    printf '%s\n' "building $image" >&2
-    printf '%s\n' \
-        "older pi-sandbox images can be removed with: docker image prune -a --filter label=pi-sandbox.image=1 (this also removes the current image, which the next launch rebuilds)" >&2
-    # shellcheck disable=SC2086  # empty off Linux, two words on it
-    docker build --file "$dockerfile" --tag "$image" $build_args "$(dirname -- "$dockerfile")"
+# Look up the newest release of Pi so a newer one rebuilds the image even
+# though the content tag has not changed. The host may lack python3 and jq, so
+# sed pulls the version out of the JSON, and anything that is not a plain
+# semver is unknown rather than trusted. `--max-time 5` bounds an offline or
+# slow registry to a few seconds, and a missing curl fails the same way. An
+# unknown version means the comparison cannot be made, so an existing image is
+# kept, and a launch with no image stops.
+lookup_version() {
+    body=$(curl -fsS --max-time 5 "$1" 2>/dev/null) || return 0
+    version=$(printf '%s' "$body" | sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')
+    case "$version" in
+        '' | *[!0-9A-Za-z.+-]*) return 0 ;;
+        [0-9]*.[0-9]*) printf '%s' "$version" ;;
+        *) return 0 ;;
+    esac
+}
+
+want_version=$(lookup_version https://registry.npmjs.org/@earendil-works/pi-coding-agent/latest)
+
+# One inspect both checks that the image exists and reads the version label.
+# A failed inspect means the image is missing, and an image without the label
+# reads as empty and rebuilds.
+image_exists=0
+if have_version=$(docker image inspect --format '{{index .Config.Labels "pi-sandbox.version"}}' "$image" 2>/dev/null); then
+    image_exists=1
+fi
+
+# A build needs the version, since the Dockerfile carries no default.
+if [ "$image_exists" -eq 0 ] && [ -z "$want_version" ]; then
+    printf '%s\n' "pi-sandbox: could not look up the newest Pi, and there is no image to fall back to" >&2
+    exit 1
+fi
+
+# The label is only compared when the lookup worked, since it says nothing
+# otherwise. A missing label reads as empty and rebuilds.
+build=0
+if [ "$image_exists" -eq 0 ]; then
+    build=1
+elif [ -n "$want_version" ] && [ "$have_version" != "$want_version" ]; then
+    build=1
+fi
+
+if [ "$build" -eq 1 ]; then
+    # The lookup answered, since otherwise no build was requested above.
+    if [ "$image_exists" -eq 1 ]; then
+        printf '%s\n' "pi-sandbox: rebuilding $image: $have_version -> $want_version" >&2
+    else
+        printf '%s\n' "building $image" >&2
+    fi
+    build_status=0
+    # shellcheck disable=SC2086  # empty off Linux
+    docker build --file "$dockerfile" --tag "$image" $build_args \
+        --build-arg "PI_VERSION=$want_version" \
+        "$(dirname -- "$dockerfile")" || build_status=$?
+    # A same-tag build that fails leaves the image the tag already held, so a
+    # registry blip must not leave the user unable to start Pi. There is no
+    # image to fall back to when this was a first build, so its status ends
+    # the wrapper.
+    if [ "$build_status" -ne 0 ]; then
+        if [ "$image_exists" -eq 1 ]; then
+            printf '%s\n' "pi-sandbox: could not update $image, starting the existing image" >&2
+        else
+            exit "$build_status"
+        fi
+    fi
+fi
+
+if [ "$image_exists" -eq 1 ] && [ -z "$want_version" ]; then
+    printf '%s\n' "pi-sandbox: could not check the newest Pi, using the existing image" >&2
 fi
 
 # Allocate a TTY only when there is one, so the same wrapper serves a Herdr
@@ -401,5 +470,28 @@ if [ -n "$interrupted" ]; then
     printf '%s\n' "your host git will report a rebase, merge or cherry-pick, and continuing it can run commands stored in those files, so inspect and abort it rather than continue" >&2
 fi
 
+# Remove the images earlier builds left behind, now that the session is over.
+# `docker rmi` fails when another running session uses an image, which is
+# expected, so its output is discarded and the loop carries on. The prune then
+# removes the dangling image a same-tag rebuild left. None of this may reach
+# the user's terminal except one summary line, and none of it may change the
+# exit status below.
+removed=''
+if tags=$(docker images pi-sandbox --format '{{.Tag}}' 2>/dev/null); then
+    for tag in $tags; do
+        if [ "$tag" = "${image#pi-sandbox:}" ] || [ "$tag" = "<none>" ]; then
+            continue
+        fi
+        if docker rmi "pi-sandbox:$tag" >/dev/null 2>&1; then
+            removed="$removed $tag"
+        fi
+    done
+fi
+docker image prune -f --filter label=pi-sandbox.image=1 >/dev/null 2>&1 || true
+if [ -n "$removed" ]; then
+    printf '%s\n' "pi-sandbox: removed old images:$removed" >&2
+fi
+
 # Docker's status is the wrapper's. `set -e` must not skip the check above.
 exit "$docker_status"
+}

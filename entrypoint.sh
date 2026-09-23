@@ -6,12 +6,6 @@
 # any other script.
 set -eu
 
-# A HERDR_SOCKET_PATH inherited from the host pane would move this container's
-# Herdr server onto that path, and a stray HERDR_PANE_ID would make Pi read
-# itself as one of the children it starts. The wrapper does not forward them,
-# but PI_SANDBOX_ENV takes names, so drop them here rather than trusting that.
-unset HERDR_SOCKET_PATH HERDR_PANE_ID HERDR_TAB_ID HERDR_WORKSPACE_ID
-
 # Pi reads the opencode-go subscription from auth.json rather than from the
 # environment, so the key arrives as a variable and is written out here, with
 # any other provider the agent authenticated left alone. It lands in the state
@@ -50,14 +44,50 @@ os.replace(pending, path)
     printf '%s\n' "pi-sandbox: could not write the subscription key to auth.json" >&2
 fi
 
-# Herdr's API commands do not start a server, so the agent's first one would be
-# told `server_not_running`. Its socket lives in the agent's home, and no host
-# socket is mounted, so the fleet it serves reaches nothing outside this
-# container. HERDR_ENV is what the herdr skill checks before it will act.
-export HERDR_ENV=1
-herdr server >/dev/null 2>&1 &
+# Extensions live in /home/agent, which is the project's state volume, so an
+# image rebuild does not reach a project whose volume already exists. Bring
+# them up to date on every start, best effort: a registry that is down or
+# slow, or a home the agent has ruined, must cost the update rather than the
+# session.
+#
+# The four packages are listed here and nowhere else. `pi install` without a
+# version adds a missing one and unpins a pinned one, but leaves an installed
+# one at its version, so `pi update --extensions` is what moves an existing
+# volume to the newest releases (measured: 0.69.0 stayed 0.69.0 until it ran).
+# Lifecycle scripts stay off, so a new release cannot run one in a sandbox that
+# holds the API key. `timeout` bounds the whole step so a hung registry cannot
+# stop Pi from starting. Pi's own subcommands are passed through to it
+# untouched, so they must not trigger an install of their own.
+# Keep this list in step with the same list in pi.
+case "${1:-}" in
+    install | remove | uninstall | update | list | config | auth) ;;
+    *)
+        # shellcheck disable=SC2016  # $package expands when sh runs the script, not here
+        if ! timeout 120 sh -c '
+            export npm_config_ignore_scripts=true
+            failed=0
+            for package in \
+                pi-subagents \
+                @tintinweb/pi-subagents \
+                pi-background-tasks \
+                pi-extension-manager
+            do
+                pi install "npm:$package" || failed=1
+            done
+            pi update --extensions || failed=1
+            exit "$failed"
+        ' >/dev/null 2>&1; then
+            printf '%s\n' "pi-sandbox: could not update the extensions" >&2
+        fi
+        ;;
+esac
 
-# Not `herdr server` in the foreground and not Pi as a child: Pi replaces this
-# script, so the container's foreground process is Pi and a Herdr pane on the
-# host still sees a Pi agent.
+# Volumes made by earlier images still hold the two Herdr skills, which now
+# describe a tool this image does not carry. Remove them, best effort, so a
+# skill listing cannot point at a missing binary. This can go once the old
+# volumes are gone.
+rm -rf "$HOME/.pi/agent/skills/herdr" "$HOME/.pi/agent/skills/herdr-fleet" 2>/dev/null || true
+
+# Pi replaces this script, so the container's foreground process is Pi and a
+# Herdr pane on the host still sees a Pi agent.
 exec pi "$@"

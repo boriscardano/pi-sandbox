@@ -6,9 +6,10 @@
 # build to the index it was reviewed at, so the two move together.
 FROM node:24.21.0-bookworm-slim@sha256:0e0ff40c39bc087845bfb27465a0df4ea419520094bc35842ff83dd8cbe6f9b6
 
-# The wrapper tags each build by the contents of its inputs, so older images
-# accumulate. This one line is what `docker image prune -a --filter
-# label=pi-sandbox.image=1` targets.
+# The wrapper tags each build by the contents of its inputs. This label marks
+# the images built from this Dockerfile, so a dangling one left by a same-tag
+# rebuild is what `docker image prune --filter label=pi-sandbox.image=1`
+# removes.
 LABEL pi-sandbox.image=1
 
 RUN apt-get update \
@@ -22,44 +23,35 @@ RUN apt-get update \
         python3 \
         python3-venv \
         ripgrep \
-    && rm -rf /var/lib/apt/lists/* \
+    && rm -rf /var/lib/apt/lists/*
+
+# The wrapper passes the Pi version it looked up, and there is no default, so
+# a build without one fails here at once rather than installing an empty
+# version. The README explains why the newest release runs rather than a
+# reviewed pin.
+ARG PI_VERSION
+RUN : "${PI_VERSION:?the wrapper must pass --build-arg PI_VERSION}" \
     && npm install --global --ignore-scripts \
-        @earendil-works/pi-coding-agent@0.86.1 \
+        @earendil-works/pi-coding-agent@$PI_VERSION \
     && npm cache clean --force
 
 # uv, for the Python tooling the agent runs, from uv's official distroless
 # image, which is what uv's Docker docs recommend. Pinned by the digest
 # ghcr.io/astral-sh/uv reported for the multi-arch index of tag 0.12.17 on
-# 2026-09-21, for the same reason the npm install above is pinned: a rebuild
-# must not pull unreviewed code into a container holding an API key. Bump the
-# version and digest together, re-reading the digest from the registry.
+# 2026-09-21: a rebuild must not pull unreviewed code into a container holding
+# an API key. Bump the version and digest together, re-reading the digest from
+# the registry.
 COPY --from=ghcr.io/astral-sh/uv:0.12.17@sha256:10787c682e4184e4f290de1171fd4703dc63de99221f10fe1c99002ce7fa9acc \
     /uv /uvx /usr/local/bin/
 
-# Herdr, so the agent can run a fleet of Pi children inside the sandbox. The
-# binary comes from the release that herdr.dev/latest.json pins, against the
-# SHA-256 that manifest carried on 2026-09-21, for the same reason the npm
-# install above is pinned: a rebuild must not pull unreviewed code into a
-# container holding an API key. Take both digests from the manifest when
-# bumping the version.
-RUN set -eu; \
-    version=0.9.1; \
-    case "$(dpkg --print-architecture)" in \
-        amd64) target=linux-x86_64; \
-            sha=2a02fed16beb651ef006e1d43f048f652ca4dc58ad053cd2d44450563d5c54b7 ;; \
-        arm64) target=linux-aarch64; \
-            sha=f4ccf4de745f2cb9a39a983e9ba3703dad50ec2a58dea83026ceab721bbd8d9e ;; \
-        *) printf 'no herdr release for %s\n' "$(dpkg --print-architecture)" >&2; \
-            exit 1 ;; \
-    esac; \
-    curl -LsSf -o /usr/local/bin/herdr \
-        "https://github.com/herdrdev/herdr/releases/download/v$version/herdr-$target"; \
-    printf '%s  %s\n' "$sha" /usr/local/bin/herdr | sha256sum --check --quiet; \
-    chmod 0755 /usr/local/bin/herdr
+# The label holds the version the wrapper compares against the one it looked
+# up, so a newer Pi rebuilds the image. `pi-sandbox.image=1` above stays the
+# marker `docker image prune` filters on.
+LABEL pi-sandbox.version="$PI_VERSION"
 
-# The entrypoint, which starts this container's own Herdr server and writes the
-# subscription key Pi expects in auth.json before becoming Pi. Copied in while
-# still root, since /usr/local/bin is not writable by the agent.
+# The entrypoint, which writes the subscription key Pi expects in auth.json
+# before becoming Pi. Copied in while still root, since /usr/local/bin is not
+# writable by the agent.
 COPY --chmod=0755 entrypoint.sh /usr/local/bin/pi-sandbox-entrypoint
 
 # The bind-mounted checkout is owned by the host user, so Git needs /workspace
@@ -83,7 +75,7 @@ ARG AGENT_GID=1001
 
 # Own the home directory in the image layer so the first run of the named state
 # volume inherits that ownership instead of coming back root-owned. The group is
-# always named agent so the COPY --chown below resolves for any gid. --non-unique
+# always named agent so `useradd --gid agent` resolves for any gid. --non-unique
 # lets it take a gid that already exists in the image (gid 100 is users) without
 # refusing to build.
 RUN groupadd --non-unique --gid "$AGENT_GID" agent \
@@ -104,31 +96,9 @@ ENV PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/home/agen
 
 USER agent
 
-# Extensions. Installed as `agent`, so the files land in /home/agent owned by
-# the user that will read them.
-# Pinned and with lifecycle scripts off, like the npm install above: a rebuild
-# must not pull unreviewed third-party code into a sandbox holding an API key.
-# `pi install` has no --ignore-scripts flag, so npm reads it from the
-# environment, exported rather than ENV to leave the agent's own npm alone.
-RUN export npm_config_ignore_scripts=true \
-    && pi install npm:pi-subagents@0.70.0 \
-    && pi install npm:@tintinweb/pi-subagents@0.19.0 \
-    && pi install npm:pi-background-tasks@2.5.0 \
-    && pi install npm:pi-extension-manager@0.8.2 \
-    && npm cache clean --force
-
-# Herdr's own agent skill, printed by the pinned binary so it describes the
-# version installed rather than a copy that drifts from it. It covers the CLI:
-# IDs, agent states, and how to read a JSON response. The skill beside it
-# covers what is different about this sandbox.
-RUN mkdir -p /home/agent/.pi/agent/skills/herdr \
-    && herdr --skill > /home/agent/.pi/agent/skills/herdr/SKILL.md
-
-# What the fleet is, since a model that cannot see the topology will not invent
-# it. Beside Herdr's own skill and owned by the user that reads it, like the
-# extensions, so it seeds the same state volume they do.
-COPY --chown=agent:agent herdr-fleet.md \
-    /home/agent/.pi/agent/skills/herdr-fleet/SKILL.md
+# Extensions. The entrypoint installs the four into the state volume on every
+# start, which is also what reaches a project whose volume already exists, so
+# that is the one place to change the set. Nothing is seeded here.
 
 WORKDIR /workspace
 ENTRYPOINT ["pi-sandbox-entrypoint"]

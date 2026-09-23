@@ -8,6 +8,8 @@ import subprocess
 from pathlib import Path
 from typing import NamedTuple
 
+import pytest
+
 ROOT = Path(__file__).parent
 WRAPPER = ROOT / "pi"
 FAKE_KEY = "opencode-go-test-key-do-not-leak"
@@ -21,14 +23,62 @@ FAKE_DOCKER = """#!/bin/sh
     done
 } >>"$PI_SANDBOX_FAKE_LOG"
 case "$1" in
-    image) exit "${PI_SANDBOX_FAKE_INSPECT:-0}" ;;
+    image)
+        case "$2" in
+            inspect)
+                # One inspect both checks that the image exists and reads
+                # the version label with --format. A non-zero status means
+                # the image is missing, and a successful inspect of an image
+                # without the label prints nothing.
+                if [ "${PI_SANDBOX_FAKE_INSPECT:-0}" -ne 0 ]; then
+                    exit "${PI_SANDBOX_FAKE_INSPECT}"
+                fi
+                if [ "$3" = "--format" ]; then
+                    printf '%s\\n' "${PI_SANDBOX_FAKE_LABEL:-}"
+                    exit 0
+                fi
+                exit 0
+                ;;
+            prune) exit 0 ;;
+        esac
+        ;;
+    images)
+        printf '%s\\n' "${PI_SANDBOX_FAKE_TAGS:-}" | tr ' ' '\\n'
+        exit 0
+        ;;
+    rmi) exit "${PI_SANDBOX_FAKE_RMI_STATUS:-0}" ;;
 esac
+if [ "$1" = build ]; then
+    exit "${PI_SANDBOX_FAKE_BUILD_STATUS:-0}"
+fi
 if [ "$1" = run ]; then
     if [ -n "${PI_SANDBOX_FAKE_AGENT:-}" ]; then
         sh -c "$PI_SANDBOX_FAKE_AGENT"
     fi
     exit "${PI_SANDBOX_FAKE_RUN_STATUS:-0}"
 fi
+exit 0
+"""
+
+# The wrapper looks up the newest Pi release before deciding to rebuild. This
+# answers that endpoint from an env var, and can fail, so no test touches the
+# network.
+FAKE_CURL = """#!/bin/sh
+url=''
+while [ $# -gt 0 ]; do
+    case "$1" in
+        -*) shift ;;
+        *) url=$1; shift ;;
+    esac
+done
+case "$url" in
+    *pi-coding-agent/latest)
+        [ "${PI_SANDBOX_FAKE_CURL_PI:-ok}" = fail ] && exit 22
+        body='{"version":"'"${PI_SANDBOX_FAKE_PI_VERSION:-0.87.0}"'"}'
+        ;;
+    *) exit 22 ;;
+esac
+printf '%s\\n' "$body"
 exit 0
 """
 
@@ -62,15 +112,26 @@ def _run(
     agent: str | None = None,
     run_status: str = "0",
     wrapper: Path | None = None,
+    interpreter: str | None = None,
     uname: str | None = None,
     fake_id: tuple[str, str] | None = None,
     fake_find: str | None = None,
+    pi_version: str = "0.87.0",
+    curl_pi: str = "ok",
+    label: str | None = None,
+    tags: str = "",
+    rmi_status: str = "0",
+    build_status: str = "0",
 ) -> tuple[subprocess.CompletedProcess[str], list[list[str]]]:
     bin_dir = tmp_path / "fakebin"
     bin_dir.mkdir(parents=True)
     docker = bin_dir / "docker"
     docker.write_text(FAKE_DOCKER)
     docker.chmod(0o755)
+    # Every test gets the fake registry lookup, so the real curl never runs.
+    curl = bin_dir / "curl"
+    curl.write_text(FAKE_CURL)
+    curl.chmod(0o755)
     # Only when a test asks for a platform, so every other test sees the host.
     if uname is not None:
         fake = bin_dir / "uname"
@@ -96,12 +157,20 @@ def _run(
     project = cwd if cwd is not None else tmp_path / "project"
     project.mkdir(parents=True, exist_ok=True)
 
+    if label is None:
+        label = pi_version
     env = {
         "PATH": f"{bin_dir}:/usr/bin:/bin",
         "HOME": str(home if home is not None else tmp_path / "home"),
         "PI_SANDBOX_FAKE_LOG": str(log),
         "PI_SANDBOX_FAKE_INSPECT": inspect_status,
         "PI_SANDBOX_FAKE_RUN_STATUS": run_status,
+        "PI_SANDBOX_FAKE_PI_VERSION": pi_version,
+        "PI_SANDBOX_FAKE_CURL_PI": curl_pi,
+        "PI_SANDBOX_FAKE_LABEL": label,
+        "PI_SANDBOX_FAKE_TAGS": tags,
+        "PI_SANDBOX_FAKE_RMI_STATUS": rmi_status,
+        "PI_SANDBOX_FAKE_BUILD_STATUS": build_status,
     }
     if agent is not None:
         env["PI_SANDBOX_FAKE_AGENT"] = agent
@@ -112,8 +181,14 @@ def _run(
         env["TYPESAFE_API_KEY"] = "typesafe-test-key-do-not-leak"
     env.update(also or {})
 
+    command = [str(wrapper or WRAPPER), *args]
+    # The bug this test file proves is about how sh reads a script, and the
+    # shells differ, so a test can name the interpreter to run the wrapper
+    # with. The wrapper itself stays POSIX.
+    if interpreter is not None:
+        command = [interpreter, *command]
     completed = subprocess.run(
-        [str(wrapper or WRAPPER), *args],
+        command,
         capture_output=True,
         text=True,
         cwd=project,
@@ -156,7 +231,7 @@ def _wrapper_with_inputs(directory: Path) -> Path:
     test can edit one input without touching the checkout."""
 
     directory.mkdir(parents=True, exist_ok=True)
-    for name in ("pi", "Dockerfile.pi", "entrypoint.sh", "herdr-fleet.md"):
+    for name in ("pi", "Dockerfile.pi", "entrypoint.sh"):
         shutil.copy(ROOT / name, directory / name)
     wrapper = directory / "pi"
     wrapper.chmod(0o755)
@@ -1190,29 +1265,78 @@ def test_wrapper_passes_pi_subcommands_through_untouched(tmp_path: Path) -> None
     ]
 
 
+def test_wrapper_and_entrypoint_agree_on_pi_subcommands() -> None:
+    """The wrapper prepends a default model unless the first argument is one
+    of Pi's subcommands, and the entrypoint skips the extension install for
+    the same list. If the lists drift, the wrapper would add a model to
+    something the entrypoint treats as a subcommand, or the reverse."""
+
+    def subcommands(path: Path) -> str:
+        match = re.search(
+            r"^\s*(install \| remove[^)]*)\)", path.read_text(), re.MULTILINE
+        )
+        assert match is not None, path
+        return match.group(1)
+
+    assert subcommands(ROOT / "pi") == subcommands(ROOT / "entrypoint.sh")
+
+
 def test_wrapper_builds_the_image_only_when_it_is_missing(tmp_path: Path) -> None:
     _, present = _run(tmp_path)
     _, missing = _run(tmp_path / "missing", inspect_status="1")
 
-    assert [argv[0] for argv in present] == ["image", "run"]
-    assert [argv[0] for argv in missing] == ["image", "build", "run"]
-    assert any(arg.endswith("/Dockerfile.pi") for arg in missing[1])
+    assert [argv for argv in present if argv[0] == "build"] == []
+    builds = [argv for argv in missing if argv[0] == "build"]
+    assert len(builds) == 1
+    assert any(arg.endswith("/Dockerfile.pi") for arg in builds[0])
 
 
-def test_wrapper_and_readme_agree_on_how_to_remove_old_images(
+def test_wrapper_removes_old_images_after_the_session(tmp_path: Path) -> None:
+    """Each build leaves an older pi-sandbox tag behind. Removing them here
+    keeps storage bounded without the user running anything, and the current
+    tag has to survive so this launch's image is not deleted."""
+
+    # The fake image list does not carry the current tag, so compute it from a
+    # first launch and put it among the older tags the second run sees.
+    _, first = _run(tmp_path)
+    current = _image(_docker_run(first)).removeprefix("pi-sandbox:")
+
+    completed, invocations = _run(tmp_path / "second", tags=f"aaaa {current} bbbb")
+    removed = [argv[1] for argv in invocations if argv[0] == "rmi"]
+    prunes = [argv for argv in invocations if argv[:2] == ["image", "prune"]]
+
+    assert f"pi-sandbox:{current}" not in removed
+    assert "pi-sandbox:aaaa" in removed
+    assert "pi-sandbox:bbbb" in removed
+    assert len(prunes) == 1
+    assert "label=pi-sandbox.image=1" in prunes[0]
+    assert "removed old images:" in completed.stderr
+    assert "aaaa" in completed.stderr and "bbbb" in completed.stderr
+
+
+def test_wrapper_keeps_the_exit_status_when_image_removal_fails(
     tmp_path: Path,
 ) -> None:
-    """`docker image prune` without -a removes only dangling images, and every
-    old pi-sandbox tag is still referenced, so the printed command did
-    nothing. The README and the wrapper have to give the same working one."""
+    """Another running session uses an image, so `docker rmi` fails there and
+    the wrapper has to stay quiet about it and return docker's own status."""
 
-    completed, _ = _run(tmp_path, inspect_status="1")
-    command = "docker image prune -a --filter label=pi-sandbox.image=1"
+    completed, invocations = _run(tmp_path, tags="aaaa", rmi_status="1", run_status="7")
 
-    assert command in completed.stderr
-    assert command in (ROOT / "README.md").read_text()
-    assert "docker image prune --filter" not in completed.stderr
-    assert "docker image prune --filter" not in (ROOT / "README.md").read_text()
+    assert completed.returncode == 7
+    assert "pi-sandbox:aaaa" not in completed.stderr
+    assert "removed old images" not in completed.stderr
+    assert any(argv[0] == "image" and argv[1] == "prune" for argv in invocations)
+
+
+def test_readme_no_longer_advises_manual_pruning() -> None:
+    """Removal is automatic now, so the README must not send the user to a
+    prune command that would also delete the current image."""
+
+    readme = " ".join((ROOT / "README.md").read_text().split())
+
+    assert "docker image prune" not in readme
+    assert "removes the older images after the session" in readme
+    assert "`--rm`" in readme
 
 
 def test_ci_smoke_mirrors_the_wrapper_git_mounts(tmp_path: Path) -> None:
@@ -1244,8 +1368,8 @@ def test_wrapper_tags_the_image_by_content_and_uses_it_for_inspect_and_run(
 ) -> None:
     _, invocations = _run(tmp_path, inspect_status="1")
 
-    assert [argv[0] for argv in invocations] == ["image", "build", "run"]
-    inspected = invocations[0][2]
+    assert [argv[0] for argv in invocations[:3]] == ["image", "build", "run"]
+    inspected = invocations[0][-1]
     built = invocations[1][invocations[1].index("--tag") + 1]
     ran = _image(invocations[2])
 
@@ -1256,9 +1380,9 @@ def test_wrapper_tags_the_image_by_content_and_uses_it_for_inspect_and_run(
 def test_wrapper_changes_the_image_tag_when_a_build_input_changes(
     tmp_path: Path,
 ) -> None:
-    """A pull that touches the Dockerfile, the entrypoint or the fleet skill
-    has to produce a tag that does not exist yet, or the build-if-missing
-    check keeps running the image built from the old files."""
+    """A pull that touches the Dockerfile or the entrypoint has to produce a
+    tag that does not exist yet, or the build-if-missing check keeps running
+    the image built from the old files."""
 
     def tag(directory: Path, changed: str | None = None) -> str:
         wrapper = _wrapper_with_inputs(directory)
@@ -1271,8 +1395,49 @@ def test_wrapper_changes_the_image_tag_when_a_build_input_changes(
     unchanged = tag(tmp_path / "unchanged")
     # Names and mtimes are not hashed, so the same contents give the same tag.
     assert tag(tmp_path / "again") == unchanged
-    for name in ("Dockerfile.pi", "entrypoint.sh", "herdr-fleet.md"):
+    for name in ("Dockerfile.pi", "entrypoint.sh"):
         assert tag(tmp_path / name.replace(".", "-"), changed=name) != unchanged
+
+
+def test_wrapper_reads_the_whole_script_before_running_it(tmp_path: Path) -> None:
+    """A pull or edit during a session replaces the wrapper while it is still
+    alive for `docker run`. sh reads a script as it goes, so without the brace
+    group the shell resumed at the old byte offset in the new file, ran
+    whatever text was there, and never reached the checks and cleanup after
+    `docker run`. bash is where that was seen, as macOS /bin/sh, and it still
+    reads that way, so the copy is run under bash."""
+
+    bash = shutil.which("bash")
+    if bash is None:
+        pytest.skip("needs bash to reproduce a script replaced while it runs")
+
+    wrapper = _wrapper_with_inputs(tmp_path / "checkout")
+    replacement = tmp_path / "newer-pi"
+    # Longer than the wrapper and not shell, so the offset the shell resumes
+    # at lands inside a word that cannot resolve, which is the loud failure
+    # the owner saw. A shorter file only reads as end of input and stops
+    # silently.
+    replacement.write_text("not-a-command = not shell\n" * 5000)
+
+    completed, invocations = _run(
+        tmp_path / "run",
+        wrapper=wrapper,
+        interpreter=bash,
+        run_status="7",
+        tags="latest deadbeef",
+        agent=f'cat "{replacement}" > "{wrapper}"',
+    )
+
+    # The rewrite is the whole point, so fail here rather than pass vacuously
+    # if the fake docker's agent never replaced the wrapper.
+    assert wrapper.read_text() == replacement.read_text()
+
+    # Docker's status still comes back, and the cleanup after `docker run`
+    # still asked docker for the old tags: neither happens when the shell
+    # dies on the text the replacement left at its old offset.
+    assert completed.returncode == 7
+    assert "command not found" not in completed.stderr
+    assert any(argv and argv[0] == "images" for argv in invocations)
 
 
 def test_wrapper_builds_with_the_host_ids_on_linux(tmp_path: Path) -> None:
@@ -1289,16 +1454,124 @@ def test_wrapper_builds_with_the_host_ids_on_linux(tmp_path: Path) -> None:
     ).stdout.strip()
 
     args = [build[index + 1] for index, arg in enumerate(build) if arg == "--build-arg"]
-    assert args == [f"AGENT_UID={real_uid}", f"AGENT_GID={real_gid}"]
+    assert f"AGENT_UID={real_uid}" in args
+    assert f"AGENT_GID={real_gid}" in args
 
 
 def test_wrapper_builds_without_the_host_ids_off_linux(tmp_path: Path) -> None:
     """Docker Desktop maps the mounted files to the container user, so the
-    defaults, and the state volumes already owned as 1001, still fit."""
+    defaults, and the state volumes already owned as 1001, still fit. The
+    version arguments are platform independent and still arrive."""
 
     _, invocations = _run(tmp_path, inspect_status="1", uname="Darwin")
+    build = invocations[1]
+    args = [build[index + 1] for index, arg in enumerate(build) if arg == "--build-arg"]
 
-    assert "--build-arg" not in invocations[1]
+    assert not any(arg.startswith("AGENT_") for arg in args)
+    assert "PI_VERSION=0.87.0" in args
+
+
+def test_wrapper_rebuilds_the_same_tag_when_npm_has_a_newer_pi(
+    tmp_path: Path,
+) -> None:
+    """The content tag does not change when npm publishes a release, so the
+    wrapper has to notice the image's label differs and rebuild under the same
+    tag with the new version as a build argument."""
+
+    _, invocations = _run(tmp_path, pi_version="0.99.0", label="0.87.0")
+    inspect = invocations[0]
+    build = next(argv for argv in invocations if argv[0] == "build")
+    args = [build[index + 1] for index, arg in enumerate(build) if arg == "--build-arg"]
+
+    assert build[build.index("--tag") + 1] == inspect[-1]
+    assert "PI_VERSION=0.99.0" in args
+
+
+def test_wrapper_does_not_rebuild_when_the_versions_match(tmp_path: Path) -> None:
+    """The image the content tag names already carries the newest version, so
+    the launch goes straight to docker run."""
+
+    _, invocations = _run(tmp_path, pi_version="0.87.0")
+
+    assert [argv for argv in invocations if argv[0] == "build"] == []
+
+
+def test_wrapper_treats_a_failed_lookup_as_unknown(tmp_path: Path) -> None:
+    """Offline, the existing image is used as it is, and no build argument the
+    wrapper could not verify is passed."""
+
+    _, invocations = _run(tmp_path, curl_pi="fail")
+
+    assert [argv for argv in invocations if argv[0] == "build"] == []
+    assert _docker_run(invocations)
+
+
+def test_wrapper_treats_an_invalid_version_as_unknown(tmp_path: Path) -> None:
+    """A registry answer that is not a plain semver must not become a build
+    argument or a tag the Dockerfile would use. The label differs from the
+    valid versions, so without the check this would rebuild."""
+
+    _, invocations = _run(tmp_path, pi_version="not a version", label="0.87.0")
+
+    assert [argv for argv in invocations if argv[0] == "build"] == []
+
+
+def _assert_lookup_failure_stops_the_first_launch(
+    completed: subprocess.CompletedProcess[str], invocations: list[list[str]]
+) -> None:
+    """No image plus a failed lookup must stop the launch rather than build a
+    tag the Dockerfile has no defaults for or start an image that is missing."""
+
+    assert completed.returncode == 1
+    assert [argv for argv in invocations if argv[0] == "build"] == []
+    assert [argv for argv in invocations if argv[0] == "run"] == []
+    assert "could not look up the newest Pi" in completed.stderr
+    assert "no image to fall back to" in completed.stderr
+
+
+def test_wrapper_refuses_to_build_when_the_lookup_fails_and_no_image(
+    tmp_path: Path,
+) -> None:
+    """The Dockerfile has no default version, so a build without one would
+    fail at once. Offline with no image there is nothing to fall back to, so
+    the wrapper must stop instead of building or running."""
+
+    completed, invocations = _run(tmp_path, inspect_status="1", curl_pi="fail")
+
+    _assert_lookup_failure_stops_the_first_launch(completed, invocations)
+
+
+def test_wrapper_stops_when_the_build_fails(tmp_path: Path) -> None:
+    """A build that fails half-way leaves no image under the tag. `set -e`
+    has to end the wrapper with docker's status rather than starting the
+    missing image or a stale one the same tag used to hold."""
+
+    completed, invocations = _run(
+        tmp_path, inspect_status="1", build_status="9", run_status="0"
+    )
+
+    assert completed.returncode == 9
+    assert not any(argv[0] == "run" for argv in invocations)
+
+
+def test_wrapper_starts_the_existing_image_when_a_rebuild_fails(
+    tmp_path: Path,
+) -> None:
+    """A same-tag build that fails leaves the image the tag already held
+    intact, so availability wins: warn once and start that image rather than
+    leaving the user with no Pi at all. The exit status is docker run's."""
+
+    completed, invocations = _run(
+        tmp_path,
+        pi_version="0.99.0",
+        label="0.87.0",
+        build_status="9",
+        run_status="7",
+    )
+
+    assert completed.returncode == 7
+    assert "starting the existing image" in completed.stderr
+    assert _docker_run(invocations)
 
 
 def test_wrapper_gives_linux_host_ids_their_own_image_tag(tmp_path: Path) -> None:
@@ -1332,19 +1605,39 @@ def test_wrapper_stays_in_the_process_tree_so_herdr_can_identify_pi(
     assert str(WRAPPER) in _docker_run_parent(tmp_path / "docker.log")
 
 
-def test_image_installs_the_extensions_after_becoming_the_agent_user() -> None:
-    """Above `USER agent` they land root-owned in the layer that seeds the
-    state volume, leaving the agent unable to write its own Pi config."""
+def test_image_does_not_seed_extensions() -> None:
+    """The entrypoint installs the four extensions into the state volume on
+    every start, so seeding them in the image would only duplicate the list
+    and reach a new volume."""
 
-    lines = (ROOT / "Dockerfile.pi").read_text().splitlines()
-    installs = [
-        index
-        for index, line in enumerate(lines)
-        if line.strip().startswith("&& pi install npm:")
-    ]
+    dockerfile = (ROOT / "Dockerfile.pi").read_text()
 
-    assert installs
-    assert min(installs) > lines.index("USER agent")
+    assert "pi install" not in dockerfile
+    assert "/home/agent/.pi" not in dockerfile
+
+
+def test_image_takes_pi_version_as_a_build_argument() -> None:
+    """The wrapper passes the newest version npm reports, so Pi's version has
+    to be an argument rather than a literal in the install line. It has no
+    default, so a build without it fails before npm could install an empty
+    version."""
+
+    dockerfile = (ROOT / "Dockerfile.pi").read_text()
+
+    assert "ARG PI_VERSION\n" in dockerfile
+    assert ': "${PI_VERSION:?' in dockerfile
+    assert "@earendil-works/pi-coding-agent@$PI_VERSION" in dockerfile
+
+
+def test_image_records_the_pi_version_in_one_label() -> None:
+    """The wrapper compares this label against the version it looked up, so a
+    newer Pi rebuilds under the same content tag."""
+
+    dockerfile = (ROOT / "Dockerfile.pi").read_text()
+    label = 'LABEL pi-sandbox.version="$PI_VERSION"'
+
+    assert label in dockerfile
+    assert dockerfile.index("ARG PI_VERSION\n") < dockerfile.index(label)
 
 
 def test_image_builds_the_agent_user_with_build_argument_ids() -> None:
@@ -1364,25 +1657,11 @@ def test_image_builds_the_agent_user_with_build_argument_ids() -> None:
     )
     created = next(index for index, line in enumerate(lines) if "useradd" in line)
     assert removed < created
-    # One groupadd, always named agent, so the COPY --chown below resolves for
+    # One groupadd, always named agent, so `useradd --gid agent` resolves for
     # any gid without a second branch or a getent lookup.
     assert "getent" not in dockerfile
     assert 'groupadd --non-unique --gid "$AGENT_GID" agent' in dockerfile
     assert "--gid agent agent" in dockerfile
-
-
-def test_image_pins_herdr_and_checks_it_against_a_digest() -> None:
-    """An unpinned or unverified download would put unreviewed code in a
-    container that holds the API key."""
-
-    dockerfile = (ROOT / "Dockerfile.pi").read_text()
-
-    digests = re.findall(r"target=(linux-\S+); \\\n\s+sha=([0-9a-f]{64})", dockerfile)
-
-    assert sorted(target for target, _ in digests) == ["linux-aarch64", "linux-x86_64"]
-    assert len({digest for _, digest in digests}) == 2
-    assert "releases/download/v$version/herdr-$target" in dockerfile
-    assert "sha256sum --check" in dockerfile
 
 
 def test_image_pins_uv_to_a_digest_instead_of_piping_install_sh() -> None:
@@ -1423,18 +1702,48 @@ class _Entrypoint(NamedTuple):
     argv: list[str]
     env: dict[str, str]
     stderr: str
+    calls: list[list[str]]
+    scripts: list[str]
+    timeouts: list[str]
 
 
-def _run_entrypoint(tmp_path: Path, **env: str) -> _Entrypoint:
-    """Run the entrypoint with stubs for the two programs it launches."""
+def _run_entrypoint(
+    tmp_path: Path,
+    args: tuple[str, ...] = ("--model", "kimi-k3"),
+    **env: str,
+) -> _Entrypoint:
+    """Run the entrypoint with stubs for the programs it launches."""
 
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir(parents=True, exist_ok=True)
     argv_log = tmp_path / "pi.argv"
     env_log = tmp_path / "pi.env"
-    (bin_dir / "herdr").write_text("#!/bin/sh\nexit 0\n")
+    calls_log = tmp_path / "pi.calls"
+    timeout_log = tmp_path / "timeout.log"
+    # Every pi call is appended, with the lifecycle-script setting it saw, so a
+    # test can tell the extension installs from the final exec. An install can
+    # be made to fail to check the best-effort path.
     (bin_dir / "pi").write_text(
-        f'#!/bin/sh\nprintf "%s\\n" "$@" >{argv_log}\nenv >{env_log}\n'
+        "#!/bin/sh\n"
+        f'printf "%s\\n" "---" >>{calls_log}\n'
+        f'printf "%s\\n" "$@" >>{calls_log}\n'
+        f'printf "SCRIPTS=%s\\n" "${{npm_config_ignore_scripts:-}}" >>{calls_log}\n'
+        f'printf "%s\\n" "$@" >{argv_log}\n'
+        f"env >{env_log}\n"
+        'if [ "$1" = install ]; then\n'
+        '    if [ -n "${PI_SANDBOX_FAKE_PI_INSTALL_FAIL:-}" ] && [ "$2" = "${PI_SANDBOX_FAKE_PI_INSTALL_FAIL}" ]; then\n'
+        "        exit 1\n"
+        "    fi\n"
+        '    if [ "${PI_SANDBOX_FAKE_PI_INSTALL_STATUS:-0}" != 0 ]; then\n'
+        '        exit "${PI_SANDBOX_FAKE_PI_INSTALL_STATUS}"\n'
+        "    fi\n"
+        "fi\n"
+        "exit 0\n"
+    )
+    # The extension update is bounded by `timeout`, so log that it was used and
+    # then run the command it wraps.
+    (bin_dir / "timeout").write_text(
+        f'#!/bin/sh\nprintf "%s\\n" "$*" >>{timeout_log}\nshift\nexec "$@"\n'
     )
     for stub in bin_dir.iterdir():
         stub.chmod(0o755)
@@ -1442,12 +1751,21 @@ def _run_entrypoint(tmp_path: Path, **env: str) -> _Entrypoint:
     home = tmp_path / "home"
     home.mkdir(exist_ok=True)
     completed = subprocess.run(
-        [shutil.which("dash") or "sh", str(ENTRYPOINT), "--model", "kimi-k3"],
+        [shutil.which("dash") or "sh", str(ENTRYPOINT), *args],
         check=True,
         capture_output=True,
         text=True,
         env={"PATH": f"{bin_dir}:/usr/bin:/bin", "HOME": str(home), **env},
     )
+
+    calls = []
+    scripts = []
+    for block in calls_log.read_text().split("---"):
+        if not block.strip():
+            continue
+        lines = block.strip().splitlines()
+        scripts.append(lines[-1].removeprefix("SCRIPTS="))
+        calls.append(lines[:-1])
 
     # Whatever it does, it must not print the key on the way.
     assert FAKE_KEY not in completed.stdout + completed.stderr
@@ -1460,6 +1778,9 @@ def _run_entrypoint(tmp_path: Path, **env: str) -> _Entrypoint:
             for line in env_log.read_text().splitlines()
             if "=" in line
         ),
+        calls=calls,
+        scripts=scripts,
+        timeouts=timeout_log.read_text().splitlines() if timeout_log.exists() else [],
     )
 
 
@@ -1479,44 +1800,119 @@ def test_the_entrypoint_is_a_valid_shell_script() -> None:
     assert checked.returncode == 0, checked.stderr
 
 
-def test_the_entrypoint_starts_a_herdr_server_and_then_becomes_pi() -> None:
-    """Herdr's API commands do not start a server, so without this the agent's
-    first herdr call is told `server_not_running`. The server has to be
-    backgrounded and Pi has to replace the script: a server left in the
-    foreground means Pi never starts at all, and running Pi as a child means
-    the container's foreground process is a shell, which stops Herdr on the
-    host from seeing a Pi agent in the pane."""
+def test_the_entrypoint_becomes_pi() -> None:
+    """Pi has to replace the script rather than run as its child, so the
+    container's foreground process is Pi and a Herdr pane on the host still
+    sees a Pi agent in the pane."""
 
     script = ENTRYPOINT.read_text()
     dockerfile = (ROOT / "Dockerfile.pi").read_text()
-    start = script[script.index("herdr server") :].split("\n")[0]
 
     assert 'ENTRYPOINT ["pi-sandbox-entrypoint"]' in dockerfile
     assert "COPY --chmod=0755 entrypoint.sh" in dockerfile
-    assert start.rstrip().endswith(" &")
-    assert script.index("herdr server") < script.index('exec pi "$@"')
-    # A HERDR_SOCKET_PATH that survived would move this server's socket, and a
-    # HERDR_PANE_ID would make Pi read itself as one of its own children.
-    assert script.index("unset HERDR_SOCKET_PATH HERDR_PANE_ID") < script.index(
-        "herdr server"
+    assert script.rstrip().endswith('exec pi "$@"')
+
+
+def test_the_entrypoint_updates_the_extensions_on_start(tmp_path: Path) -> None:
+    """The extensions live in the state volume, so an image rebuild does not
+    reach an existing project. Installing all four without a version adds the
+    missing ones, but leaves an installed one at its version, so the update
+    after them is what moves the volume to the newest releases. Lifecycle
+    scripts stay off and the step is bounded so a hung registry cannot stop
+    Pi."""
+
+    started = _run_entrypoint(tmp_path)
+    installs = [call for call in started.calls if call[:1] == ["install"]]
+
+    assert [call[1] for call in installs] == [
+        "npm:pi-subagents",
+        "npm:@tintinweb/pi-subagents",
+        "npm:pi-background-tasks",
+        "npm:pi-extension-manager",
+    ]
+    assert started.calls[len(installs)] == ["update", "--extensions"]
+    assert all(
+        started.scripts[index] == "true"
+        for index, call in enumerate(started.calls)
+        if call[:1] in (["install"], ["update"])
     )
+    # The final exec is Pi itself, which must not inherit the setting.
+    assert started.calls[-1] == ["--model", "kimi-k3"]
+    assert started.scripts[-1] == ""
+    assert any(timeout.startswith("120 ") for timeout in started.timeouts)
 
 
-def test_the_entrypoint_hands_pi_a_clean_herdr_environment(tmp_path: Path) -> None:
-    """Read from Pi's own environment, since a variable that survived would
-    point its herdr calls at the host pane's socket."""
+def test_the_entrypoint_skips_the_extension_update_for_subcommands(
+    tmp_path: Path,
+) -> None:
+    """`pi install` and the rest are passed through to Pi, so the entrypoint
+    must not run an install of its own for them."""
 
-    started = _run_entrypoint(
-        tmp_path,
-        HERDR_SOCKET_PATH="/tmp/elsewhere/custom.sock",
-        HERDR_PANE_ID="hostpane:p9",
-        HERDR_TAB_ID="hostpane:t1",
-        HERDR_WORKSPACE_ID="hostpane",
-    )
+    started = _run_entrypoint(tmp_path, args=("list",))
+
+    assert started.calls == [["list"]]
+    assert started.timeouts == []
+
+
+def test_the_entrypoint_starts_pi_when_the_extension_update_fails(
+    tmp_path: Path,
+) -> None:
+    """A registry that is down or a volume the agent has ruined must cost the
+    update, not the session."""
+
+    started = _run_entrypoint(tmp_path, PI_SANDBOX_FAKE_PI_INSTALL_STATUS="1")
 
     assert started.argv == ["--model", "kimi-k3"]
-    assert started.env["HERDR_ENV"] == "1"
-    assert [name for name in started.env if name.startswith("HERDR_")] == ["HERDR_ENV"]
+    assert "could not update the extensions" in started.stderr
+
+
+def test_the_entrypoint_reports_a_partial_extension_update_failure(
+    tmp_path: Path,
+) -> None:
+    """One package failing must be reported even though the other three
+    succeed, and the rest must still be attempted rather than skipped."""
+
+    started = _run_entrypoint(
+        tmp_path, PI_SANDBOX_FAKE_PI_INSTALL_FAIL="npm:pi-subagents"
+    )
+    installs = [call for call in started.calls if call[:1] == ["install"]]
+
+    assert started.argv == ["--model", "kimi-k3"]
+    assert len(installs) == 4
+    assert "could not update the extensions" in started.stderr
+
+
+def test_the_entrypoint_removes_the_stale_herdr_skills(tmp_path: Path) -> None:
+    """A volume made by an earlier image still holds the two Herdr skills,
+    which now describe a tool this image does not carry. The entrypoint has to
+    remove them, and a removal that fails must cost the stale files rather
+    than the session."""
+
+    skills = tmp_path / "home/.pi/agent/skills"
+    for name in ("herdr", "herdr-fleet"):
+        (skills / name).mkdir(parents=True)
+        (skills / name / "SKILL.md").write_text("stale")
+    started = _run_entrypoint(tmp_path)
+
+    assert started.argv == ["--model", "kimi-k3"]
+    assert not (skills / "herdr").exists()
+    assert not (skills / "herdr-fleet").exists()
+
+    # A skills directory the agent made unwritable makes the removal fail. Pi
+    # still has to start, since the stale files are cosmetic and Pi is the
+    # point of the container.
+    blocked = tmp_path / "blocked"
+    blocked_skills = blocked / "home/.pi/agent/skills"
+    for name in ("herdr", "herdr-fleet"):
+        (blocked_skills / name).mkdir(parents=True)
+    blocked_skills.chmod(0o500)
+    try:
+        started = _run_entrypoint(blocked)
+    finally:
+        blocked_skills.chmod(0o700)
+
+    assert started.argv == ["--model", "kimi-k3"]
+    assert (blocked_skills / "herdr").exists()
 
 
 def test_the_entrypoint_writes_the_subscription_key_where_pi_reads_it(
@@ -1656,34 +2052,3 @@ def test_the_entrypoint_does_not_write_the_key_through_a_symlink(
     assert elsewhere.read_text() == ""
     assert not auth.is_symlink()
     assert json.loads(auth.read_text())["opencode-go"]["key"] == FAKE_KEY
-
-
-def test_image_ships_both_herdr_skills_as_the_agent_user() -> None:
-    """Herdr's own skill for the CLI, and ours for what is different here. They
-    land in the home directory, so they follow the extensions' ownership rule,
-    and the copied one has to arrive owned by the user that reads it."""
-
-    lines = (ROOT / "Dockerfile.pi").read_text().splitlines()
-    skills = [
-        index
-        for index, line in enumerate(lines)
-        if "/home/agent/.pi/agent/skills/" in line
-    ]
-
-    assert min(skills) > lines.index("USER agent")
-    assert any("herdr --skill >" in line for line in lines)
-    assert any(
-        line.startswith("COPY --chown=agent:agent herdr-fleet.md") for line in lines
-    )
-
-
-def test_the_fleet_skill_tells_a_child_not_to_start_its_own_fleet() -> None:
-    """Children load the same global skills directory, so the file has to be
-    true for them too. A pane Herdr creates has HERDR_PANE_ID set; the
-    container's foreground Pi does not."""
-
-    skill = (ROOT / "herdr-fleet.md").read_text()
-
-    assert skill.startswith("---\nname: herdr-fleet\n")
-    assert "HERDR_PANE_ID" in skill.split("## ")[1]
-    assert "do not start a fleet of your" in skill

@@ -19,9 +19,14 @@ Notes for agents and contributors changing this repo, from the security work on
   launch mount `/etc` (round 4). The wrapper walks up to the nearest `.git`.
 - Opening a FIFO for writing blocks, and `set -C` does not prevent it. Refuse
   non-regular files before writing, and wrap FIFO experiments in `timeout`.
+- The agent reaches the host terminal. `/dev/pts/0` is owned by the user Pi
+  runs as, and Pi's own stdout is reachable through `/proc`, so a tool wrote
+  an OSC title that host Herdr showed (2026-09-22). Only a host-side filter
+  between docker and the terminal could stop it, so it is a documented limit.
 - Test security fixes end to end on real Docker, not only with the fake docker
   in `test_pi.py`, because the fake cannot show what a mount does. Keep its
   style: every behaviour gets a test proven to fail when the fix is reverted.
 - The wrapper must stay POSIX sh that runs under dash, must not `exec docker`
   (Herdr identifies the pane by the `pi` process), and keeps docker's exit
-  status.
+  status. Its body stays in one brace group so an edit or `git pull` during a
+  session cannot change what the running wrapper executes.

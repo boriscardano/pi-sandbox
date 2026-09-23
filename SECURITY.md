@@ -20,7 +20,9 @@ The known limitations in the README are not vulnerabilities. In particular:
   network is open, so anything in the container can use or send them
 - the mounted project is fully readable and writable by the agent
 - the agent can leave files your host may later execute, such as a `Makefile`
-  or an `.envrc`
+  or an `.envrc`, or that your other coding agents trust, such as
+  `.claude/settings.json`
+- the agent can write escape sequences to the terminal it was launched from
 - nested git metadata the agent creates is detected at exit, not prevented
 - a container escape defeats the boundary, and a container is not a virtual
   machine

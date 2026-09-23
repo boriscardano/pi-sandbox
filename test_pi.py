@@ -685,9 +685,16 @@ def test_wrapper_refuses_a_planted_commondir(tmp_path: Path) -> None:
     commands in that directory's config. It is refused before anything runs,
     and the file is left for the user to inspect."""
 
-    # The last two pass a check of the first bytes only: Git uses the whole
-    # file with trailing newlines trimmed, so it would follow them.
-    contents = ("/tmp/evil\n", "", "../other\n", ".\n\nevil", ".\n\n\nevil\n")
+    # The last three pass a check the shell can make on its own: Git uses the
+    # whole file, and the shell drops the NUL that makes Git follow `.\n`.
+    contents = (
+        "/tmp/evil\n",
+        "",
+        "../other\n",
+        ".\n\nevil",
+        ".\n\n\nevil\n",
+        ".\n\0",
+    )
     for index, content in enumerate(contents):
         repo = tmp_path / f"repo-{index}"
         repo.mkdir()

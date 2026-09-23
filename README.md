@@ -4,6 +4,8 @@ Run the [Pi coding agent](https://pi.dev) in a Docker container that can see one
 project and nothing else on your machine. It is for untrusted or
 lightly-trusted models, such as Chinese-hosted ones reached through OpenCode.
 
+https://github.com/user-attachments/assets/af0dbce4-7b3f-4417-9e72-bc65415c8f1d
+
 One shell script, one Dockerfile and an entrypoint. Nothing to install or
 configure.
 

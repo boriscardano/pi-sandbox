@@ -1,20 +1,51 @@
 # pi-sandbox
 
 Run the [Pi coding agent](https://pi.dev) in a Docker container that can see one
-project and nothing else on your machine. Intended for untrusted or
+project and nothing else on your machine. It is for untrusted or
 lightly-trusted models, such as Chinese-hosted ones reached through OpenCode.
 
 One shell script, one Dockerfile and an entrypoint. Nothing to install or
 configure.
 
-## Requirements
+The container gets the project you launched from, read-write, and a private
+volume for Pi's own state. It does not get your home directory, your SSH or
+cloud credentials, the Docker socket, your Herdr socket, or any other project.
+It does not make the checkout safe to run afterwards, and the API keys are
+readable inside it. [SECURITY.md](SECURITY.md) says what does and does not
+count as a vulnerability.
 
-Docker. For the default model, the opencode-go subscription key exported in
-your shell:
+## Quick start
 
 ```sh
+cd ~/any/project
+# needs Pi installed on the host, see Requirements for other ways
 export OPENCODE_GO_API_KEY=$(pi auth print-api-key --provider opencode-go)
+/path/to/pi-sandbox/pi
 ```
+
+The first run builds the image, which takes a few minutes. After that it starts
+straight into Pi, on `deepseek-v4.1-flash` from the opencode-go subscription.
+That model is not on OpenCode Zen, so the wrapper names the provider alongside
+it. Pass `--model` for another model on that subscription, for example `pi
+--model kimi-k3`. Any other Pi flag goes straight through. Requirements covers
+where the key comes from, and Images and rebuilds the rest.
+
+An alias is convenient:
+
+```sh
+alias pis='/path/to/pi-sandbox/pi'
+```
+
+Do not put the script on your `PATH` as `pi`, or it will shadow a host Pi
+install for every project.
+
+## Requirements
+
+Docker. The default model needs `OPENCODE_GO_API_KEY` in your environment. The
+command in Quick start gets that value from a host Pi install with `pi auth
+print-api-key --provider opencode-go`, so host Pi is needed for that form.
+Without it, export the same value from wherever you keep it, such as a password
+manager or a secret store.
 
 That key is needed for the default model only. Naming another provider with
 `--provider` or a `provider/model` string runs without it, and Pi then uses
@@ -26,35 +57,16 @@ export OPENCODE_API_KEY=your-opencode-key
 pi --model opencode/glm-5.3
 ```
 
-Developed and verified on macOS with Docker Desktop. Windows with Docker
-Desktop works the same way: both map bind-mount ownership to the container
-user, so the agent can write to `/workspace`. On native Linux the mounted files
-keep their host UID and GID, so the wrapper builds the image with your own, and
-the container user matches you. Each pair of ids gets its own image tag. Do not
-run it as root on Linux: that would make the container user UID 0 and leave
-root-owned files in the project. Rootless Docker and Podman are untested.
+pi-sandbox is developed and verified on macOS with Docker Desktop. Windows with
+Docker Desktop works the same way: both map bind-mount ownership to the
+container user, so the agent can write to `/workspace`. On native Linux the
+mounted files keep their host UID and GID, so the wrapper builds the image with
+your own, and the container user matches you. Each pair of ids gets its own
+image tag. Do not run it as root on Linux: that would make the container user
+UID 0 and leave root-owned files in the project. Rootless Docker and Podman are
+untested.
 
-## Use
-
-```sh
-cd ~/any/project
-/path/to/pi-sandbox/pi
-```
-
-The first run builds the image, which takes a few minutes. After that it starts
-straight into Pi, on `deepseek-v4.1-flash` from the opencode-go subscription.
-Pass `--model` for another on that subscription, for example `pi --model
-kimi-k3`, or name a provider yourself with `--provider` or a `provider/model`
-string. Any other Pi flag goes straight through.
-
-An alias is convenient:
-
-```sh
-alias pis='/path/to/pi-sandbox/pi'
-```
-
-Do not put the script on your `PATH` as `pi`, or it will shadow a host Pi
-install for every project.
+## Images and rebuilds
 
 Edits to `Dockerfile.pi` or `entrypoint.sh` rebuild automatically on the next
 launch. The image is tagged by the contents of those files, so a changed file
@@ -63,15 +75,15 @@ starting. It also rebuilds when npm answers with a newer release than the
 image's label records. When that lookup fails it keeps the existing image and
 says so. With no image there is nothing to fall back to and the Dockerfile
 carries no default version, so the wrapper stops and says the newest Pi could
-not be looked up. Any launch with no image under the current tag, the first
-one or the first after an edit to `Dockerfile.pi` or `entrypoint.sh`, therefore
-needs that lookup to answer. A rebuild that fails keeps the image the tag already held and starts it, so a
-registry blip does not leave you without Pi, while a first build that fails
-stops with docker's status. It removes the older images after the session, so
-nothing accumulates. That removal reaches every other `pi-sandbox` image it
-can, including one built by another checkout of this repository or, on Linux,
-by another host user, whose next launch then rebuilds. The container itself is
-removed by `--rm` when Pi exits.
+not be looked up. Any launch with no image under the current tag, the first one
+or the first after an edit to `Dockerfile.pi` or `entrypoint.sh`, therefore
+needs that lookup to answer. A rebuild that fails keeps the image the tag
+already held and starts it, so a registry blip does not leave you without Pi,
+while a first build that fails stops with docker's status. It removes the older
+images after the session, so nothing accumulates. That removal reaches every
+other `pi-sandbox` image it can, including one built by another checkout of
+this repository or, on Linux, by another host user, whose next launch then
+rebuilds. The container itself is removed by `--rm` when Pi exits.
 
 ## What the container can and cannot see
 
@@ -86,7 +98,7 @@ Mounted:
 - inside a Git repository, `.git` itself is bind-mounted over the project, so
   it cannot be renamed away, and the parts of it that can name a command are
   then mounted read-only inside it: `.git/config`, `.git/config.worktree`,
-  `.git/hooks`, `.git/worktrees` and `.git/modules`.
+  `.git/hooks`, `.git/worktrees`, `.git/modules` and `.git/commondir`.
 
 Not mounted, and unreachable: your home directory, `~/.ssh`, `~/.aws`,
 `~/.config`, the system keychain, every other project, the Docker socket, your
@@ -116,12 +128,12 @@ name whose variable is unset is dropped rather than passed empty, so the second
 one is optional. Nothing else from your environment is passed in: the container
 starts from a clean environment and gets these, `TERM` and `COLORTERM`.
 
-`OPENCODE_GO_API_KEY` is the one the default model needs, since
-`deepseek-v4.1-flash` is on the opencode-go subscription and not on OpenCode
-Zen. Pi reads that provider from `~/.pi/agent/auth.json` rather than from the
-environment, so the entrypoint writes the forwarded key there, mode 0600,
-leaving any other provider in the file alone. Set `OPENCODE_API_KEY` as well if
-you want the models that are on Zen instead.
+`OPENCODE_GO_API_KEY` is the one the default model needs, and the wrapper
+checks for it whenever the run reaches opencode-go. Pi reads that provider from
+`~/.pi/agent/auth.json` rather than from the environment, so the entrypoint
+writes the forwarded key there, mode 0600, leaving any other provider in the
+file alone. Set `OPENCODE_API_KEY` as well if you want the models that are on
+Zen instead.
 
 That file is in the state volume, so unlike the environment the key outlives
 the container. `docker volume rm` is what removes it, as under State and reset.
@@ -205,12 +217,12 @@ The entrypoint installs four Pi extensions from npm at their newest release:
   `/extensions`.
 
 The subagent and background-task extensions let the agent start work that
-keeps running while you are not watching the pane, with the same key and the
-same open network as the foreground session, and sharing its `--pids-limit`.
-Everything still dies with the container.
+keeps running while you are not watching, with the same key, open network and
+`--pids-limit` as the foreground session. Everything still dies with the
+container.
 
-They live in the agent's home, so they reach a project through that project's
-state volume. A new project's first start downloads them. Offline, that start
+They live in the agent's home, so they reach a project through its state
+volume. A new project's first start downloads them. Offline, that start
 proceeds without them, and the next start with a network installs them. On
 every start the entrypoint installs any of the four that is missing and then
 runs `pi update --extensions`, so an existing volume ends up at their newest
@@ -218,19 +230,18 @@ releases even though an image rebuild does not reach it. That update also moves
 any extension you added without a version, while one installed as
 `npm:<package>@<version>` stays at it. A `pi remove npm:<package>` of one of the
 four therefore lasts only until the next start, which installs it again.
-Lifecycle scripts stay off for that install, so a new release cannot run one in
-a container holding the API key. Pi's own subcommands run against the volume
-rather than your host Pi, so `pi list` shows what a project actually has and
-`pi install npm:<package>` adds one. `install`,
-`remove`, `uninstall`, `list`, `config` and `auth` all work this way. So does
-`pi update --extensions`, but bare `pi update` targets Pi itself, which lives
-outside the volume in a root-owned directory the agent cannot write. Resetting
-the volume, as under State and reset, is the other way to pick up a change.
+Pi's own subcommands run against the volume rather than your host Pi, so
+`pi list` shows what a project actually has and `pi install npm:<package>` adds
+one. `install`, `remove`, `uninstall`, `list`, `config` and `auth` all work this
+way. So does `pi update --extensions`, but bare `pi update` targets Pi itself,
+which lives outside the volume in a root-owned directory the agent cannot
+write. Resetting the volume, as under State and reset, is the other way to pick
+up a change.
 
 Change the set by editing the four names in `entrypoint.sh`, which is where the
 install list lives. To drop one for good, run `pi remove npm:<package>` and
-delete its name from that list, then relaunch, which rebuilds the image. The
-owner chose to always run the newest releases rather than reviewed pins, which
+delete its name from that list, then relaunch, which rebuilds the image.
+pi-sandbox always runs the newest releases rather than reviewed pins, which
 means a new upstream release reaches the sandbox, and the API key it holds,
 without review. Lifecycle scripts stay off, which limits what a release can run
 at install time but not what the extension code does once it is loaded.
@@ -244,26 +255,28 @@ because the mounted files belong to the host user, and commits use the identity
 `Pi Sandbox <pi-sandbox@localhost>` rather than yours. Override it per commit
 with `git -c user.name=... -c user.email=...`.
 
-`.git` itself is bind-mounted over the project, and then `.git/config`,
-`.git/config.worktree`, `.git/hooks`, `.git/worktrees` and `.git/modules` are
-mounted read-only inside it. The hooks, worktrees and modules directories are
-created first if they are missing, and so is the worktree config, as an empty
-file. Git ignores an empty `.git/config.worktree` while
-`extensions.worktreeConfig` is off, which is the default, so creating it
-changes nothing for the host, and an existing one is left untouched. A symlink
-at `.git` or at any of those five paths is refused before the wrapper creates
-or mounts anything, because Git, the mount and the `mkdir` would all follow it
-outside the project. A `.git/config.worktree` that exists but is not an
-ordinary file, such as a FIFO, is refused for the same reason: creating or
-mounting it as a file would block or fail. Git runs
-commands named in those places, through `core.fsmonitor`,
-`core.pager`, `core.hooksPath` and `filter.<name>.clean`, so leaving them
-writable would let the agent leave a command behind that you run yourself with
-the next `git status`. A linked worktree keeps its git directory at
-`.git/worktrees/<name>`, and `commondir`, `gitdir` and `config.worktree` there
-redirect Git to the config and hooks it reads, so the whole directory is
-read-only too. `git worktree add` therefore fails in the sandbox, which costs
-nothing because the paths in those files are host paths.
+The bind mounts listed above are what protect this. The hooks, worktrees and
+modules directories are created first if they are missing, and so is the
+worktree config, as an empty file. Git ignores an empty `.git/config.worktree`
+while `extensions.worktreeConfig` is off, which is the default, so creating it
+changes nothing for the host, and an existing one is left untouched. Git reads
+`.git/commondir` in any repository and takes its config and hooks from the
+directory it names, so the wrapper creates it holding `.`, which names the same
+directory and leaves Git behaving as before, and refuses to run when one names
+anything else. A symlink at `.git` or at any of the six read-only paths is
+refused before the wrapper creates or mounts anything, because Git, the mount
+and the `mkdir` would all follow it outside the project. A
+`.git/config.worktree` or `.git/commondir` that is not an ordinary file, such
+as a FIFO, is refused for the same reason, since creating or mounting it as a
+file would block or fail. Git runs commands named in those
+places, through `core.fsmonitor`, `core.pager`, `core.hooksPath` and
+`filter.<name>.clean`, so leaving them writable would let the agent leave a
+command behind that you run yourself with the next `git status`. A linked
+worktree keeps its git directory at `.git/worktrees/<name>`, and `commondir`,
+`gitdir` and `config.worktree` there redirect Git to the config and hooks it
+reads, so the whole directory is read-only too. `git worktree add` therefore
+fails in the sandbox, which costs nothing because the paths in those files are
+host paths.
 
 Mounting `.git` matters on its own. Read-only mounts on the files inside it do
 not stop `mv .git .git-old`, which succeeds while `.git` is still an ordinary
@@ -341,9 +354,9 @@ Mounting your socket would undo the sandbox rather than extend it, since
   The container's terminal device is owned by the user Pi and its tools run
   as, so any command the agent runs can open it. A sequence can retitle the
   pane, draw text that looks like your shell, add links, and on a terminal
-  that honours OSC 52, replace your clipboard. Turn
-  off OSC 52 clipboard writes in your terminal, and do not paste from a
-  clipboard you did not fill yourself after a session.
+  that honours OSC 52, replace your clipboard. Turn off OSC 52 clipboard
+  writes in your terminal, and do not paste from a clipboard you did not fill
+  yourself after a session.
 - Nested repositories, and the rebase, merge or cherry-pick state the agent
   can plant in `.git`, are detected at exit, not prevented. The checks run
   after `docker run` returns, so they do not run at all if the wrapper itself
@@ -367,10 +380,6 @@ count as a vulnerability here and how to report it privately.
 
 ## Tests
 
-```sh
-uv run --with pytest pytest
-```
-
 The tests use a fake `docker` on `PATH`, so they neither build an image nor
 start a container. They assert the isolation properties: the expected mounts
 and no others, the keys forwarded by name and never by value, the sandboxing
@@ -379,6 +388,15 @@ refusal, and that a Herdr pane's socket stays on the host. The rest read
 `Dockerfile.pi` or run `entrypoint.sh` against stub binaries and a throwaway
 home, for the default model, where the subscription key is written, and what
 happens when the agent has ruined the file it is written to.
+
+## Contributing
+
+Tests run with `uv run --with pytest pytest -q`. The shell scripts must pass
+`shellcheck` and run under dash. [AGENTS.md](AGENTS.md) holds the security
+lessons a change here has to follow, including that every behaviour gets a
+test proven to fail when the fix is reverted and that the wrapper stays POSIX
+sh which does not `exec docker`. Report a vulnerability privately as
+[SECURITY.md](SECURITY.md) describes rather than in a public issue.
 
 ## License
 

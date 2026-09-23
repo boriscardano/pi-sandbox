@@ -37,7 +37,6 @@ case "$1" in
                     printf '%s\\n' "${PI_SANDBOX_FAKE_LABEL:-}"
                     exit 0
                 fi
-                exit 0
                 ;;
             prune) exit 0 ;;
         esac
@@ -437,11 +436,15 @@ def test_wrapper_mounts_git_config_and_hooks_read_only(tmp_path: Path) -> None:
     assert mounts[6] == (
         f"type=bind,source={repo}/.git/modules,target=/workspace/.git/modules,readonly"
     )
+    assert mounts[7] == (
+        f"type=bind,source={repo}/.git/commondir,"
+        "target=/workspace/.git/commondir,readonly"
+    )
     # A fresh repository has no modules, they are created empty, and the
     # state volume is still last.
-    assert len(mounts) == 8
-    assert mounts[7].startswith("type=volume,source=pi-sandbox-")
-    assert mounts[7].endswith(",target=/home/agent")
+    assert len(mounts) == 9
+    assert mounts[8].startswith("type=volume,source=pi-sandbox-")
+    assert mounts[8].endswith(",target=/home/agent")
 
 
 def test_wrapper_mounts_git_worktrees_read_only(tmp_path: Path) -> None:
@@ -648,6 +651,81 @@ def test_wrapper_refuses_a_non_regular_config_worktree(tmp_path: Path) -> None:
         assert invocations == [], index
 
 
+def test_wrapper_creates_commondir_as_dot_and_git_still_works(tmp_path: Path) -> None:
+    """Git reads `commondir` in any git directory and takes the config and
+    hooks from the directory it names, so a writable `.git/commondir` let the
+    agent make the host's next `git status` run its command. The file is
+    created holding `.`, which Git reads as this same directory, and mounted
+    read-only. Host Git must behave as before."""
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "--quiet", str(repo)], check=True)
+
+    _, invocations = _run(tmp_path / "a", cwd=repo)
+
+    assert (
+        f"type=bind,source={repo}/.git/commondir,"
+        "target=/workspace/.git/commondir,readonly"
+    ) in _docker_run(invocations)
+    assert (repo / ".git/commondir").read_text() == ".\n"
+    status = subprocess.run(
+        ["git", "status", "--short"],
+        cwd=repo,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert status.returncode == 0, status.stderr
+
+
+def test_wrapper_refuses_a_planted_commondir(tmp_path: Path) -> None:
+    """A `.git/commondir` naming another directory was planted, possibly by a
+    session from before the file was protected, and host Git would run the
+    commands in that directory's config. It is refused before anything runs,
+    and the file is left for the user to inspect."""
+
+    # The last three pass a check the shell can make on its own: Git uses the
+    # whole file, and the shell drops the NUL that makes Git follow `.\n`.
+    contents = (
+        "/tmp/evil\n",
+        "",
+        "../other\n",
+        ".\n\nevil",
+        ".\n\n\nevil\n",
+        ".\n\0",
+    )
+    for index, content in enumerate(contents):
+        repo = tmp_path / f"repo-{index}"
+        repo.mkdir()
+        subprocess.run(["git", "init", "--quiet", str(repo)], check=True)
+        (repo / ".git/commondir").write_text(content)
+
+        completed, invocations = _run(tmp_path / f"run-{index}", cwd=repo)
+
+        assert completed.returncode == 2, content
+        assert "commondir" in completed.stderr, content
+        assert invocations == [], content
+        assert (repo / ".git/commondir").read_text() == content
+
+
+def test_wrapper_refuses_a_non_regular_commondir(tmp_path: Path) -> None:
+    """Writing the file would block on a FIFO and Docker cannot mount a
+    directory as a file, so either is refused before the write."""
+
+    for index, make in enumerate((os.mkfifo, lambda path: path.mkdir())):
+        repo = tmp_path / f"repo-{index}"
+        repo.mkdir()
+        subprocess.run(["git", "init", "--quiet", str(repo)], check=True)
+        make(repo / ".git/commondir")
+
+        completed, invocations = _run(tmp_path / f"run-{index}", cwd=repo)
+
+        assert completed.returncode == 2, index
+        assert "not a regular file" in completed.stderr, index
+        assert invocations == [], index
+
+
 def test_wrapper_refuses_a_symlinked_git_path(tmp_path: Path) -> None:
     """Git, the `mkdir` below and the bind mounts all follow a symlink, so the
     agent can make the next launch create directories outside the project or
@@ -663,6 +741,7 @@ def test_wrapper_refuses_a_symlinked_git_path(tmp_path: Path) -> None:
             ".git/modules",
             ".git/worktrees",
             ".git/config.worktree",
+            ".git/commondir",
         )
     ):
         project = tmp_path / f"project-{index}"
@@ -751,7 +830,7 @@ def test_wrapper_keeps_a_project_path_with_a_space_in_one_mount(
     assert (
         f"type=bind,source={repo}/.git/modules,target=/workspace/.git/modules,readonly"
     ) in mounts
-    assert len(mounts) == 8
+    assert len(mounts) == 9
     assert all("target=" in mount for mount in mounts)
 
 
@@ -1694,6 +1773,22 @@ def test_image_pins_the_node_base_image_by_tag_and_digest() -> None:
     )
 
 
+def test_image_provides_fd_under_the_name_the_readme_uses() -> None:
+    """Debian's fd-find package installs `fdfind` and no `fd`, so anything in
+    the image that looks for `fd` finds nothing while the README says it is
+    there. The link is made in the existing install step, not a new layer."""
+
+    dockerfile = (ROOT / "Dockerfile.pi").read_text()
+    readme = (ROOT / "README.md").read_text()
+    install_step = dockerfile[
+        dockerfile.index("apt-get install") : dockerfile.index("rm -rf")
+    ]
+
+    assert "fd-find" in install_step
+    assert "ln -s /usr/bin/fdfind /usr/local/bin/fd" in install_step
+    assert "ripgrep and fd." in readme
+
+
 ENTRYPOINT = ROOT / "entrypoint.sh"
 
 
@@ -1710,6 +1805,7 @@ class _Entrypoint(NamedTuple):
 def _run_entrypoint(
     tmp_path: Path,
     args: tuple[str, ...] = ("--model", "kimi-k3"),
+    timeout: float | None = None,
     **env: str,
 ) -> _Entrypoint:
     """Run the entrypoint with stubs for the programs it launches."""
@@ -1756,6 +1852,7 @@ def _run_entrypoint(
         capture_output=True,
         text=True,
         env={"PATH": f"{bin_dir}:/usr/bin:/bin", "HOME": str(home), **env},
+        timeout=timeout,
     )
 
     calls = []
@@ -1975,6 +2072,27 @@ def test_the_entrypoint_survives_an_auth_file_the_agent_ruined(
 
         assert started.argv == ["--model", "kimi-k3"]
         assert json.loads(auth.read_text())["opencode-go"]["key"] == FAKE_KEY
+
+
+def test_the_entrypoint_survives_a_fifo_left_at_the_auth_file(
+    tmp_path: Path,
+) -> None:
+    """The file is the agent's own between runs. `read_text()` on a FIFO it
+    left there blocks until a writer appears, so the entrypoint would never
+    reach Pi and the project's volume would have to be deleted. It is only
+    read when it is a regular file, so the atomic replace repairs it."""
+
+    auth = tmp_path / "home/.pi/agent/auth.json"
+    auth.parent.mkdir(parents=True)
+    os.mkfifo(auth)
+
+    # The timeout is the proof that a regression cannot hang the suite: with
+    # the old unconditional read the entrypoint blocks and this raises.
+    started = _run_entrypoint(tmp_path, timeout=20, OPENCODE_GO_API_KEY=FAKE_KEY)
+
+    assert started.argv == ["--model", "kimi-k3"]
+    assert auth.is_file()
+    assert json.loads(auth.read_text())["opencode-go"]["key"] == FAKE_KEY
 
 
 def test_the_entrypoint_starts_pi_even_when_it_cannot_write_the_key(

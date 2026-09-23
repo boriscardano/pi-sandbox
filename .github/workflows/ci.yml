@@ -53,7 +53,7 @@ jobs:
           image=$(docker images --format '{{.Repository}}:{{.Tag}}' | grep -m1 '^pi-sandbox:')
           # The mounts that make the sandbox, in the same order: the project,
           # then .git over it, then its config, config.worktree, hooks,
-          # worktrees and modules read-only. `--entrypoint sh` skips the
+          # worktrees, modules and commondir read-only. `--entrypoint sh` skips the
           # entrypoint, which would exec Pi.
           docker run --rm --entrypoint sh \
             --mount "type=bind,source=/tmp/proj,target=/workspace" \
@@ -63,6 +63,7 @@ jobs:
             --mount "type=bind,source=/tmp/proj/.git/hooks,target=/workspace/.git/hooks,readonly" \
             --mount "type=bind,source=/tmp/proj/.git/worktrees,target=/workspace/.git/worktrees,readonly" \
             --mount "type=bind,source=/tmp/proj/.git/modules,target=/workspace/.git/modules,readonly" \
+            --mount "type=bind,source=/tmp/proj/.git/commondir,target=/workspace/.git/commondir,readonly" \
             "$image" -c '
               set -eu
               touch /workspace/pi-sandbox-write-test
@@ -81,6 +82,10 @@ jobs:
               fi
               if printf x >> /workspace/.git/modules/x 2>/dev/null; then
                 echo ".git/modules is writable, the sandbox is broken" >&2
+                exit 1
+              fi
+              if printf x >> /workspace/.git/commondir 2>/dev/null; then
+                echo ".git/commondir is writable, the sandbox is broken" >&2
                 exit 1
               fi
             '

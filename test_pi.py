@@ -37,7 +37,6 @@ case "$1" in
                     printf '%s\\n' "${PI_SANDBOX_FAKE_LABEL:-}"
                     exit 0
                 fi
-                exit 0
                 ;;
             prune) exit 0 ;;
         esac

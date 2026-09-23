@@ -13,6 +13,10 @@ Notes for agents and contributors changing this repo, from the security work on
   redirection, planted rebase todos. Git reads `.git/commondir` in a plain
   repository too, not only in a worktree, and a planted one made host
   `git status` run a command (2026-09-23), so it is mounted read-only too.
+  Its content check was bypassed twice in review (`.\n\nevil`, then
+  `.\n\0`, since the shell drops NUL bytes and Git does not). The two-byte
+  limit was then checked against every file of one or two bytes: only four
+  pass, and host Git resolves all four to the repository's own `.git`.
   A hard link cannot get around these read-only file mounts: `ln` from one to
   the writable project fails with `Invalid cross-device link` (checked on
   Docker Desktop, 2026-09-23).

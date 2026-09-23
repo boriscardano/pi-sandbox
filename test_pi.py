@@ -1760,9 +1760,9 @@ def test_image_pins_uv_to_a_digest_instead_of_piping_install_sh() -> None:
 
 
 def test_image_pins_the_node_base_image_by_tag_and_digest() -> None:
-    """A digest with no tag gives Dependabot no version to compare, so it
-    never proposes an update. The tag in front of the same digest keeps the
-    pin and lets the version move."""
+    """The digest keeps the build on the image it was reviewed at, and the tag
+    in front of it says which version that is, so the two can be bumped
+    together."""
 
     dockerfile = (ROOT / "Dockerfile.pi").read_text()
 

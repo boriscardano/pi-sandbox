@@ -124,21 +124,34 @@ esac
 # was reproduced: the next launch mounted the target read-write and the agent
 # read a host key from it. Refuse one rather than follow it, before the image
 # build and every mount, and whether or not this is a repository.
-for link in .git .git/config .git/hooks .git/modules .git/worktrees .git/config.worktree; do
+for link in .git .git/config .git/hooks .git/modules .git/worktrees .git/config.worktree .git/commondir; do
     if [ -L "$project/$link" ]; then
         printf '%s\n' "refusing to run: $project/$link is a symlink, which Git and this script would follow outside the project, so inspect and remove it" >&2
         exit 2
     fi
 done
 
-# `.git/config.worktree` is created with `: >` below and then bind-mounted as
-# a file. `set -C` does not save that write from a FIFO, which dash opens and
-# blocks on waiting for a reader, and Docker cannot mount a directory or a
-# socket as a file either, so refuse anything there that is not an ordinary
-# file. A symlink was caught above, and `[ -e ]` follows one, so a dangling
-# link cannot slip past this.
-if [ -e "$project/.git/config.worktree" ] && [ ! -f "$project/.git/config.worktree" ]; then
-    printf '%s\n' "refusing to run: $project/.git/config.worktree is not a regular file, which this script would create or mount as one, so inspect and remove it" >&2
+# `.git/config.worktree` and `.git/commondir` are created below when missing
+# and then bind-mounted as files. `set -C` does not save that write from a
+# FIFO, which dash opens and blocks on waiting for a reader, and Docker cannot
+# mount a directory or a socket as a file either, so refuse anything there
+# that is not an ordinary file. A symlink was caught above, and `[ -e ]`
+# follows one, so a dangling link cannot slip past this.
+for file in .git/config.worktree .git/commondir; do
+    if [ -e "$project/$file" ] && [ ! -f "$project/$file" ]; then
+        printf '%s\n' "refusing to run: $project/$file is not a regular file, which this script would create or mount as one, so inspect and remove it" >&2
+        exit 2
+    fi
+done
+
+# Git reads `commondir` in any git directory, not only a linked worktree's,
+# and takes the config and hooks from the directory it names, so a
+# `.git/commondir` the agent wrote makes the host's next `git status` run a
+# command from a config it controls (reproduced 2026-09-23). A repository's
+# own `.git` never has one, and the one this script creates holds `.`, so
+# anything else was planted, possibly by a session from before this check.
+if [ -f "$project/.git/commondir" ] && [ "$(cat "$project/.git/commondir")" != . ]; then
+    printf '%s\n' "refusing to run: $project/.git/commondir redirects Git to another directory's config and hooks, which your host git would run, so inspect and remove it" >&2
     exit 2
 fi
 
@@ -370,6 +383,13 @@ if [ -d "$project/.git" ]; then
     # missing directory cannot be left for the agent to fill: the protected
     # `.git` is pruned at exit, so nothing there would be reported.
     mkdir -p "$project/.git/modules"
+    # Created holding `.`, which names this directory as its own common
+    # directory, so Git behaves exactly as without the file, and mounted
+    # read-only so the agent cannot point it elsewhere. An empty file would
+    # make Git refuse the repository. `set -C` keeps an existing one, which
+    # was checked above.
+    (set -C; printf '.\n' > "$project/.git/commondir") 2>/dev/null || true
+    set -- --mount "type=bind,source=$project/.git/commondir,target=/workspace/.git/commondir,readonly" "$@"
     set -- --mount "type=bind,source=$project/.git/modules,target=/workspace/.git/modules,readonly" "$@"
     set -- --mount "type=bind,source=$project/.git/worktrees,target=/workspace/.git/worktrees,readonly" "$@"
     set -- --mount "type=bind,source=$project/.git/hooks,target=/workspace/.git/hooks,readonly" "$@"

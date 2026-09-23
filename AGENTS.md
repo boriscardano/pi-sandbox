@@ -10,7 +10,9 @@ Notes for agents and contributors changing this repo, from the security work on
   command (`config`, `config.worktree`, `hooks`, `modules`,
   `worktrees/*/commondir`) must be read-only in the container or reported at
   exit. Found this way: renaming `.git` away, nested repos, `commondir`
-  redirection, planted rebase todos.
+  redirection, planted rebase todos. Git reads `.git/commondir` in a plain
+  repository too, not only in a worktree, and a planted one made host
+  `git status` run a command (2026-09-23), so it is mounted read-only too.
 - Never follow a project path the agent could have planted. Symlinks at the
   mounted `.git` paths are refused, because a planted `.git` symlink made a
   later launch mount a host directory read-write (round 3).

@@ -97,7 +97,7 @@ Mounted:
 - inside a Git repository, `.git` itself is bind-mounted over the project, so
   it cannot be renamed away, and the parts of it that can name a command are
   then mounted read-only inside it: `.git/config`, `.git/config.worktree`,
-  `.git/hooks`, `.git/worktrees` and `.git/modules`.
+  `.git/hooks`, `.git/worktrees`, `.git/modules` and `.git/commondir`.
 
 Not mounted, and unreachable: your home directory, `~/.ssh`, `~/.aws`,
 `~/.config`, the system keychain, every other project, the Docker socket, your
@@ -258,12 +258,16 @@ The bind mounts listed above are what protect this. The hooks, worktrees and
 modules directories are created first if they are missing, and so is the
 worktree config, as an empty file. Git ignores an empty `.git/config.worktree`
 while `extensions.worktreeConfig` is off, which is the default, so creating it
-changes nothing for the host, and an existing one is left untouched. A symlink
-at `.git` or at any of the five read-only paths is refused before the wrapper
-creates or mounts anything, because Git, the mount and the `mkdir` would all
-follow it outside the project. A `.git/config.worktree` that is not an ordinary
-file, such as a FIFO, is refused for the same reason, since creating or
-mounting it as a file would block or fail. Git runs commands named in those
+changes nothing for the host, and an existing one is left untouched. Git reads
+`.git/commondir` in any repository and takes its config and hooks from the
+directory it names, so the wrapper creates it holding `.`, which names the same
+directory and leaves Git behaving as before, and refuses to run when one names
+anything else. A symlink at `.git` or at any of the six read-only paths is
+refused before the wrapper creates or mounts anything, because Git, the mount
+and the `mkdir` would all follow it outside the project. A
+`.git/config.worktree` or `.git/commondir` that is not an ordinary file, such
+as a FIFO, is refused for the same reason, since creating or mounting it as a
+file would block or fail. Git runs commands named in those
 places, through `core.fsmonitor`, `core.pager`, `core.hooksPath` and
 `filter.<name>.clean`, so leaving them writable would let the agent leave a
 command behind that you run yourself with the next `git status`. A linked

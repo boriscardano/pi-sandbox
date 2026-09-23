@@ -437,11 +437,15 @@ def test_wrapper_mounts_git_config_and_hooks_read_only(tmp_path: Path) -> None:
     assert mounts[6] == (
         f"type=bind,source={repo}/.git/modules,target=/workspace/.git/modules,readonly"
     )
+    assert mounts[7] == (
+        f"type=bind,source={repo}/.git/commondir,"
+        "target=/workspace/.git/commondir,readonly"
+    )
     # A fresh repository has no modules, they are created empty, and the
     # state volume is still last.
-    assert len(mounts) == 8
-    assert mounts[7].startswith("type=volume,source=pi-sandbox-")
-    assert mounts[7].endswith(",target=/home/agent")
+    assert len(mounts) == 9
+    assert mounts[8].startswith("type=volume,source=pi-sandbox-")
+    assert mounts[8].endswith(",target=/home/agent")
 
 
 def test_wrapper_mounts_git_worktrees_read_only(tmp_path: Path) -> None:
@@ -648,6 +652,67 @@ def test_wrapper_refuses_a_non_regular_config_worktree(tmp_path: Path) -> None:
         assert invocations == [], index
 
 
+def test_wrapper_creates_commondir_as_dot_and_git_still_works(tmp_path: Path) -> None:
+    """Git reads `commondir` in any git directory and takes the config and
+    hooks from the directory it names, so a writable `.git/commondir` let the
+    agent make the host's next `git status` run its command. The file is
+    created holding `.`, which Git reads as this same directory, and mounted
+    read-only. Host Git must behave as before."""
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "--quiet", str(repo)], check=True)
+
+    _, invocations = _run(tmp_path / "a", cwd=repo)
+
+    assert (
+        f"type=bind,source={repo}/.git/commondir,"
+        "target=/workspace/.git/commondir,readonly"
+    ) in _docker_run(invocations)
+    assert (repo / ".git/commondir").read_text() == ".\n"
+    status = subprocess.run(
+        ["git", "status", "--short"], cwd=repo, capture_output=True, text=True
+    )
+    assert status.returncode == 0, status.stderr
+
+
+def test_wrapper_refuses_a_planted_commondir(tmp_path: Path) -> None:
+    """A `.git/commondir` naming another directory was planted, possibly by a
+    session from before the file was protected, and host Git would run the
+    commands in that directory's config. It is refused before anything runs,
+    and the file is left for the user to inspect."""
+
+    for index, content in enumerate(("/tmp/evil\n", "", "../other\n")):
+        repo = tmp_path / f"repo-{index}"
+        repo.mkdir()
+        subprocess.run(["git", "init", "--quiet", str(repo)], check=True)
+        (repo / ".git/commondir").write_text(content)
+
+        completed, invocations = _run(tmp_path / f"run-{index}", cwd=repo)
+
+        assert completed.returncode == 2, content
+        assert "commondir" in completed.stderr, content
+        assert invocations == [], content
+        assert (repo / ".git/commondir").read_text() == content
+
+
+def test_wrapper_refuses_a_non_regular_commondir(tmp_path: Path) -> None:
+    """Writing the file would block on a FIFO and Docker cannot mount a
+    directory as a file, so either is refused before the write."""
+
+    for index, make in enumerate((os.mkfifo, lambda path: path.mkdir())):
+        repo = tmp_path / f"repo-{index}"
+        repo.mkdir()
+        subprocess.run(["git", "init", "--quiet", str(repo)], check=True)
+        make(repo / ".git/commondir")
+
+        completed, invocations = _run(tmp_path / f"run-{index}", cwd=repo)
+
+        assert completed.returncode == 2, index
+        assert "not a regular file" in completed.stderr, index
+        assert invocations == [], index
+
+
 def test_wrapper_refuses_a_symlinked_git_path(tmp_path: Path) -> None:
     """Git, the `mkdir` below and the bind mounts all follow a symlink, so the
     agent can make the next launch create directories outside the project or
@@ -663,6 +728,7 @@ def test_wrapper_refuses_a_symlinked_git_path(tmp_path: Path) -> None:
             ".git/modules",
             ".git/worktrees",
             ".git/config.worktree",
+            ".git/commondir",
         )
     ):
         project = tmp_path / f"project-{index}"
@@ -751,7 +817,7 @@ def test_wrapper_keeps_a_project_path_with_a_space_in_one_mount(
     assert (
         f"type=bind,source={repo}/.git/modules,target=/workspace/.git/modules,readonly"
     ) in mounts
-    assert len(mounts) == 8
+    assert len(mounts) == 9
     assert all("target=" in mount for mount in mounts)
 
 

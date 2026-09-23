@@ -1760,6 +1760,22 @@ def test_image_pins_the_node_base_image_by_tag_and_digest() -> None:
     )
 
 
+def test_image_provides_fd_under_the_name_the_readme_uses() -> None:
+    """Debian's fd-find package installs `fdfind` and no `fd`, so anything in
+    the image that looks for `fd` finds nothing while the README says it is
+    there. The link is made in the existing install step, not a new layer."""
+
+    dockerfile = (ROOT / "Dockerfile.pi").read_text()
+    readme = (ROOT / "README.md").read_text()
+    install_step = dockerfile[
+        dockerfile.index("apt-get install") : dockerfile.index("rm -rf")
+    ]
+
+    assert "fd-find" in install_step
+    assert "ln -s /usr/bin/fdfind /usr/local/bin/fd" in install_step
+    assert "ripgrep and fd" in readme
+
+
 ENTRYPOINT = ROOT / "entrypoint.sh"
 
 

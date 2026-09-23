@@ -23,6 +23,7 @@ RUN apt-get update \
         python3 \
         python3-venv \
         ripgrep \
+    && ln -s /usr/bin/fdfind /usr/local/bin/fd \
     && rm -rf /var/lib/apt/lists/*
 
 # The wrapper passes the Pi version it looked up, and there is no default, so

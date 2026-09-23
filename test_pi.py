@@ -1792,6 +1792,7 @@ class _Entrypoint(NamedTuple):
 def _run_entrypoint(
     tmp_path: Path,
     args: tuple[str, ...] = ("--model", "kimi-k3"),
+    timeout: float | None = None,
     **env: str,
 ) -> _Entrypoint:
     """Run the entrypoint with stubs for the programs it launches."""
@@ -1838,6 +1839,7 @@ def _run_entrypoint(
         capture_output=True,
         text=True,
         env={"PATH": f"{bin_dir}:/usr/bin:/bin", "HOME": str(home), **env},
+        timeout=timeout,
     )
 
     calls = []
@@ -2057,6 +2059,27 @@ def test_the_entrypoint_survives_an_auth_file_the_agent_ruined(
 
         assert started.argv == ["--model", "kimi-k3"]
         assert json.loads(auth.read_text())["opencode-go"]["key"] == FAKE_KEY
+
+
+def test_the_entrypoint_survives_a_fifo_left_at_the_auth_file(
+    tmp_path: Path,
+) -> None:
+    """The file is the agent's own between runs. `read_text()` on a FIFO it
+    left there blocks until a writer appears, so the entrypoint would never
+    reach Pi and the project's volume would have to be deleted. It is only
+    read when it is a regular file, so the atomic replace repairs it."""
+
+    auth = tmp_path / "home/.pi/agent/auth.json"
+    auth.parent.mkdir(parents=True)
+    os.mkfifo(auth)
+
+    # The timeout is the proof that a regression cannot hang the suite: with
+    # the old unconditional read the entrypoint blocks and this raises.
+    started = _run_entrypoint(tmp_path, timeout=20, OPENCODE_GO_API_KEY=FAKE_KEY)
+
+    assert started.argv == ["--model", "kimi-k3"]
+    assert auth.is_file()
+    assert json.loads(auth.read_text())["opencode-go"]["key"] == FAKE_KEY
 
 
 def test_the_entrypoint_starts_pi_even_when_it_cannot_write_the_key(

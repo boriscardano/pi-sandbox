@@ -3,6 +3,16 @@
 Notes for agents and contributors changing this repo, from the security work on
 `open-source-readiness` (2026-09-21).
 
+## Testing
+
+- Never write unit tests after the code. If a component must be tested in isolation, FIRST write down every way it could fail, THEN write the code.
+- Prefer end-to-end tests as the only testing mechanism, and use them to prove complex features work. Every E2E run ends by producing a verifiable, repeatable artifact (a report, screenshot, log or output file that can be regenerated and checked).
+- For E2E verification, do not pick the simplest scenario that could pass. Pick a medium-to-hard one.
+- Tautological tests (they restate the implementation or only exercise their own mocks) and change-detector tests (they fail on any refactor with no behavior change) are harmful. Do not write them. When adding tests, check that none are tautological or self-testing.
+- Do not add a regression test for a bug fix unless it closes a real gap in behavior testing.
+
+## Security notes
+
 - Threat model: everything under the mounted project, `.git` included, is
   attacker-controlled on the next launch and to host tools.
 - Host git trusts files the container writes, because Docker Desktop maps

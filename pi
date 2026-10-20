@@ -436,18 +436,19 @@ marker=$(mktemp)
 # next launch, which removes it below.
 #
 # The name is the project's tag, where this wrapper runs and its pid. A pid
-# means something only where it was read, so where it runs, the host, its
-# machine id on Linux, the user and the pid namespace, is hashed into the
-# name. Every removal by name then only reaches containers started from here:
-# another user, a WSL distro, a devcontainer or a second machine on the same
-# daemon has its own.
+# means something only where it was read, so where it runs, the machine, the
+# user and the pid namespace, is hashed into the name. Every removal by name
+# then only reaches containers started from here: another user, a container
+# or a second machine on the same daemon has its own. The machine is its id,
+# Linux's machine-id or macOS's kern.uuid, since a Mac's host name changes
+# from one network to the next and would strand a container left before the
+# change. The host name stands in only where neither id exists.
 origin=$(
     {
-        uname -n
-        cat /etc/machine-id 2>/dev/null || true
+        cat /etc/machine-id 2>/dev/null || sysctl -n kern.uuid 2>/dev/null || uname -n
         id -u
         readlink /proc/self/ns/pid 2>/dev/null || true
-    } | "$hash_cmd" | cut -c1-6
+    } | "$hash_cmd" | cut -c1-12
 )
 name=pi-sandbox-$project_tag-$origin-$$
 # A dead session can have left a container under this launch's pid, which

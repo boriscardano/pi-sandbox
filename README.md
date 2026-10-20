@@ -101,13 +101,13 @@ Docker. The watcher is in the wrapper's process group, so a SIGKILL to the
 whole group takes it too and leaves the container running until the next
 launch, in any project: where `ps` works, every launch removes the
 pi-sandbox containers whose wrapper, named by the process id at the end of the
-container's name, no longer runs. Where the wrapper runs, a hash of the host
-name, the Linux machine id, the user and the process namespace, is part of
-the name, and only containers from the same place are removed by name, so a
-session started by another user, a WSL distro, a devcontainer or another
-machine on the same Docker daemon is not taken for a dead one. Two Macs with
-the same host name and user on one remote daemon look alike, since macOS has
-no machine id to tell them apart.
+container's name, no longer runs. Where the wrapper runs, a hash of the
+machine's id (Linux's machine-id, macOS's kern.uuid), the user and the process
+namespace, is part of the name, and only containers from the same place are
+removed by name. So a session started by another user, from a container with
+its own process namespace, or on another machine using the same Docker daemon
+is not taken for a dead one. WSL distros are told apart only by their process
+namespaces, which has not been checked on WSL.
 
 ## What the container can and cannot see
 

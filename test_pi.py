@@ -1289,6 +1289,17 @@ def test_wrapper_removes_containers_whose_wrapper_is_gone(tmp_path: Path) -> Non
     assert commands.index("rm") < commands.index("run")
 
 
+def test_wrapper_names_another_user_apart(tmp_path: Path) -> None:
+    """Two users on one host share the daemon and can each be hidden from the
+    other's `ps`, so the user is part of where a wrapper runs."""
+
+    def origin(uid: str) -> str:
+        _, invocations = _run(tmp_path / uid, fake_id=(uid, "1000"))
+        return _container_name(invocations).split("-")[3]
+
+    assert origin("1000") != origin("1001")
+
+
 def test_wrapper_clears_its_own_name_before_running(tmp_path: Path) -> None:
     """A container a dead session left under a pid this launch now has would
     make `docker run --name` fail. Only this origin's sessions use the name,

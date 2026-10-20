@@ -284,7 +284,10 @@ def unshared_pi_installs() -> set[str]:
     return {
         line.split()[0]
         for line in lines
-        if PI_INSTALL_STEP in line and line.split()[0].isalnum()
+        # The same guard as the wrapper's, before an id reaches a filter.
+        if PI_INSTALL_STEP in line
+        and line.split()[0].isalnum()
+        and len(line.split()[0]) >= 20
     }
 
 
@@ -344,7 +347,11 @@ def throwaway_project() -> Iterator[Path]:
         for pid in orphaned_clients(project):
             kill(pid)
         for _ in range(10):
-            container = find_container(project)
+            # Best effort, so a docker hiccup here still lets the volume and
+            # the directory go.
+            container = ""
+            with contextlib.suppress(subprocess.CalledProcessError):
+                container = find_container(project)
             if not container:
                 break
             docker("rm", "-f", container)
@@ -437,9 +444,7 @@ def checks(lines: list[str]) -> bool:
             + [str(WRAPPER.parent)],
             check=True,
         )
-        older = ("images", "-q", "--filter", f"label=pi-sandbox.version={OLDER_PI}")
-        if not docker(*older, check=True):
-            raise RuntimeError(f"no image of Pi {OLDER_PI} after building one")
+        older = docker("image", "inspect", "--format", "{{.Id}}", image, check=True)
         quit_pi(start(project))
         version = docker(
             "image",
@@ -449,7 +454,7 @@ def checks(lines: list[str]) -> bool:
             image,
             check=True,
         )
-        kept = bool(docker(*older, check=True))
+        kept = bool(docker("image", "inspect", "--format", "{{.Id}}", older))
         left = unshared_pi_installs() - stale
         lines.append("")
         lines.append(

@@ -435,32 +435,33 @@ marker=$(mktemp)
 # SIGKILL to the whole group, which cannot be trapped, takes it too and leaves
 # the container running until the next launch, which removes it below.
 name=pi-sandbox-$project_tag-$$
-wrapper_pid=$$
 # Remove every pi-sandbox container whose wrapper, the pid at the end of its
-# name, no longer runs on this host. `ps -p` sees another user's process too,
-# where `kill -0` is refused and would read as gone. A reused pid can only
-# keep a dead session's container, never remove a live one, and a container
-# named any other way is left alone.
-for stale in $(docker ps -a --filter label=pi-sandbox=1 --format '{{.Names}}' 2>/dev/null); do
-    case "${stale##*-}" in
-        '' | *[!0-9]*) continue ;;
-    esac
-    case "$stale" in
-        pi-sandbox-*-*) ;;
-        *) continue ;;
-    esac
-    if ! ps -p "${stale##*-}" >/dev/null 2>&1; then
-        docker rm -f "$stale" >/dev/null 2>&1 || true
-    fi
-done
+# name, no longer runs. A pid means something only where it was read, so each
+# container carries where its wrapper ran, this host, user and pid namespace,
+# and only those are swept: another user, a WSL distro, a devcontainer or a
+# second machine on the same daemon has wrappers this `ps` cannot see. A `ps`
+# that cannot see this wrapper either would call every session gone, so then
+# nothing is swept. A reused pid can only keep a dead session's container,
+# except our own name, which no live session can hold.
+origin=$(uname -n)-$(id -u)-$(readlink /proc/self/ns/pid 2>/dev/null || true)
+if ps -p $$ >/dev/null 2>&1; then
+    for stale in $(docker ps -a --filter label=pi-sandbox=1 --filter "label=pi-sandbox.host=$origin" --format '{{.Names}}' 2>/dev/null); do
+        case "${stale##*-}" in
+            '' | *[!0-9]*) continue ;;
+        esac
+        if [ "$stale" = "$name" ] || ! ps -p "${stale##*-}" >/dev/null 2>&1; then
+            docker rm -f "$stale" >/dev/null 2>&1 || true
+        fi
+    done
+fi
 (
     trap '' HUP INT TERM
-    while kill -0 "$wrapper_pid" 2>/dev/null; do
+    while kill -0 $$ 2>/dev/null; do
         sleep 1
     done
-    docker rm -f "$name"
+    docker rm -f "$name" || true
     sleep 5
-    docker rm -f "$name"
+    docker rm -f "$name" || true
 ) </dev/null >/dev/null 2>&1 &
 watcher=$!
 
@@ -472,6 +473,7 @@ docker run \
     --name "$name" \
     $tty_flags \
     --label pi-sandbox=1 \
+    --label "pi-sandbox.host=$origin" \
     --hostname pi-sandbox \
     --workdir /workspace \
     --cap-drop ALL \

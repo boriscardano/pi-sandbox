@@ -100,7 +100,11 @@ wrapper. `e2e.py` checks every one of those paths on real Docker. The watcher
 is in the wrapper's process group, so a SIGKILL to the whole group takes it
 too and leaves the container running until the next launch, in any project:
 every launch removes the pi-sandbox containers whose wrapper, named by the
-process id at the end of the container's name, no longer runs.
+process id at the end of the container's name, no longer runs. It only looks
+at containers started from the same host, user and process namespace, which
+each container carries as a label, so a session started by another user, a WSL
+distro, a devcontainer or another machine on the same Docker daemon is never
+taken for a dead one.
 
 ## What the container can and cannot see
 

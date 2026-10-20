@@ -24,14 +24,17 @@ set -eu
 # file, which lost the key for some of twelve concurrent starts. The agent in
 # another session can hold that lock for good, so `timeout` bounds the wait,
 # and O_DIRECTORY refuses a FIFO swapped in for the directory rather than
-# blocking on it.
+# blocking on it. `-I` keeps Python from importing a module the agent left in
+# /workspace, the working directory, before Pi has even started. Both bounded
+# steps read nothing, so their stdin is /dev/null rather than the terminal,
+# which `timeout` puts them in the background of.
 #
 # The whole thing is best effort. Pi is what this container is for, and a home
 # directory the agent has ruined must cost it the subscription key, not the
 # session: `set -e` would otherwise turn `mkdir ~/.pi/agent/auth.json` into a
 # sandbox that never starts again until the volume is deleted.
 if [ -n "${OPENCODE_GO_API_KEY:-}" ] && ! (
-    mkdir -p "$HOME/.pi/agent" && timeout 10 python3 -c 'import fcntl, json, os, pathlib
+    mkdir -p "$HOME/.pi/agent" && timeout 10 python3 -I -c 'import fcntl, json, os, pathlib
 
 directory = pathlib.Path(os.environ["HOME"]) / ".pi/agent"
 fcntl.flock(os.open(directory, os.O_RDONLY | os.O_DIRECTORY), fcntl.LOCK_EX)
@@ -50,7 +53,7 @@ pending.unlink(missing_ok=True)
 with os.fdopen(os.open(pending, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "w") as f:
     json.dump(auth, f, indent=2)
 os.replace(pending, path)
-'
+' </dev/null
 ); then
     printf '%s\n' "pi-sandbox: could not write the subscription key to auth.json" >&2
 fi
@@ -102,7 +105,7 @@ case "${1:-}" in
                 done
                 pi update --extensions || failed=1
                 exit "$failed"
-            ' sh $packages >/dev/null 2>&1; then
+            ' sh $packages </dev/null >/dev/null 2>&1; then
                 touch "$stamp" 2>/dev/null || true
             else
                 printf '%s\n' "pi-sandbox: could not update the extensions" >&2

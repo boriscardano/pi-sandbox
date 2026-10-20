@@ -1,5 +1,7 @@
 """Verify that the host Pi sandbox wrapper builds an isolating docker run."""
 
+from __future__ import annotations
+
 import fcntl
 import json
 import os
@@ -132,7 +134,8 @@ def _run(
     containers: str = "",
 ) -> tuple[subprocess.CompletedProcess[str], list[list[str]]]:
     bin_dir = tmp_path / "fakebin"
-    bin_dir.mkdir(parents=True)
+    # A test can put a fake of its own here first.
+    bin_dir.mkdir(parents=True, exist_ok=True)
     docker = bin_dir / "docker"
     docker.write_text(FAKE_DOCKER)
     docker.chmod(0o755)
@@ -1269,6 +1272,42 @@ def test_wrapper_removes_containers_whose_wrapper_is_gone(tmp_path: Path) -> Non
     assert commands.index("rm") < commands.index("run")
 
 
+def test_wrapper_sweeps_only_containers_started_from_this_host(
+    tmp_path: Path,
+) -> None:
+    """A pid means something only where it was read. Another user, a WSL
+    distro, a devcontainer or a second machine on the same daemon has wrappers
+    this host's `ps` cannot see, so their live containers are not swept: each
+    container carries the identity of where its wrapper ran, and the sweep
+    lists only this one's."""
+
+    _, invocations = _run(tmp_path)
+    listing = next(argv for argv in invocations if argv[0] == "ps")
+    run = _docker_run(invocations)
+    labels = [run[i + 1] for i, arg in enumerate(run) if arg == "--label"]
+    origin = next(label for label in labels if label.startswith("pi-sandbox.host="))
+
+    assert f"label={origin}" in listing
+    assert str(os.getuid()) in origin
+
+
+def test_wrapper_does_not_sweep_when_ps_cannot_see_processes(
+    tmp_path: Path,
+) -> None:
+    """A `ps` that is missing, or cannot see processes at all, would make
+    every wrapper look gone and remove every live session."""
+
+    gone = subprocess.Popen(["true"])
+    gone.wait()
+    fake = tmp_path / "fakebin"
+    fake.mkdir()
+    (fake / "ps").write_text("#!/bin/sh\nexit 1\n")
+    (fake / "ps").chmod(0o755)
+    _, invocations = _run(tmp_path, containers=f"pi-sandbox-0a1b2c3d-{gone.pid}\n")
+
+    assert f"pi-sandbox-0a1b2c3d-{gone.pid}" not in _removals(invocations)
+
+
 def test_wrapper_names_each_container_apart(tmp_path: Path) -> None:
     """Two sessions in one project run at once, so a name shared between them
     would make one session's exit remove the other's container."""
@@ -2117,8 +2156,9 @@ def test_the_entrypoint_survives_a_fifo_left_at_the_auth_file(
     auth.parent.mkdir(parents=True)
     os.mkfifo(auth)
 
-    # The timeout is the proof that a regression cannot hang the suite: with
-    # the old unconditional read the entrypoint blocks and this raises.
+    # With the old unconditional read the write blocks until the entrypoint's
+    # own 10 second bound ends it, and the key is not written, which the
+    # asserts below catch. The timeout here only keeps the suite from hanging.
     started = _run_entrypoint(tmp_path, timeout=20, OPENCODE_GO_API_KEY=FAKE_KEY)
 
     assert started.argv == ["--model", "kimi-k3"]

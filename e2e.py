@@ -12,7 +12,10 @@ starts its interface and waits for input.
     python3 e2e.py --storage [report-file]
 
 `--storage` runs 30 sessions in turn and then 10 at once in one project and
-checks that what pi-sandbox keeps on disk stays flat. The report is printed and
+checks that pi-sandbox keeps its image and no new unused build cache. It also
+reports the state volume's size. Both modes retag or remove this checkout's
+image, so the next real launch rebuilds it, and they count build cache across
+the whole host, so run them without other sessions building. The report is printed and
 written to the file (default e2e-report.txt or e2e-storage.txt).
 """
 
@@ -27,6 +30,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import traceback
 from collections.abc import Callable, Iterator
 from pathlib import Path
 
@@ -82,6 +86,9 @@ def children(parent: int, name: str = "") -> list[str]:
 
 # Every session not yet ended, so a failed run still closes them all.
 OPEN_SESSIONS: list["Session"] = []
+# Its write end is held only by this script, so a read of it returns when the
+# script dies, however it dies.
+SCRIPT_ALIVE, _SCRIPT_ALIVE_WRITE = os.pipe()
 
 
 class Session:
@@ -100,7 +107,8 @@ class Session:
                 # A forked copy keeps every other session's terminal open,
                 # and a process exiting with unread output on one waits for
                 # it forever.
-                os.closerange(3, 1024)
+                os.closerange(3, SCRIPT_ALIVE)
+                os.closerange(SCRIPT_ALIVE + 1, 1024)
                 job = os.fork()
                 if job == 0:
                     try:
@@ -109,6 +117,8 @@ class Session:
                         os.tcsetpgrp(0, os.getpgrp())
                         signal.signal(signal.SIGTTOU, signal.SIG_DFL)
                         os.chdir(project)
+                        # Python ignores SIGPIPE, and a shell would not.
+                        signal.signal(signal.SIGPIPE, signal.SIG_DFL)
                         os.execv(
                             WRAPPER,
                             [str(WRAPPER), "--provider", "opencode", "--model", "x"],
@@ -117,13 +127,15 @@ class Session:
                         os._exit(127)
                 os.waitpid(job, 0)
                 # A shell outlives its job, and its exit would hang up
-                # whatever the job left in the foreground group.
-                time.sleep(3600)
+                # whatever the job left in the foreground group. It goes when
+                # the script does, so a killed run leaves nothing running.
+                os.read(SCRIPT_ALIVE, 1)
             finally:
                 os._exit(0)
         self.output = b""
         self.container = ""
         self.pid = 0
+        self.started = time.time()
         OPEN_SESSIONS.append(self)
 
     def read(self, seconds: float) -> None:
@@ -187,6 +199,8 @@ def wait_ready(sessions: list[Session]) -> None:
                 raise TimeoutError(f"Pi did not start:\n{tail}")
             if not session.pid:
                 session.pid = int((children(session.shell) or ["0"])[0])
+                if not session.pid and time.time() - session.started > 10:
+                    raise RuntimeError(f"the wrapper exited at once:\n{tail}")
             elif not session.alive():
                 raise RuntimeError(f"the wrapper exited before Pi started:\n{tail}")
             elif b"/workspace (" in session.output:
@@ -277,9 +291,22 @@ def start(project: Path) -> Session:
     return session
 
 
+def wrapper_finished(session: Session) -> bool:
+    """Whether the wrapper exits within the timeout. Its cleanup after the
+    container goes, the exit checks and the image and cache removal, must not
+    be cut short by the pane closing under it."""
+
+    end = time.time() + GONE_TIMEOUT
+    while session.alive():
+        if time.time() > end:
+            return False
+        session.read(0.5)
+    return True
+
+
 def quit_pi(session: Session) -> None:
     session.type(b"/quit\r")
-    session.read(5)
+    wrapper_finished(session)
     session.end()
 
 
@@ -302,6 +329,7 @@ def throwaway_project() -> Iterator[Path]:
             if not container:
                 break
             docker("rm", "-f", container)
+            time.sleep(1)
         for volume in docker(
             "volume", "ls", "-q", "--filter", f"name=pi-sandbox-{project.name}-"
         ).split():
@@ -346,13 +374,16 @@ def checks(lines: list[str]) -> bool:
                 stale = find_container(project)
                 session.end()
                 session = start(project)
-                if stale not in docker("ps", "-aq", "--no-trunc"):
+                gone = subprocess.run(
+                    ["docker", "inspect", stale], capture_output=True, check=False
+                )
+                if b"No such" in gone.stderr:
                     left = "none"
                     name = f"{name}, then a new launch"
                 quit_pi(session)
             # A wrapper still running means the session never ended, which is
             # a failure of its own rather than a container left behind.
-            if session.alive():
+            if not wrapper_finished(session):
                 left = f"session did not end, container {left}"
             orphans = orphaned_clients(project)
             for pid in orphans:
@@ -367,30 +398,42 @@ def checks(lines: list[str]) -> bool:
             failed |= left != "none" or bool(orphans)
 
         # The tag now holds an image of an older Pi, as if npm had moved on
-        # since it was built, so the next launch rebuilds it.
+        # since it was built, so the next launch rebuilds it. Unused Pi
+        # install cache an earlier run left is pruned first, so the build
+        # cannot reuse it and hide a prune that no longer works. Records of
+        # the old layer order cannot be pruned on their own, and are set aside.
+        for record in unshared_pi_installs():
+            docker("builder", "prune", "-f", "--filter", f"id={record}")
         stale = unshared_pi_installs()
         ids = []
         if sys.platform.startswith("linux"):
             ids = [f"--build-arg=AGENT_UID={os.getuid()}"]
             ids += [f"--build-arg=AGENT_GID={os.getgid()}"]
-        subprocess.run(
+        older = subprocess.run(
             ["docker", "build", "-q", "--file", str(WRAPPER.parent / "Dockerfile.pi")]
             + ids
             + ["--build-arg", f"PI_VERSION={OLDER_PI}", "--tag", image]
             + [str(WRAPPER.parent)],
             check=True,
             capture_output=True,
+            text=True,
+        ).stdout.strip()
+        quit_pi(start(project))
+        version = docker(
+            "image",
+            "inspect",
+            "--format",
+            '{{index .Config.Labels "pi-sandbox.version"}}',
+            image,
         )
-        session = start(project)
-        rebuilt = b"rebuilding" in session.output
-        quit_pi(session)
+        kept = older in docker("images", "-q", "--no-trunc")
         left = unshared_pi_installs() - stale
         lines.append("")
         lines.append(
-            f"a new Pi release: rebuilt {rebuilt}, "
-            f"Pi install build cache left unused {len(left)}"
+            f"a new Pi release: {OLDER_PI} rebuilt as {version}, "
+            f"old image kept {kept}, Pi install build cache left unused {len(left)}"
         )
-        failed |= not rebuilt or bool(left)
+        failed |= version in ("", OLDER_PI) or kept or bool(left)
     return failed
 
 
@@ -478,16 +521,18 @@ def main() -> int:
     )
     paths = [arg for arg in sys.argv[1:] if arg != "--storage"]
     lines: list[str] = []
-    # A run that fails partway still ends in its report.
+    failed = True
+    # A run that fails partway, or is interrupted, still ends in its report.
     try:
         failed = run(lines)
-    except Exception as error:  # noqa: BLE001
-        lines.append(f"error: {error}")
-        failed = True
-    lines += ["", "FAIL" if failed else "PASS"]
-    report = "\n".join(lines) + "\n"
-    Path(paths[0] if paths else default).write_text(report)
-    print(report, end="")
+    except BaseException:
+        lines.append(traceback.format_exc())
+        raise
+    finally:
+        lines += ["", "FAIL" if failed else "PASS"]
+        report = "\n".join(lines) + "\n"
+        Path(paths[0] if paths else default).write_text(report)
+        print(report, end="")
     return 1 if failed else 0
 
 

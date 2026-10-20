@@ -51,9 +51,9 @@ The watcher is in the wrapper's process group, so a SIGKILL to the whole group
 takes it too and leaves the container running until the next launch, in any
 project: where `ps` works, every launch removes the pi-sandbox containers whose
 wrapper, named by the process id at the end of the container's name, no longer
-runs. Where the wrapper runs, a hash of the machine's id (Linux's machine-id,
-macOS's kern.uuid), the user and the process namespace, is part of the name,
-and only containers from the same place are removed by name. So a session
+runs. The name also carries a hash of where the wrapper runs: the machine's id
+(Linux's machine-id, macOS's kern.uuid), the user and the process namespace.
+Only containers from the same place are removed by name. So a session
 started by another user, from a container with its own process namespace, or
 on another machine using the same Docker daemon is not taken for a dead one.
 WSL distros are told apart only by their process namespaces, which has not been
@@ -89,10 +89,10 @@ at install time but not what the extension code does once it is loaded.
 
 ## Protecting `.git`
 
-Git runs commands named in its config and hooks, through `core.fsmonitor`,
-`core.pager`, `core.hooksPath` and `filter.<name>.clean`, so leaving them
-writable would let the agent leave a command behind that you run yourself with
-the next `git status`. Host Git trusts those files, because the host user owns
+Git runs its hooks, and commands its config names through `core.fsmonitor`,
+`core.pager` and `filter.<name>.clean`, while `core.hooksPath` points it at
+other hooks, so leaving these writable would let the agent leave a command
+behind that you run yourself with the next `git status`. Host Git trusts those files, because the host user owns
 the files the agent writes: Docker Desktop maps ownership to it, and on native
 Linux the container user has your own uid. So inside a Git repository,
 `.git` itself is bind-mounted over the project, and `.git/config`,
@@ -134,9 +134,9 @@ A linked worktree keeps its git directory at `.git/worktrees/<name>`, and
 `commondir`, `gitdir` and `config.worktree` there redirect Git to the config
 and hooks it reads, so the whole directory is read-only too. `git worktree add`
 therefore fails in the sandbox, which costs nothing because the paths in those
-files are host paths. A linked worktree or a submodule checkout keeps its real
-Git directory outside the mount and gets no such protection, and Git does not
-work in the sandbox for it anyway.
+files are host paths. Launched from a linked worktree or a submodule checkout,
+the project's real Git directory is outside the mount and gets no such
+protection, and Git does not work in the sandbox there anyway.
 
 ### What is warned at exit
 
@@ -145,10 +145,10 @@ A repository the agent creates inside the project is not covered by any mount.
 it, as it trusts every file the agent writes, and would run a command named
 there. The same holds for a root `.git` the agent creates in a project that was
 not a repository at launch, since nothing was mounted over it. The wrapper
-cannot prevent that, so it warns instead: when the container exits it looks for `.git` entries,
-`.git/config` files and `.git/hooks` entries under the project whose ctime is
-newer than a marker made before the container started, and prints what it
-found. It only warns, and deletes nothing.
+cannot prevent that, so it warns instead: when the container exits it looks
+for `.git` entries, `.git/config` files and `.git/hooks` entries under the
+project whose ctime is newer than a marker made before the container started,
+and prints what it found. It only warns, and deletes nothing.
 
 A planted rebase, merge or cherry-pick is not prevented either. The agent can
 write `.git/rebase-merge/git-rebase-todo` with `exec` lines in it, or the files

@@ -71,18 +71,21 @@ untested.
 ## Images and rebuilds
 
 Edits to `Dockerfile.pi` or `entrypoint.sh` rebuild automatically on the next
-launch, and so does a new Pi release on npm. If the npm lookup fails, the
-existing image is used, and with no image at all the wrapper stops and says so.
-A failed rebuild falls back to the image the tag already held. Every other
-`pi-sandbox` image, from any checkout or, on Linux, another host user, whose
-next launch then rebuilds, and the build cache its Pi install left are removed
-after the session, so nothing accumulates.
+launch, and so does a new Pi release on npm. If the npm lookup fails, an
+existing image under the current tag is used. With none, as on the first
+launch or the first after an edit to those files, the wrapper stops and says
+so. A failed rebuild falls back to the image the tag already held.
+
+After the session the wrapper removes every other `pi-sandbox` image it can,
+and the build cache their Pi installs left, so nothing accumulates. That
+includes images from another checkout or, on Linux, another host user, whose
+next launch then rebuilds.
 
 The container is removed however the session ends: Pi exiting, a closed pane,
 a SIGHUP, SIGTERM or SIGKILL to the wrapper, or the docker client dying.
 `e2e.py` checks every one of those paths on real Docker. A SIGKILL to the
 wrapper's whole process group leaves the container running until the next
-launch, in any project, which removes it where `ps` works.
+launch in any project removes it, where `ps` works.
 [docs/design.md](docs/design.md#removing-the-container) explains how, and how
 sessions of other users or machines are left alone.
 
@@ -220,10 +223,11 @@ container.
 They live in the agent's home, so they reach a project through its state
 volume. A new project's first start downloads them. Offline, that start
 proceeds without them, and the next start with a network installs them. A
-start installs any of the four that is missing and updates every extension to
-its newest release. After an update that worked, this is skipped for 24 hours
-unless one of the four is missing. Delete `~/.pi-sandbox-extensions-updated`
-in the volume to force it on the next start. An extension you added yourself
+start installs any of the four that is missing and updates every unpinned
+extension to its newest release. After an update that worked, this is
+skipped for 24 hours unless one of the four is missing. Delete
+`~/.pi-sandbox-extensions-updated` in the volume to force it on the next
+start. An extension you added yourself
 as `npm:<package>@<version>` stays at that version, while a pin on one of the
 four is undone at the next update.
 
@@ -255,21 +259,25 @@ What fails, because the protected parts of `.git` are read-only: `git config`,
 `git remote add`, installing a hook, most `git submodule` operations and `git
 worktree add`. Do those on the host. `git add`, `git commit` and the rest still
 work, because they write to `.git/index`, `.git/objects` and `.git/refs`, which
-stay writable. A linked worktree or a submodule checkout gets no protection,
-and Git does not work in the sandbox for it anyway. No credentials are mounted,
+stay writable. Launched from a linked worktree or a submodule checkout, the
+sandbox gives its Git directory no protection, and Git does not work there
+anyway. No credentials are mounted,
 so `git push` fails inside the sandbox by design. Push from the host after
 reviewing the diff.
 
-What Git-related is refused at launch: a symlink at `.git` or at any of the
+The wrapper refuses to start on a symlink at `.git` or at any of the
 read-only paths, a `.git/config.worktree` or `.git/commondir` that is not an
 ordinary file, and a `.git/commondir` that holds anything but `.`.
 
-What is warned at exit, not prevented: a repository the agent created or
-changed inside the project (such as `git init sub`), including a root `.git`
-when the project was not a repository at launch, and a planted rebase, merge
-or cherry-pick (`.git/rebase-merge`, `.git/rebase-apply`, `.git/sequencer`,
-`.git/MERGE_HEAD` or `.git/CHERRY_PICK_HEAD`), when created or changed during
-the session. Host Git would run a command named in either. It only warns, and
+Warned at exit, not prevented, when created or changed during the session:
+
+- a repository the agent made inside the project, such as `git init sub`, or a
+  root `.git` in a project that was not a repository at launch.
+- a planted rebase, merge or cherry-pick: `.git/rebase-merge`,
+  `.git/rebase-apply`, `.git/sequencer`, `.git/MERGE_HEAD` or
+  `.git/CHERRY_PICK_HEAD`.
+
+Host Git would run a command named in either. The wrapper only warns, and
 deletes nothing. Inspect a nested repository before running Git in it, and
 abort a planted operation rather than continuing it.
 

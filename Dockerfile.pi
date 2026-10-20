@@ -26,16 +26,6 @@ RUN apt-get update \
     && ln -s /usr/bin/fdfind /usr/local/bin/fd \
     && rm -rf /var/lib/apt/lists/*
 
-# The wrapper passes the Pi version it looked up, and there is no default, so
-# a build without one fails here at once rather than installing an empty
-# version. The README explains why the newest release runs rather than a
-# reviewed pin.
-ARG PI_VERSION
-RUN : "${PI_VERSION:?the wrapper must pass --build-arg PI_VERSION}" \
-    && npm install --global --ignore-scripts \
-        @earendil-works/pi-coding-agent@$PI_VERSION \
-    && npm cache clean --force
-
 # uv, for the Python tooling the agent runs, from uv's official distroless
 # image, which is what uv's Docker docs recommend. Pinned by the digest
 # ghcr.io/astral-sh/uv reported for the multi-arch index of tag 0.12.17 on
@@ -44,11 +34,6 @@ RUN : "${PI_VERSION:?the wrapper must pass --build-arg PI_VERSION}" \
 # the registry.
 COPY --from=ghcr.io/astral-sh/uv:0.12.17@sha256:10787c682e4184e4f290de1171fd4703dc63de99221f10fe1c99002ce7fa9acc \
     /uv /uvx /usr/local/bin/
-
-# The label holds the version the wrapper compares against the one it looked
-# up, so a newer Pi rebuilds the image. `pi-sandbox.image=1` above stays the
-# marker `docker image prune` filters on.
-LABEL pi-sandbox.version="$PI_VERSION"
 
 # The entrypoint, which writes the subscription key Pi expects in auth.json
 # before becoming Pi. Copied in while still root, since /usr/local/bin is not
@@ -95,11 +80,30 @@ ENV UV_PROJECT_ENVIRONMENT=/home/agent/workspace-venv \
 # prepended, so nothing in the volume can shadow a system binary.
 ENV PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/home/agent/.local/bin:/home/agent/.cargo/bin
 
-USER agent
-
-# Extensions. The entrypoint installs the four into the state volume on every
-# start, which is also what reaches a project whose volume already exists, so
-# that is the one place to change the set. Nothing is seeded here.
+# Extensions. The entrypoint installs the four into the state volume, which is
+# also what reaches a project whose volume already exists, so that is the one
+# place to change the set. Nothing is seeded here.
 
 WORKDIR /workspace
+
+# Pi goes in last, after every other layer that builds a file, so a new release
+# rebuilds only this one, and its build cache is a record no later layer builds
+# on, which the wrapper can prune once the image that used it is gone. The
+# wrapper passes the Pi version it looked up, and there is no default, so
+# a build without one fails here at once rather than installing an empty
+# version. The README explains why the newest release runs rather than a
+# reviewed pin.
+ARG PI_VERSION
+RUN : "${PI_VERSION:?the wrapper must pass --build-arg PI_VERSION}" \
+    && npm install --global --ignore-scripts \
+        @earendil-works/pi-coding-agent@$PI_VERSION \
+    && npm cache clean --force
+
+# The label holds the version the wrapper compares against the one it looked
+# up, so a newer Pi rebuilds the image. `pi-sandbox.image=1` above stays the
+# marker `docker image prune` filters on.
+LABEL pi-sandbox.version="$PI_VERSION"
+
+USER agent
+
 ENTRYPOINT ["pi-sandbox-entrypoint"]

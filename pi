@@ -96,6 +96,7 @@ while [ "$project" != / ] && [ ! -e "$project/.git" ]; do
 done
 if [ ! -e "$project/.git" ]; then
     project=$launch_dir
+    printf '%s\n' "pi-sandbox: warning: no .git at or above $launch_dir, so that directory itself is mounted" >&2
 fi
 project=$(CDPATH= cd -- "$project" && pwd)
 
@@ -422,11 +423,30 @@ fi
 # `touch` cannot forge it.
 marker=$(mktemp)
 
+# `--rm` removes the container only once it stops, and it does not stop when
+# this wrapper or the docker client dies under it: a SIGHUP, SIGTERM or SIGKILL
+# to the wrapper, or a killed client, left it running with nobody attached
+# (measured with e2e.py). So the container gets a name of its own, the
+# project's tag and this process id, and a watcher removes it once this
+# wrapper is gone, however it went. The watcher ignores the signals that end
+# the wrapper, a closed pane's hangup among them, and stops when it has
+# removed the container.
+name=pi-sandbox-$project_tag-$$
+wrapper_pid=$$
+(
+    trap '' HUP INT TERM
+    while kill -0 "$wrapper_pid" 2>/dev/null; do
+        sleep 1
+    done
+    docker rm -f "$name"
+) </dev/null >/dev/null 2>&1 &
+
 docker_status=0
 # shellcheck disable=SC2086
 docker run \
     --rm \
     --init \
+    --name "$name" \
     $tty_flags \
     --label pi-sandbox=1 \
     --hostname pi-sandbox \
@@ -434,6 +454,7 @@ docker run \
     --cap-drop ALL \
     --security-opt no-new-privileges \
     --pids-limit 512 \
+    --memory 8g \
     --env OPENCODE_GO_API_KEY \
     --env OPENCODE_API_KEY \
     $extra_env \
@@ -441,6 +462,10 @@ docker run \
     --env COLORTERM=truecolor \
     --mount "type=bind,source=$project,target=/workspace" \
     "$@" || docker_status=$?
+
+# A killed client returns here while the container runs on, still able to
+# write the project, so remove it before the checks below look at it.
+docker rm -f "$name" >/dev/null 2>&1 || true
 
 # Prune the project's own .git, but only when this launch protected it with a
 # mount, and look for nested git metadata the container created. Warn only,
@@ -516,6 +541,18 @@ if tags=$(docker images pi-sandbox --format '{{.Tag}}' 2>/dev/null); then
     done
 fi
 docker image prune -f --filter label=pi-sandbox.image=1 >/dev/null 2>&1 || true
+# Each rebuild for a new Pi also leaves the build cache of the layer it
+# replaced, Pi's npm install, which no image uses once the old one is gone.
+# Docker only collects that at its own limit, about 190 MB per Pi release
+# until then. Prune just those records, picked by the text of their own
+# Dockerfile step, so another project's cache is never touched. Dockerfile.pi
+# keeps that step last, since a record that later layers build on cannot be
+# pruned on its own.
+docker system df -v --format '{{range .BuildCache}}{{if not .Shared}}{{if not .InUse}}{{println .ID .Description}}{{end}}{{end}}{{end}}' 2>/dev/null \
+    | grep -F 'the wrapper must pass --build-arg PI_VERSION' \
+    | while read -r cache_id _; do
+        docker builder prune -f --filter "id=$cache_id" >/dev/null 2>&1 || true
+    done
 if [ -n "$removed" ]; then
     printf '%s\n' "pi-sandbox: removed old images:$removed" >&2
 fi

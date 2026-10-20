@@ -19,14 +19,19 @@ set -eu
 # agent left would block forever and the atomic replace would never get the
 # chance to repair it.
 #
+# Sessions in one project share the volume, so starts can overlap. A lock on
+# the directory keeps one start from unlinking or renaming another's pending
+# file, which lost the key for some of twelve concurrent starts.
+#
 # The whole thing is best effort. Pi is what this container is for, and a home
 # directory the agent has ruined must cost it the subscription key, not the
 # session: `set -e` would otherwise turn `mkdir ~/.pi/agent/auth.json` into a
 # sandbox that never starts again until the volume is deleted.
 if [ -n "${OPENCODE_GO_API_KEY:-}" ] && ! (
-    mkdir -p "$HOME/.pi/agent" && python3 -c 'import json, os, pathlib
+    mkdir -p "$HOME/.pi/agent" && python3 -c 'import fcntl, json, os, pathlib
 
 directory = pathlib.Path(os.environ["HOME"]) / ".pi/agent"
+fcntl.flock(os.open(directory, os.O_RDONLY), fcntl.LOCK_EX)
 path = directory / "auth.json"
 try:
     auth = json.loads(path.read_text()) if path.is_file() else {}
@@ -49,47 +54,57 @@ fi
 
 # Extensions live in /home/agent, which is the project's state volume, so an
 # image rebuild does not reach a project whose volume already exists. Bring
-# them up to date on every start, best effort: a registry that is down or
-# slow, or a home the agent has ruined, must cost the update rather than the
-# session.
+# them up to date, best effort: a registry that is down or slow, or a home the
+# agent has ruined, must cost the update rather than the session.
 #
 # The four packages are listed here and nowhere else. `pi install` without a
 # version adds a missing one and unpins a pinned one, but leaves an installed
 # one at its version, so `pi update --extensions` is what moves an existing
 # volume to the newest releases (measured: 0.69.0 stayed 0.69.0 until it ran).
 # Lifecycle scripts stay off, so a new release cannot run one in a sandbox that
-# holds the API key. `timeout` bounds the whole step so a hung registry cannot
-# stop Pi from starting. Pi's own subcommands are passed through to it
-# untouched, so they must not trigger an install of their own.
+# holds the API key. npm's cache goes to /tmp, which goes with the container,
+# since in the volume it kept every release it downloaded. `timeout` bounds the
+# whole step so a hung registry cannot stop Pi from starting. Pi's own
+# subcommands are passed through to it untouched, so they must not trigger an
+# install of their own.
+#
+# The step took about 3 seconds of every warm start, and every Herdr pane is a
+# start, so after one that worked it is skipped for a day, unless one of the
+# four is missing, which Pi keeps under its npm directory.
 # Keep this list in step with the same list in pi.
 case "${1:-}" in
     install | remove | uninstall | update | list | config | auth) ;;
     *)
-        # shellcheck disable=SC2016  # $package expands when sh runs the script, not here
-        if ! timeout 120 sh -c '
-            export npm_config_ignore_scripts=true
-            failed=0
-            for package in \
-                pi-subagents \
-                @tintinweb/pi-subagents \
-                pi-background-tasks \
-                pi-extension-manager
-            do
-                pi install "npm:$package" || failed=1
-            done
-            pi update --extensions || failed=1
-            exit "$failed"
-        ' >/dev/null 2>&1; then
-            printf '%s\n' "pi-sandbox: could not update the extensions" >&2
+        packages='pi-subagents @tintinweb/pi-subagents pi-background-tasks pi-extension-manager'
+        stamp=$HOME/.pi-sandbox-extensions-updated
+        due=''
+        if [ -z "$(find "$stamp" -mmin -1440 2>/dev/null)" ]; then
+            due=1
+        fi
+        for package in $packages; do
+            if [ ! -d "$HOME/.pi/agent/npm/node_modules/$package" ]; then
+                due=1
+            fi
+        done
+        if [ -n "$due" ]; then
+            # shellcheck disable=SC2016,SC2086  # $package expands in the inner sh, and the list splits into one argument each
+            if timeout 120 sh -c '
+                export npm_config_ignore_scripts=true
+                export npm_config_cache="${TMPDIR:-/tmp}/pi-sandbox-npm-cache"
+                failed=0
+                for package in "$@"; do
+                    pi install "npm:$package" || failed=1
+                done
+                pi update --extensions || failed=1
+                exit "$failed"
+            ' sh $packages >/dev/null 2>&1; then
+                touch "$stamp" 2>/dev/null || true
+            else
+                printf '%s\n' "pi-sandbox: could not update the extensions" >&2
+            fi
         fi
         ;;
 esac
-
-# Volumes made by earlier images still hold the two Herdr skills, which now
-# describe a tool this image does not carry. Remove them, best effort, so a
-# skill listing cannot point at a missing binary. This can go once the old
-# volumes are gone.
-rm -rf "$HOME/.pi/agent/skills/herdr" "$HOME/.pi/agent/skills/herdr-fleet" 2>/dev/null || true
 
 # Pi replaces this script, so the container's foreground process is Pi and a
 # Herdr pane on the host still sees a Pi agent.

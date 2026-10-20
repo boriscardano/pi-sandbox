@@ -95,8 +95,12 @@ but not the wrapper or the docker client dying under it, which left the
 container running with nobody attached. So each container is named after the
 project and the wrapper's process id, the wrapper removes it as soon as
 `docker run` returns, and a small watcher it starts removes it once the wrapper
-is gone, which covers a closed pane, a SIGTERM and a SIGKILL. `e2e.py` checks
-every one of those paths on real Docker.
+is gone, which covers a closed pane, a SIGHUP, a SIGTERM and a SIGKILL to the
+wrapper. `e2e.py` checks every one of those paths on real Docker. The watcher
+is in the wrapper's process group, so a SIGKILL to the whole group takes it
+too and leaves the container running until the next launch, in any project:
+every launch removes the pi-sandbox containers whose wrapper, named by the
+process id at the end of the container's name, no longer runs.
 
 ## What the container can and cannot see
 
@@ -408,8 +412,13 @@ throwaway repository, checks from inside the container that `/workspace` is
 writable while `.git/config`, `config.worktree`, `commondir`, `hooks`,
 `worktrees` and `modules` are not and `.git` cannot be moved, that a file the
 agent writes is owned by you and that the memory limit is set, then ends a
-session each way one can end and checks that no container is left. It writes
-its findings to `e2e-report.txt`. No API key and no model call.
+session each way one can end and checks that no container is left. Last it
+puts an image of an older Pi under the tag, starts a session, which rebuilds
+it, and checks that no Pi install build cache is left unused. It writes its
+findings to `e2e-report.txt`, which CI keeps as an artifact. No API key and no
+model call. `python3 e2e.py --storage` runs 30 sessions in turn and then 10 at
+once in one project, the ten racing to build a removed image, and checks that
+what pi-sandbox keeps on disk stays flat. It is not run in CI.
 
 The tests in `test_pi.py` use a fake `docker` on `PATH`, so they neither build
 an image nor start a container. They assert the isolation properties: the expected mounts

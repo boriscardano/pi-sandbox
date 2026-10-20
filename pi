@@ -428,18 +428,41 @@ marker=$(mktemp)
 # to the wrapper, or a killed client, left it running with nobody attached
 # (measured with e2e.py). So the container gets a name of its own, the
 # project's tag and this process id, and a watcher removes it once this
-# wrapper is gone, however it went. The watcher ignores the signals that end
-# the wrapper, a closed pane's hangup among them, and stops when it has
-# removed the container.
+# wrapper is gone. The watcher ignores the signals that end the wrapper, a
+# closed pane's hangup among them, and stops when it has removed the
+# container. It removes it twice, because a client orphaned in its first
+# second can still be creating it. It is in the wrapper's process group, so a
+# SIGKILL to the whole group, which cannot be trapped, takes it too and leaves
+# the container running until the next launch, which removes it below.
 name=pi-sandbox-$project_tag-$$
 wrapper_pid=$$
+# Remove every pi-sandbox container whose wrapper, the pid at the end of its
+# name, no longer runs on this host. `ps -p` sees another user's process too,
+# where `kill -0` is refused and would read as gone. A reused pid can only
+# keep a dead session's container, never remove a live one, and a container
+# named any other way is left alone.
+for stale in $(docker ps -a --filter label=pi-sandbox=1 --format '{{.Names}}' 2>/dev/null); do
+    case "${stale##*-}" in
+        '' | *[!0-9]*) continue ;;
+    esac
+    case "$stale" in
+        pi-sandbox-*-*) ;;
+        *) continue ;;
+    esac
+    if ! ps -p "${stale##*-}" >/dev/null 2>&1; then
+        docker rm -f "$stale" >/dev/null 2>&1 || true
+    fi
+done
 (
     trap '' HUP INT TERM
     while kill -0 "$wrapper_pid" 2>/dev/null; do
         sleep 1
     done
     docker rm -f "$name"
+    sleep 5
+    docker rm -f "$name"
 ) </dev/null >/dev/null 2>&1 &
+watcher=$!
 
 docker_status=0
 # shellcheck disable=SC2086
@@ -466,6 +489,8 @@ docker run \
 # A killed client returns here while the container runs on, still able to
 # write the project, so remove it before the checks below look at it.
 docker rm -f "$name" >/dev/null 2>&1 || true
+# The wrapper got here, so the watcher has nothing left to do. It ignores TERM.
+kill -KILL "$watcher" 2>/dev/null || true
 
 # Prune the project's own .git, but only when this launch protected it with a
 # mount, and look for nested git metadata the container created. Warn only,
@@ -547,12 +572,21 @@ docker image prune -f --filter label=pi-sandbox.image=1 >/dev/null 2>&1 || true
 # until then. Prune just those records, picked by the text of their own
 # Dockerfile step, so another project's cache is never touched. Dockerfile.pi
 # keeps that step last, since a record that later layers build on cannot be
-# pruned on its own.
-docker system df -v --format '{{range .BuildCache}}{{if not .Shared}}{{if not .InUse}}{{println .ID .Description}}{{end}}{{end}}{{end}}' 2>/dev/null \
-    | grep -F 'the wrapper must pass --build-arg PI_VERSION' \
-    | while read -r cache_id _; do
-        docker builder prune -f --filter "id=$cache_id" >/dev/null 2>&1 || true
-    done
+# pruned on its own. Only after a rebuild or a removal, since nothing else
+# leaves one and the listing sizes every volume on the host. Docker prints
+# `.Shared` and `.InUse` as the strings true and false, which `not` reads as
+# set either way. The id is checked because docker matches it as a pattern,
+# and a stray `.` from a multi-line description would match every record.
+if [ "$build" -eq 1 ] || [ -n "$removed" ]; then
+    docker system df -v --format '{{range .BuildCache}}{{if eq .Shared "false"}}{{if eq .InUse "false"}}{{println .ID .Description}}{{end}}{{end}}{{end}}' 2>/dev/null \
+        | grep -F 'the wrapper must pass --build-arg PI_VERSION' \
+        | while read -r cache_id _; do
+            case "$cache_id" in
+                '' | *[!a-z0-9]*) continue ;;
+            esac
+            docker builder prune -f --filter "id=$cache_id" >/dev/null 2>&1 || true
+        done
+fi
 if [ -n "$removed" ]; then
     printf '%s\n' "pi-sandbox: removed old images:$removed" >&2
 fi

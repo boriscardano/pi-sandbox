@@ -21,17 +21,20 @@ set -eu
 #
 # Sessions in one project share the volume, so starts can overlap. A lock on
 # the directory keeps one start from unlinking or renaming another's pending
-# file, which lost the key for some of twelve concurrent starts.
+# file, which lost the key for some of twelve concurrent starts. The agent in
+# another session can hold that lock for good, so `timeout` bounds the wait,
+# and O_DIRECTORY refuses a FIFO swapped in for the directory rather than
+# blocking on it.
 #
 # The whole thing is best effort. Pi is what this container is for, and a home
 # directory the agent has ruined must cost it the subscription key, not the
 # session: `set -e` would otherwise turn `mkdir ~/.pi/agent/auth.json` into a
 # sandbox that never starts again until the volume is deleted.
 if [ -n "${OPENCODE_GO_API_KEY:-}" ] && ! (
-    mkdir -p "$HOME/.pi/agent" && python3 -c 'import fcntl, json, os, pathlib
+    mkdir -p "$HOME/.pi/agent" && timeout 10 python3 -c 'import fcntl, json, os, pathlib
 
 directory = pathlib.Path(os.environ["HOME"]) / ".pi/agent"
-fcntl.flock(os.open(directory, os.O_RDONLY), fcntl.LOCK_EX)
+fcntl.flock(os.open(directory, os.O_RDONLY | os.O_DIRECTORY), fcntl.LOCK_EX)
 path = directory / "auth.json"
 try:
     auth = json.loads(path.read_text()) if path.is_file() else {}
@@ -78,7 +81,9 @@ case "${1:-}" in
         packages='pi-subagents @tintinweb/pi-subagents pi-background-tasks pi-extension-manager'
         stamp=$HOME/.pi-sandbox-extensions-updated
         due=''
-        if [ -z "$(find "$stamp" -mmin -1440 2>/dev/null)" ]; then
+        # Only the stamp itself, so a directory the agent left there is not
+        # walked on every start.
+        if [ -z "$(find "$stamp" -maxdepth 0 -type f -mmin -1440 2>/dev/null)" ]; then
             due=1
         fi
         for package in $packages; do

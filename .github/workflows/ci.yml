@@ -35,8 +35,9 @@ jobs:
 
   # The real wrapper on the runner's own Docker: it builds the image, starts Pi
   # as the runner user in a pseudo-terminal, checks the mounts from inside the
-  # container it started, then ends sessions every way one can end and checks
-  # that no container is left. No API key and no model call.
+  # container it started, ends sessions every way one can end and checks that
+  # no container is left, then rebuilds for a new Pi and checks the old build
+  # cache is pruned. No API key and no model call.
   e2e:
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -45,3 +46,8 @@ jobs:
         with:
           persist-credentials: false
       - run: python3 e2e.py
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: e2e-report
+          path: e2e-report.txt

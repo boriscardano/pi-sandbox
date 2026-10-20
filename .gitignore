@@ -1,3 +1,5 @@
 .DS_Store
 __pycache__/
 .pytest_cache/
+e2e-report.txt
+e2e-storage.txt

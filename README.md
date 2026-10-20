@@ -85,7 +85,29 @@ while a first build that fails stops with docker's status. It removes the older
 images after the session, so nothing accumulates. That removal reaches every
 other `pi-sandbox` image it can, including one built by another checkout of
 this repository or, on Linux, by another host user, whose next launch then
-rebuilds. The container itself is removed by `--rm` when Pi exits.
+rebuilds. It also prunes the build cache an old image's Pi install left, about
+190 MB per Pi release, picked by that Dockerfile step's own text so no other
+project's cache is touched. Pi is the last layer of the image, so a new
+release rebuilds only that layer.
+
+The container is removed however the session ends. `--rm` covers Pi exiting,
+but not the wrapper or the docker client dying under it, which left the
+container running with nobody attached. So each container is named after the
+project, where the wrapper runs and its process id. The wrapper removes it as
+soon as `docker run` returns, and a small watcher it starts removes it once
+the wrapper is gone, which covers a closed pane, a SIGHUP, a SIGTERM and a
+SIGKILL to the wrapper. `e2e.py` checks every one of those paths on real
+Docker. The watcher is in the wrapper's process group, so a SIGKILL to the
+whole group takes it too and leaves the container running until the next
+launch, in any project: where `ps` works, every launch removes the
+pi-sandbox containers whose wrapper, named by the process id at the end of the
+container's name, no longer runs. Where the wrapper runs, a hash of the
+machine's id (Linux's machine-id, macOS's kern.uuid), the user and the process
+namespace, is part of the name, and only containers from the same place are
+removed by name. So a session started by another user, from a container with
+its own process namespace, or on another machine using the same Docker daemon
+is not taken for a dead one. WSL distros are told apart only by their process
+namespaces, which has not been checked on WSL.
 
 ## What the container can and cannot see
 
@@ -95,7 +117,9 @@ Mounted:
   repository this is the repository root, even when you launch from a
   subdirectory. It is found from the nearest `.git` up the tree, not from
   `git rev-parse --show-toplevel`, whose answer a planted `core.worktree` or
-  `.git` file can point at any host directory.
+  `.git` file can point at any host directory. With no `.git` anywhere above
+  it, the launch directory itself is mounted, and the wrapper prints a warning
+  naming it, since that may be far more than you meant to share.
 - a per-project Docker volume at `/home/agent` for Pi's own state.
 - inside a Git repository, `.git` itself is bind-mounted over the project, so
   it cannot be renamed away, and the parts of it that can name a command are
@@ -198,8 +222,8 @@ Build output under `/workspace`, such as Cargo's `target/`, is written into
 your real checkout, not the volume, and will be Linux binaries sitting next to
 your host build artifacts.
 
-Containers run with `--rm` and carry the label `pi-sandbox=1`, so nothing is
-left behind. To get a shell in a running sandbox:
+Containers carry the label `pi-sandbox=1` and are removed when the session
+ends, as Images and rebuilds describes. To get a shell in a running sandbox:
 
 ```sh
 docker exec -it "$(docker ps -q --filter label=pi-sandbox=1 | head -1)" bash
@@ -225,10 +249,15 @@ container.
 
 They live in the agent's home, so they reach a project through its state
 volume. A new project's first start downloads them. Offline, that start
-proceeds without them, and the next start with a network installs them. On
-every start the entrypoint installs any of the four that is missing and then
-runs `pi update --extensions`, so an existing volume ends up at their newest
-releases even though an image rebuild does not reach it. That update also moves
+proceeds without them, and the next start with a network installs them. The
+entrypoint installs any of the four that is missing and then runs `pi update
+--extensions`, so an existing volume ends up at their newest releases even
+though an image rebuild does not reach it. That step took about 3 seconds of a
+warm start, so after one that worked it is skipped for 24 hours, unless one of
+the four is missing. Delete `~/.pi-sandbox-extensions-updated` in the volume
+to force it on the next start. npm's download cache for it goes to `/tmp`,
+which is removed with the container, so releases do not pile up in the
+volume. That update also moves
 any extension you added without a version, while one installed as
 `npm:<package>@<version>` stays at it. A `pi remove npm:<package>` of one of the
 four therefore lasts only until the next start, which installs it again.
@@ -372,8 +401,10 @@ Mounting your socket would undo the sandbox rather than extend it, since
 - The agent can start other agents through the extensions, and they spend the
   same key on work nobody is watching. That is the point of the feature, and
   also the cost of it. A child can start children of its own, and nothing
-  enforces a limit. `docker run` sets no memory limit, so a runaway fan-out
-  reaches the machine's memory before it reaches `--pids-limit`.
+  enforces a limit beyond `--pids-limit` and the container's 8 GB memory
+  limit, plus as much again in swap where the host has it, which stops a
+  runaway fan-out before it takes the machine's memory. Docker Desktop's VM may
+  have less than that, in which case its own limit is the one reached first.
 - The image is roughly 1.2 GB, mostly Pi's npm dependency tree. It carries
   Node 24, Python 3.11, uv, Git, ripgrep and fd.
 
@@ -382,19 +413,36 @@ count as a vulnerability here and how to report it privately.
 
 ## Tests
 
-The tests use a fake `docker` on `PATH`, so they neither build an image nor
-start a container. They assert the isolation properties: the expected mounts
+`e2e.py` runs the real wrapper on real Docker, in CI on Linux and by hand
+with `python3 e2e.py` on Docker Desktop. It starts Pi in a pseudo-terminal in a
+throwaway repository, checks from inside the container that `/workspace` is
+writable while `.git/config`, `config.worktree`, `commondir`, `hooks`,
+`worktrees` and `modules` are not and `.git` cannot be moved, that a file the
+agent writes is owned by you and that the memory limit is set, then ends a
+session each way one can end and checks that no container is left. Last it
+puts an image of an older Pi under the tag, starts a session, which rebuilds
+it, and checks that no Pi install build cache is left unused. It writes its
+findings to `e2e-report.txt`, which CI keeps as an artifact. No API key and no
+model call. `python3 e2e.py --storage` runs 30 sessions in turn and then 10 at
+once in one project, the ten racing to build a removed image, and checks that
+what pi-sandbox keeps on disk stays flat. It is not run in CI.
+
+The tests in `test_pi.py` use a fake `docker` on `PATH`, so they neither build
+an image nor start a container. They assert the isolation properties: the expected mounts
 and no others, the keys forwarded by name and never by value, the sandboxing
 flags present and no privileged or host namespace flags, the home-directory
-refusal, and that a Herdr pane's socket stays on the host. The rest read
-`Dockerfile.pi` or run `entrypoint.sh` against stub binaries and a throwaway
-home, for the default model, where the subscription key is written, and what
-happens when the agent has ruined the file it is written to.
+refusal, and that a Herdr pane's socket stays on the host. The rest run
+`entrypoint.sh` against stub binaries and a throwaway home, for the default
+model, where the subscription key is written, what happens when the agent has
+ruined the file it is written to, and when the extensions are updated. Two
+check that `Dockerfile.pi` pins its base image and uv by digest, a supply chain
+property no behaviour test can see.
 
 ## Contributing
 
-Tests run with `uv run --with pytest pytest -q`. The shell scripts must pass
-`shellcheck` and run under dash. [AGENTS.md](AGENTS.md) holds the security
+Tests run with `uv run --with pytest pytest -q`, and `python3 e2e.py` runs the
+real wrapper on Docker. The shell scripts must pass `shellcheck` and run under
+dash. [AGENTS.md](AGENTS.md) holds the security
 lessons a change here has to follow, including that every behaviour gets a
 test proven to fail when the fix is reverted and that the wrapper stays POSIX
 sh which does not `exec docker`. Report a vulnerability privately as

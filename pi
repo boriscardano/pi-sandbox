@@ -96,6 +96,7 @@ while [ "$project" != / ] && [ ! -e "$project/.git" ]; do
 done
 if [ ! -e "$project/.git" ]; then
     project=$launch_dir
+    printf '%s\n' "pi-sandbox: warning: no .git at or above $launch_dir, so that directory itself is mounted" >&2
 fi
 project=$(CDPATH= cd -- "$project" && pwd)
 
@@ -422,11 +423,72 @@ fi
 # `touch` cannot forge it.
 marker=$(mktemp)
 
+# `--rm` removes the container only once it stops, and it does not stop when
+# this wrapper or the docker client dies under it: a SIGHUP, SIGTERM or SIGKILL
+# to the wrapper, or a killed client, left it running with nobody attached
+# (measured with e2e.py). So the container gets a name of its own, and a
+# watcher removes it once this wrapper is gone. The watcher ignores the
+# signals that end the wrapper, a closed pane's hangup among them. It removes
+# the container twice, because a client orphaned in its first second can
+# still be creating it, and the sweep below catches one that takes longer. It
+# is in the wrapper's process group, so a SIGKILL to the whole group, which
+# cannot be trapped, takes it too and leaves the container running until the
+# next launch, which removes it below.
+#
+# The name is the project's tag, where this wrapper runs and its pid. A pid
+# means something only where it was read, so where it runs, the machine, the
+# user and the pid namespace, is hashed into the name. Every removal by name
+# then only reaches containers started from here: another user, a container
+# or a second machine on the same daemon has its own. The machine is its id,
+# Linux's machine-id or macOS's kern.uuid, since a Mac's host name changes
+# from one network to the next and would strand a container left before the
+# change. The host name stands in only where neither id exists.
+origin=$(
+    {
+        cat /etc/machine-id 2>/dev/null || sysctl -n kern.uuid 2>/dev/null || uname -n
+        id -u
+        readlink /proc/self/ns/pid 2>/dev/null || true
+    } | "$hash_cmd" | cut -c1-12
+)
+name=pi-sandbox-$project_tag-$origin-$$
+# A dead session can have left a container under this launch's pid, which
+# would make `docker run --name` fail, and only this launch can hold it now.
+docker rm -f "$name" >/dev/null 2>&1 || true
+# Remove every container from here whose wrapper, the pid at the end of its
+# name, no longer runs. A reused pid can only keep a dead session's container,
+# never remove a live one. A `ps` that cannot see this wrapper either would
+# call every session gone, so then nothing is swept.
+if ps -p $$ >/dev/null 2>&1; then
+    for stale in $(docker ps -a --filter label=pi-sandbox=1 --format '{{.Names}}' 2>/dev/null); do
+        case "$stale" in
+            pi-sandbox-*-"$origin"-*) ;;
+            *) continue ;;
+        esac
+        case "${stale##*-}" in
+            '' | *[!0-9]*) continue ;;
+        esac
+        if ! ps -p "${stale##*-}" >/dev/null 2>&1; then
+            docker rm -f "$stale" >/dev/null 2>&1 || true
+        fi
+    done
+fi
+(
+    trap '' HUP INT TERM
+    while kill -0 $$ 2>/dev/null; do
+        sleep 1
+    done
+    docker rm -f "$name" || true
+    sleep 5
+    docker rm -f "$name" || true
+) </dev/null >/dev/null 2>&1 &
+watcher=$!
+
 docker_status=0
 # shellcheck disable=SC2086
 docker run \
     --rm \
     --init \
+    --name "$name" \
     $tty_flags \
     --label pi-sandbox=1 \
     --hostname pi-sandbox \
@@ -434,6 +496,7 @@ docker run \
     --cap-drop ALL \
     --security-opt no-new-privileges \
     --pids-limit 512 \
+    --memory 8g \
     --env OPENCODE_GO_API_KEY \
     --env OPENCODE_API_KEY \
     $extra_env \
@@ -441,6 +504,12 @@ docker run \
     --env COLORTERM=truecolor \
     --mount "type=bind,source=$project,target=/workspace" \
     "$@" || docker_status=$?
+
+# A killed client returns here while the container runs on, still able to
+# write the project, so remove it before the checks below look at it.
+docker rm -f "$name" >/dev/null 2>&1 || true
+# The wrapper got here, so the watcher has nothing left to do. It ignores TERM.
+kill -KILL "$watcher" 2>/dev/null || true
 
 # Prune the project's own .git, but only when this launch protected it with a
 # mount, and look for nested git metadata the container created. Warn only,
@@ -516,6 +585,32 @@ if tags=$(docker images pi-sandbox --format '{{.Tag}}' 2>/dev/null); then
     done
 fi
 docker image prune -f --filter label=pi-sandbox.image=1 >/dev/null 2>&1 || true
+# Each rebuild for a new Pi also leaves the build cache of the layer it
+# replaced, Pi's npm install, which no image uses once the old one is gone.
+# Docker only collects that at its own limit, about 190 MB per Pi release
+# until then. Prune just those records, picked by the text of their own
+# Dockerfile step, so another project's cache is never touched. Dockerfile.pi
+# keeps that step last, since a record that later layers build on cannot be
+# pruned on its own. Only after a rebuild or a removal, since nothing else
+# leaves one and the listing sizes every volume on the host. Docker prints
+# `.Shared` and `.InUse` as the strings true and false, which `not` reads as
+# set either way. The id is checked because docker matches it as a pattern,
+# and a stray word from a multi-line description would match others.
+if [ "$build" -eq 1 ] || [ -n "$removed" ]; then
+    docker system df -v --format '{{range .BuildCache}}{{if eq .Shared "false"}}{{if eq .InUse "false"}}{{println .ID .Description}}{{end}}{{end}}{{end}}' 2>/dev/null \
+        | grep -F 'the wrapper must pass --build-arg PI_VERSION' \
+        | while read -r cache_id _; do
+            case "$cache_id" in
+                '' | *[!a-z0-9]*) continue ;;
+            esac
+            # BuildKit's ids are 25 characters, and a short word would match
+            # many as a pattern.
+            if [ "${#cache_id}" -lt 20 ]; then
+                continue
+            fi
+            docker builder prune -f --filter "id=$cache_id" >/dev/null 2>&1 || true
+        done
+fi
 if [ -n "$removed" ]; then
     printf '%s\n' "pi-sandbox: removed old images:$removed" >&2
 fi

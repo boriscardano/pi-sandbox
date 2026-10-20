@@ -81,7 +81,7 @@ The container is removed however the session ends: Pi exiting, a closed pane,
 a SIGHUP, SIGTERM or SIGKILL to the wrapper, or the docker client dying.
 `e2e.py` checks every one of those paths on real Docker. A SIGKILL to the
 wrapper's whole process group leaves the container running until the next
-launch, in any project, which removes it.
+launch, in any project, which removes it where `ps` works.
 [docs/design.md](docs/design.md#removing-the-container) explains how, and how sessions of other users or machines are left alone.
 
 ## What the container can and cannot see
@@ -218,10 +218,11 @@ container.
 They live in the agent's home, so they reach a project through its state
 volume. A new project's first start downloads them. Offline, that start
 proceeds without them, and the next start with a network installs them. Each
-start reinstalls any of the four that is missing and, at most once every 24
-hours, updates all extensions to their newest releases. Delete
+start reinstalls any of the four that is missing and updates all extensions to
+their newest releases, which after an update that worked is skipped for 24
+hours unless one of the four is missing. Delete
 `~/.pi-sandbox-extensions-updated` in the volume to force that on the next
-start. An extension installed as `npm:<package>@<version>` stays at that
+start. An extension you added as `npm:<package>@<version>` stays at that
 version.
 
 Pi's own subcommands run against the volume rather than your host Pi, so
@@ -285,8 +286,9 @@ herdr pane split --current --direction right --cwd ~/any/project --no-focus
 herdr pane run <pane-id> '/path/to/pi-sandbox/pi'
 ```
 
-The script must not `exec docker`, and a pane's own `HERDR_SOCKET_PATH` is
-never mounted, since `herdr pane run` executes on the host.
+The script must not `exec docker`, or Herdr would no longer see a `pi`
+process. A pane's own `HERDR_SOCKET_PATH` is never mounted, since `herdr pane
+run` executes on the host.
 [docs/design.md](docs/design.md#herdr) says why.
 
 ## Limitations

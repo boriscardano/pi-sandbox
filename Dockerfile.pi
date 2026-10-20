@@ -91,7 +91,7 @@ WORKDIR /workspace
 # on, which the wrapper can prune once the image that used it is gone. The
 # wrapper passes the Pi version it looked up, and there is no default, so
 # a build without one fails here at once rather than installing an empty
-# version. The README explains why the newest release runs rather than a
+# version. docs/design.md explains why the newest release runs rather than a
 # reviewed pin.
 ARG PI_VERSION
 RUN : "${PI_VERSION:?the wrapper must pass --build-arg PI_VERSION}" \

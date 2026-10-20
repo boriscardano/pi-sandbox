@@ -91,8 +91,9 @@ at install time but not what the extension code does once it is loaded.
 Git runs commands named in its config and hooks, through `core.fsmonitor`,
 `core.pager`, `core.hooksPath` and `filter.<name>.clean`, so leaving them
 writable would let the agent leave a command behind that you run yourself with
-the next `git status`. Host Git trusts those files, because on Docker Desktop
-the host user owns the files the agent writes. So inside a Git repository,
+the next `git status`. Host Git trusts those files, because the host user owns
+the files the agent writes: Docker Desktop maps ownership to it, and on native
+Linux the container user has your own uid. So inside a Git repository,
 `.git` itself is bind-mounted over the project, and `.git/config`,
 `.git/config.worktree`, `.git/hooks`, `.git/worktrees`, `.git/modules` and
 `.git/commondir` are then mounted read-only inside it.
@@ -140,7 +141,7 @@ work in the sandbox for it anyway.
 
 A repository the agent creates inside the project is not covered by any mount.
 `git init sub` leaves `sub/.git/config` in your checkout, and host Git trusts
-it and would run a command named there. The wrapper cannot prevent that, so it
+it, as it trusts every file the agent writes, and would run a command named there. The wrapper cannot prevent that, so it
 warns instead: when the container exits it looks for `.git` entries,
 `.git/config` files and `.git/hooks` entries under the project whose ctime is
 newer than a marker made before the container started, and prints what it

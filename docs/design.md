@@ -79,7 +79,8 @@ which is removed with the container, so releases do not pile up in the volume.
 That update also moves any extension you added without a version, while one
 installed as `npm:<package>@<version>` stays at it. A `pi remove
 npm:<package>` of one of the four therefore lasts only until the next start,
-which installs it again.
+which installs it again, and a pin on one of the four is undone, since that
+install names no version.
 
 pi-sandbox always runs the newest releases rather than reviewed pins, which
 means a new upstream release reaches the sandbox, and the API key it holds,
@@ -141,8 +142,10 @@ work in the sandbox for it anyway.
 
 A repository the agent creates inside the project is not covered by any mount.
 `git init sub` leaves `sub/.git/config` in your checkout, and host Git trusts
-it, as it trusts every file the agent writes, and would run a command named there. The wrapper cannot prevent that, so it
-warns instead: when the container exits it looks for `.git` entries,
+it, as it trusts every file the agent writes, and would run a command named
+there. The same holds for a root `.git` the agent creates in a project that was
+not a repository at launch, since nothing was mounted over it. The wrapper
+cannot prevent that, so it warns instead: when the container exits it looks for `.git` entries,
 `.git/config` files and `.git/hooks` entries under the project whose ctime is
 newer than a marker made before the container started, and prints what it
 found. It only warns, and deletes nothing.
@@ -155,10 +158,6 @@ directory there cannot be blocked, because Git reads the empty directory as a
 rebase in progress, so the wrapper warns instead: at exit it names
 `.git/rebase-merge`, `.git/rebase-apply`, `.git/sequencer`, `.git/MERGE_HEAD`
 or `.git/CHERRY_PICK_HEAD` when its ctime is newer than the marker.
-
-These checks run after `docker run` returns, so they do not run at all if the
-wrapper itself is killed, and anything they find has already been written to
-your checkout.
 
 ## Herdr
 

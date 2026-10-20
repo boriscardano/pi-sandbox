@@ -73,16 +73,18 @@ untested.
 Edits to `Dockerfile.pi` or `entrypoint.sh` rebuild automatically on the next
 launch, and so does a new Pi release on npm. If the npm lookup fails, the
 existing image is used, and with no image at all the wrapper stops and says so.
-A failed rebuild falls back to the image the tag already held. Older
-`pi-sandbox` images, from this checkout or any other, and the build cache their
-Pi install left are removed after the session, so nothing accumulates.
+A failed rebuild falls back to the image the tag already held. Every other
+`pi-sandbox` image, from any checkout or, on Linux, another host user, whose
+next launch then rebuilds, and the build cache its Pi install left are removed
+after the session, so nothing accumulates.
 
 The container is removed however the session ends: Pi exiting, a closed pane,
 a SIGHUP, SIGTERM or SIGKILL to the wrapper, or the docker client dying.
 `e2e.py` checks every one of those paths on real Docker. A SIGKILL to the
 wrapper's whole process group leaves the container running until the next
 launch, in any project, which removes it where `ps` works.
-[docs/design.md](docs/design.md#removing-the-container) explains how, and how sessions of other users or machines are left alone.
+[docs/design.md](docs/design.md#removing-the-container) explains how, and how
+sessions of other users or machines are left alone.
 
 ## What the container can and cannot see
 
@@ -217,13 +219,13 @@ container.
 
 They live in the agent's home, so they reach a project through its state
 volume. A new project's first start downloads them. Offline, that start
-proceeds without them, and the next start with a network installs them. Each
-start reinstalls any of the four that is missing and updates all extensions to
-their newest releases, which after an update that worked is skipped for 24
-hours unless one of the four is missing. Delete
-`~/.pi-sandbox-extensions-updated` in the volume to force that on the next
-start. An extension you added as `npm:<package>@<version>` stays at that
-version.
+proceeds without them, and the next start with a network installs them. A
+start installs any of the four that is missing and updates every extension to
+its newest release. After an update that worked, this is skipped for 24 hours
+unless one of the four is missing. Delete `~/.pi-sandbox-extensions-updated`
+in the volume to force it on the next start. An extension you added yourself
+as `npm:<package>@<version>` stays at that version, while a pin on one of the
+four is undone at the next update.
 
 Pi's own subcommands run against the volume rather than your host Pi, so
 `pi list` shows what a project actually has and `pi install npm:<package>` adds
@@ -258,17 +260,18 @@ and Git does not work in the sandbox for it anyway. No credentials are mounted,
 so `git push` fails inside the sandbox by design. Push from the host after
 reviewing the diff.
 
-What is refused at launch: a symlink at `.git` or at any of the read-only
-paths, a `.git/config.worktree` or `.git/commondir` that is not an ordinary
-file, and a `.git/commondir` that names anything but `.`.
+What Git-related is refused at launch: a symlink at `.git` or at any of the
+read-only paths, a `.git/config.worktree` or `.git/commondir` that is not an
+ordinary file, and a `.git/commondir` that holds anything but `.`.
 
-What is warned at exit, not prevented: a repository the agent created inside
-the project (such as `git init sub`), and a planted rebase, merge or
-cherry-pick (`.git/rebase-merge`, `.git/rebase-apply`, `.git/sequencer`,
-`.git/MERGE_HEAD` or `.git/CHERRY_PICK_HEAD`), when newer than the session's
-start. Host Git would run a command named in either. It only warns, and
-deletes nothing. Inspect those and abort the operation rather than continuing
-it.
+What is warned at exit, not prevented: a repository the agent created or
+changed inside the project (such as `git init sub`), including a root `.git`
+when the project was not a repository at launch, and a planted rebase, merge
+or cherry-pick (`.git/rebase-merge`, `.git/rebase-apply`, `.git/sequencer`,
+`.git/MERGE_HEAD` or `.git/CHERRY_PICK_HEAD`), when created or changed during
+the session. Host Git would run a command named in either. It only warns, and
+deletes nothing. Inspect a nested repository before running Git in it, and
+abort a planted operation rather than continuing it.
 
 [docs/design.md](docs/design.md#protecting-git) explains why each of these is
 needed.
@@ -287,8 +290,8 @@ herdr pane run <pane-id> '/path/to/pi-sandbox/pi'
 ```
 
 The script must not `exec docker`, or Herdr would no longer see a `pi`
-process. A pane's own `HERDR_SOCKET_PATH` is never mounted, since `herdr pane
-run` executes on the host.
+process. The wrapper ignores a pane's own `HERDR_SOCKET_PATH`, since `herdr
+pane run` through that socket would execute on the host.
 [docs/design.md](docs/design.md#herdr) says why.
 
 ## Limitations

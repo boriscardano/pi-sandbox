@@ -377,7 +377,7 @@ def checks(lines: list[str]) -> bool:
                 gone = subprocess.run(
                     ["docker", "inspect", stale], capture_output=True, check=False
                 )
-                if b"No such" in gone.stderr:
+                if gone.returncode and b"no such" in gone.stderr.lower():
                     left = "none"
                     name = f"{name}, then a new launch"
                 quit_pi(session)

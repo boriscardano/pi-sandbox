@@ -93,18 +93,21 @@ release rebuilds only that layer.
 The container is removed however the session ends. `--rm` covers Pi exiting,
 but not the wrapper or the docker client dying under it, which left the
 container running with nobody attached. So each container is named after the
-project and the wrapper's process id, the wrapper removes it as soon as
-`docker run` returns, and a small watcher it starts removes it once the wrapper
-is gone, which covers a closed pane, a SIGHUP, a SIGTERM and a SIGKILL to the
-wrapper. `e2e.py` checks every one of those paths on real Docker. The watcher
-is in the wrapper's process group, so a SIGKILL to the whole group takes it
-too and leaves the container running until the next launch, in any project:
-every launch removes the pi-sandbox containers whose wrapper, named by the
-process id at the end of the container's name, no longer runs. It only looks
-at containers started from the same host, user and process namespace, which
-each container carries as a label, so a session started by another user, a WSL
-distro, a devcontainer or another machine on the same Docker daemon is never
-taken for a dead one.
+project, where the wrapper runs and its process id. The wrapper removes it as
+soon as `docker run` returns, and a small watcher it starts removes it once
+the wrapper is gone, which covers a closed pane, a SIGHUP, a SIGTERM and a
+SIGKILL to the wrapper. `e2e.py` checks every one of those paths on real
+Docker. The watcher is in the wrapper's process group, so a SIGKILL to the
+whole group takes it too and leaves the container running until the next
+launch, in any project: where `ps` works, every launch removes the
+pi-sandbox containers whose wrapper, named by the process id at the end of the
+container's name, no longer runs. Where the wrapper runs, a hash of the host
+name, the Linux machine id, the user and the process namespace, is part of
+the name, and only containers from the same place are removed by name, so a
+session started by another user, a WSL distro, a devcontainer or another
+machine on the same Docker daemon is not taken for a dead one. Two Macs with
+the same host name and user on one remote daemon look alike, since macOS has
+no machine id to tell them apart.
 
 ## What the container can and cannot see
 
@@ -399,9 +402,9 @@ Mounting your socket would undo the sandbox rather than extend it, since
   same key on work nobody is watching. That is the point of the feature, and
   also the cost of it. A child can start children of its own, and nothing
   enforces a limit beyond `--pids-limit` and the container's 8 GB memory
-  limit, which stops a runaway fan-out before it takes the machine's memory.
-  Docker Desktop's VM may have less than that, in which case its own limit is
-  the one reached first.
+  limit, plus as much again in swap where the host has it, which stops a
+  runaway fan-out before it takes the machine's memory. Docker Desktop's VM may
+  have less than that, in which case its own limit is the one reached first.
 - The image is roughly 1.2 GB, mostly Pi's npm dependency tree. It carries
   Node 24, Python 3.11, uv, Git, ripgrep and fd.
 

@@ -69,9 +69,12 @@ EXPECTED_CHECKS = [
 ]
 
 
-def docker(*args: str) -> str:
+def docker(*args: str, check: bool = False) -> str:
+    """docker's output. Pass check where a failed call reading as empty would
+    pass a check, so it raises instead."""
+
     return subprocess.run(
-        ["docker", *args], capture_output=True, text=True, check=False
+        ["docker", *args], capture_output=True, text=True, check=check
     ).stdout.strip()
 
 
@@ -139,6 +142,9 @@ class Session:
         OPEN_SESSIONS.append(self)
 
     def read(self, seconds: float) -> None:
+        if self.fd < 0:
+            time.sleep(seconds)
+            return
         end = time.time() + seconds
         while time.time() < end and self.fd >= 0:
             ready, _, _ = select.select([self.fd], [], [], 0.05)
@@ -219,7 +225,8 @@ def find_container(project: Path, wrapper: int = 0) -> str:
     share it, the one the wrapper named after its own process id. Docker
     Desktop shows the source under /host_mnt, so match the end of the path."""
 
-    for container in docker("ps", "-aq", "--filter", "label=pi-sandbox=1").split():
+    listed = docker("ps", "-aq", "--filter", "label=pi-sandbox=1", check=True)
+    for container in listed.split():
         found = json.loads(
             docker("inspect", "--format", "{{json .}}", container) or "{}"
         )
@@ -242,7 +249,12 @@ def container_left(project: Path) -> str:
         if not container:
             return "none"
         time.sleep(1)
-    return docker("inspect", "--format", "{{.State.Status}}", container)
+    return docker("inspect", "--format", "{{.State.Status}}", container) or "none"
+
+
+def kill(pid: int) -> None:
+    with contextlib.suppress(ProcessLookupError):
+        os.kill(pid, signal.SIGKILL)
 
 
 def orphaned_clients(project: Path) -> list[int]:
@@ -256,18 +268,24 @@ def orphaned_clients(project: Path) -> list[int]:
 
 
 def unshared_pi_installs() -> set[str]:
-    """Build cache records of Pi installs that no image uses. Docker prints
-    `.Shared` as the string true or false."""
+    """Build cache records of Pi installs that no image or build uses, as the
+    wrapper lists them. Docker prints `.Shared` as the string true or false,
+    and a template docker cannot run raises rather than listing nothing."""
 
     lines = docker(
         "system",
         "df",
         "-v",
         "--format",
-        '{{range .BuildCache}}{{if eq .Shared "false"}}'
-        "{{println .ID .Description}}{{end}}{{end}}",
+        '{{range .BuildCache}}{{if eq .Shared "false"}}{{if eq .InUse "false"}}'
+        "{{println .ID .Description}}{{end}}{{end}}{{end}}",
+        check=True,
     ).splitlines()
-    return {line.split()[0] for line in lines if PI_INSTALL_STEP in line}
+    return {
+        line.split()[0]
+        for line in lines
+        if PI_INSTALL_STEP in line and line.split()[0].isalnum()
+    }
 
 
 EXITS: dict[str, Callable[[Session], object]] = {
@@ -306,7 +324,8 @@ def wrapper_finished(session: Session) -> bool:
 
 def quit_pi(session: Session) -> None:
     session.type(b"/quit\r")
-    wrapper_finished(session)
+    if not wrapper_finished(session):
+        raise RuntimeError("the wrapper did not exit after /quit")
     session.end()
 
 
@@ -323,7 +342,7 @@ def throwaway_project() -> Iterator[Path]:
         while OPEN_SESSIONS:
             OPEN_SESSIONS[0].end()
         for pid in orphaned_clients(project):
-            os.kill(pid, signal.SIGKILL)
+            kill(pid)
         for _ in range(10):
             container = find_container(project)
             if not container:
@@ -374,10 +393,7 @@ def checks(lines: list[str]) -> bool:
                 stale = find_container(project)
                 session.end()
                 session = start(project)
-                gone = subprocess.run(
-                    ["docker", "inspect", stale], capture_output=True, check=False
-                )
-                if gone.returncode and b"no such" in gone.stderr.lower():
+                if not docker("ps", "-aq", "--filter", f"id={stale}", check=True):
                     left = "none"
                     name = f"{name}, then a new launch"
                 quit_pi(session)
@@ -385,9 +401,14 @@ def checks(lines: list[str]) -> bool:
             # a failure of its own rather than a container left behind.
             if not wrapper_finished(session):
                 left = f"session did not end, container {left}"
-            orphans = orphaned_clients(project)
+            # A client the wrapper's end killed can take a moment to go.
+            for _ in range(5):
+                orphans = orphaned_clients(project)
+                if not orphans:
+                    break
+                time.sleep(1)
             for pid in orphans:
-                os.kill(pid, signal.SIGKILL)
+                kill(pid)
             container = find_container(project)
             if container:
                 docker("rm", "-f", container)
@@ -409,15 +430,16 @@ def checks(lines: list[str]) -> bool:
         if sys.platform.startswith("linux"):
             ids = [f"--build-arg=AGENT_UID={os.getuid()}"]
             ids += [f"--build-arg=AGENT_GID={os.getgid()}"]
-        older = subprocess.run(
-            ["docker", "build", "-q", "--file", str(WRAPPER.parent / "Dockerfile.pi")]
+        subprocess.run(
+            ["docker", "build", "--file", str(WRAPPER.parent / "Dockerfile.pi")]
             + ids
             + ["--build-arg", f"PI_VERSION={OLDER_PI}", "--tag", image]
             + [str(WRAPPER.parent)],
             check=True,
-            capture_output=True,
-            text=True,
-        ).stdout.strip()
+        )
+        older = ("images", "-q", "--filter", f"label=pi-sandbox.version={OLDER_PI}")
+        if not docker(*older, check=True):
+            raise RuntimeError(f"no image of Pi {OLDER_PI} after building one")
         quit_pi(start(project))
         version = docker(
             "image",
@@ -425,8 +447,9 @@ def checks(lines: list[str]) -> bool:
             "--format",
             '{{index .Config.Labels "pi-sandbox.version"}}',
             image,
+            check=True,
         )
-        kept = older in docker("images", "-q", "--no-trunc")
+        kept = bool(docker(*older, check=True))
         left = unshared_pi_installs() - stale
         lines.append("")
         lines.append(
@@ -478,7 +501,7 @@ def storage(lines: list[str]) -> bool:
         for index in range(30):
             session = start(project)
             exits[index % len(exits)](session)
-            session.read(1)
+            wrapper_finished(session)
             session.end()
             if container_left(project) != "none":
                 failed = True
@@ -496,8 +519,8 @@ def storage(lines: list[str]) -> bool:
         failed |= lost > 0
         for index, session in enumerate(sessions):
             exits[index % len(exits)](session)
-            session.read(1)
         for session in sessions:
+            wrapper_finished(session)
             session.end()
         if container_left(project) != "none":
             failed = True
@@ -522,6 +545,8 @@ def main() -> int:
     paths = [arg for arg in sys.argv[1:] if arg != "--storage"]
     lines: list[str] = []
     failed = True
+    # A CI step that times out is sent SIGTERM, which would skip the report.
+    signal.signal(signal.SIGTERM, signal.default_int_handler)
     # A run that fails partway, or is interrupted, still ends in its report.
     try:
         failed = run(lines)

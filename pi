@@ -426,30 +426,47 @@ marker=$(mktemp)
 # `--rm` removes the container only once it stops, and it does not stop when
 # this wrapper or the docker client dies under it: a SIGHUP, SIGTERM or SIGKILL
 # to the wrapper, or a killed client, left it running with nobody attached
-# (measured with e2e.py). So the container gets a name of its own, the
-# project's tag and this process id, and a watcher removes it once this
-# wrapper is gone. The watcher ignores the signals that end the wrapper, a
-# closed pane's hangup among them, and stops when it has removed the
-# container. It removes it twice, because a client orphaned in its first
-# second can still be creating it. It is in the wrapper's process group, so a
-# SIGKILL to the whole group, which cannot be trapped, takes it too and leaves
-# the container running until the next launch, which removes it below.
-name=pi-sandbox-$project_tag-$$
-# Remove every pi-sandbox container whose wrapper, the pid at the end of its
-# name, no longer runs. A pid means something only where it was read, so each
-# container carries where its wrapper ran, this host, user and pid namespace,
-# and only those are swept: another user, a WSL distro, a devcontainer or a
-# second machine on the same daemon has wrappers this `ps` cannot see. A `ps`
-# that cannot see this wrapper either would call every session gone, so then
-# nothing is swept. A reused pid can only keep a dead session's container,
-# except our own name, which no live session can hold.
-origin=$(uname -n)-$(id -u)-$(readlink /proc/self/ns/pid 2>/dev/null || true)
+# (measured with e2e.py). So the container gets a name of its own, and a
+# watcher removes it once this wrapper is gone. The watcher ignores the
+# signals that end the wrapper, a closed pane's hangup among them. It removes
+# the container twice, because a client orphaned in its first second can
+# still be creating it, and the sweep below catches one that takes longer. It
+# is in the wrapper's process group, so a SIGKILL to the whole group, which
+# cannot be trapped, takes it too and leaves the container running until the
+# next launch, which removes it below.
+#
+# The name is the project's tag, where this wrapper runs and its pid. A pid
+# means something only where it was read, so where it runs, the host, its
+# machine id on Linux, the user and the pid namespace, is hashed into the
+# name. Every removal by name then only reaches containers started from here:
+# another user, a WSL distro, a devcontainer or a second machine on the same
+# daemon has its own.
+origin=$(
+    {
+        uname -n
+        cat /etc/machine-id 2>/dev/null || true
+        id -u
+        readlink /proc/self/ns/pid 2>/dev/null || true
+    } | "$hash_cmd" | cut -c1-6
+)
+name=pi-sandbox-$project_tag-$origin-$$
+# A dead session can have left a container under this launch's pid, which
+# would make `docker run --name` fail, and only this launch can hold it now.
+docker rm -f "$name" >/dev/null 2>&1 || true
+# Remove every container from here whose wrapper, the pid at the end of its
+# name, no longer runs. A reused pid can only keep a dead session's container,
+# never remove a live one. A `ps` that cannot see this wrapper either would
+# call every session gone, so then nothing is swept.
 if ps -p $$ >/dev/null 2>&1; then
-    for stale in $(docker ps -a --filter label=pi-sandbox=1 --filter "label=pi-sandbox.host=$origin" --format '{{.Names}}' 2>/dev/null); do
+    for stale in $(docker ps -a --filter label=pi-sandbox=1 --format '{{.Names}}' 2>/dev/null); do
+        case "$stale" in
+            pi-sandbox-*-"$origin"-*) ;;
+            *) continue ;;
+        esac
         case "${stale##*-}" in
             '' | *[!0-9]*) continue ;;
         esac
-        if [ "$stale" = "$name" ] || ! ps -p "${stale##*-}" >/dev/null 2>&1; then
+        if ! ps -p "${stale##*-}" >/dev/null 2>&1; then
             docker rm -f "$stale" >/dev/null 2>&1 || true
         fi
     done
@@ -473,7 +490,6 @@ docker run \
     --name "$name" \
     $tty_flags \
     --label pi-sandbox=1 \
-    --label "pi-sandbox.host=$origin" \
     --hostname pi-sandbox \
     --workdir /workspace \
     --cap-drop ALL \
@@ -578,7 +594,7 @@ docker image prune -f --filter label=pi-sandbox.image=1 >/dev/null 2>&1 || true
 # leaves one and the listing sizes every volume on the host. Docker prints
 # `.Shared` and `.InUse` as the strings true and false, which `not` reads as
 # set either way. The id is checked because docker matches it as a pattern,
-# and a stray `.` from a multi-line description would match every record.
+# and a stray word from a multi-line description would match others.
 if [ "$build" -eq 1 ] || [ -n "$removed" ]; then
     docker system df -v --format '{{range .BuildCache}}{{if eq .Shared "false"}}{{if eq .InUse "false"}}{{println .ID .Description}}{{end}}{{end}}{{end}}' 2>/dev/null \
         | grep -F 'the wrapper must pass --build-arg PI_VERSION' \
@@ -586,6 +602,11 @@ if [ "$build" -eq 1 ] || [ -n "$removed" ]; then
             case "$cache_id" in
                 '' | *[!a-z0-9]*) continue ;;
             esac
+            # BuildKit's ids are 25 characters, and a short word would match
+            # many as a pattern.
+            if [ "${#cache_id}" -lt 20 ]; then
+                continue
+            fi
             docker builder prune -f --filter "id=$cache_id" >/dev/null 2>&1 || true
         done
 fi

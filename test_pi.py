@@ -1218,9 +1218,9 @@ def test_wrapper_removes_the_container_when_the_docker_client_dies(
     _, invocations = _run(tmp_path, run_status="137")
     commands = [argv[0] for argv in invocations]
 
-    assert _container_name(invocations) in _removals(invocations)
     # Removed before the nested-git check reads the project, not after.
-    assert commands.index("rm") == commands.index("run") + 1
+    after_run = invocations[commands.index("run") + 1]
+    assert after_run == ["rm", "-f", _container_name(invocations)]
 
 
 @pytest.mark.parametrize("signal_name", ["KILL", "TERM", "HUP"])
@@ -1244,51 +1244,62 @@ def test_wrapper_removes_the_container_when_it_is_killed(
     assert set(_removals(invocations)) == {_container_name(invocations)}
 
 
+# A pid no system hands out, for a wrapper that is certainly gone.
+GONE_PID = 99999999
+
+
+def _origin(tmp_path: Path) -> str:
+    """The hash of where the wrapper runs, from the name it gives a
+    container: pi-sandbox-<project>-<origin>-<pid>."""
+
+    _, invocations = _run(tmp_path / "origin")
+    return _container_name(invocations).split("-")[3]
+
+
 def test_wrapper_removes_containers_whose_wrapper_is_gone(tmp_path: Path) -> None:
     """A SIGKILL to the whole process group takes the watcher with the
     wrapper, so the container outlives both. The next launch removes it, read
     from the wrapper pid in its name. A container whose wrapper still runs is
-    a live session, and so is anything not named the way the wrapper names."""
+    a live session. So is one started elsewhere, by another user, a WSL
+    distro, a devcontainer or a second machine on the same daemon, whose pid
+    this host's `ps` cannot see, and anything not named the way the wrapper
+    names."""
 
-    gone = subprocess.Popen(["true"])
-    gone.wait()
+    origin = _origin(tmp_path)
     alive = os.getpid()
     _, invocations = _run(
         tmp_path,
         containers=(
-            f"pi-sandbox-0a1b2c3d-{gone.pid}\n"
-            f"pi-sandbox-0a1b2c3d-{alive}\n"
-            "pi-sandbox-0a1b2c3d-notapid\n"
+            f"pi-sandbox-0a1b2c3d-{origin}-{GONE_PID}\n"
+            f"pi-sandbox-0a1b2c3d-{origin}-{alive}\n"
+            f"pi-sandbox-0a1b2c3d-ffffff-{GONE_PID}\n"
+            f"pi-sandbox-0a1b2c3d-{origin}-notapid\n"
             "festive_turing\n"
         ),
     )
+    removed = _removals(invocations)
     commands = [argv[0] for argv in invocations]
 
-    assert f"pi-sandbox-0a1b2c3d-{gone.pid}" in _removals(invocations)
-    assert f"pi-sandbox-0a1b2c3d-{alive}" not in _removals(invocations)
-    assert "pi-sandbox-0a1b2c3d-notapid" not in _removals(invocations)
-    assert "festive_turing" not in _removals(invocations)
+    assert f"pi-sandbox-0a1b2c3d-{origin}-{GONE_PID}" in removed
+    assert f"pi-sandbox-0a1b2c3d-{origin}-{alive}" not in removed
+    assert f"pi-sandbox-0a1b2c3d-ffffff-{GONE_PID}" not in removed
+    assert f"pi-sandbox-0a1b2c3d-{origin}-notapid" not in removed
+    assert "festive_turing" not in removed
     # Before this launch's own container exists.
     assert commands.index("rm") < commands.index("run")
 
 
-def test_wrapper_sweeps_only_containers_started_from_this_host(
-    tmp_path: Path,
-) -> None:
-    """A pid means something only where it was read. Another user, a WSL
-    distro, a devcontainer or a second machine on the same daemon has wrappers
-    this host's `ps` cannot see, so their live containers are not swept: each
-    container carries the identity of where its wrapper ran, and the sweep
-    lists only this one's."""
+def test_wrapper_clears_its_own_name_before_running(tmp_path: Path) -> None:
+    """A container a dead session left under a pid this launch now has would
+    make `docker run --name` fail. Only this origin's sessions use the name,
+    and only this launch can hold it now."""
 
     _, invocations = _run(tmp_path)
-    listing = next(argv for argv in invocations if argv[0] == "ps")
-    run = _docker_run(invocations)
-    labels = [run[i + 1] for i, arg in enumerate(run) if arg == "--label"]
-    origin = next(label for label in labels if label.startswith("pi-sandbox.host="))
+    name = _container_name(invocations)
+    commands = [argv[0] for argv in invocations]
 
-    assert f"label={origin}" in listing
-    assert str(os.getuid()) in origin
+    assert name in _removals(invocations)
+    assert invocations.index(["rm", "-f", name]) < commands.index("run")
 
 
 def test_wrapper_does_not_sweep_when_ps_cannot_see_processes(
@@ -1297,15 +1308,15 @@ def test_wrapper_does_not_sweep_when_ps_cannot_see_processes(
     """A `ps` that is missing, or cannot see processes at all, would make
     every wrapper look gone and remove every live session."""
 
-    gone = subprocess.Popen(["true"])
-    gone.wait()
+    origin = _origin(tmp_path)
     fake = tmp_path / "fakebin"
     fake.mkdir()
     (fake / "ps").write_text("#!/bin/sh\nexit 1\n")
     (fake / "ps").chmod(0o755)
-    _, invocations = _run(tmp_path, containers=f"pi-sandbox-0a1b2c3d-{gone.pid}\n")
+    stale = f"pi-sandbox-0a1b2c3d-{origin}-{GONE_PID}"
+    _, invocations = _run(tmp_path, containers=f"{stale}\n")
 
-    assert f"pi-sandbox-0a1b2c3d-{gone.pid}" not in _removals(invocations)
+    assert stale not in _removals(invocations)
 
 
 def test_wrapper_names_each_container_apart(tmp_path: Path) -> None:
@@ -1543,19 +1554,21 @@ def test_wrapper_prunes_the_build_cache_an_old_pi_install_left(
     190 MB a release, once the old image is gone. Only that step's records
     are pruned: another project's cache is not the wrapper's to touch, and a
     listed id that is not a plain id must not reach the filter, where docker
-    reads it as a pattern that `.` would make match every record."""
+    reads it as a pattern that `.` or a short word would match widely."""
 
+    record = "igt3lb4ht80nil0l0udexm8pw"
     cache = (
-        f"aaa111 {PI_INSTALL_STEP}\n"
-        "bbb222 mount / from exec /bin/sh -c pip install -e .\n"
+        f"{record} {PI_INSTALL_STEP}\n"
+        "8m0kku6gs3u932l9gziv7tpaa mount / from exec /bin/sh -c pip install -e .\n"
         f". {PI_INSTALL_STEP}\n"
+        f"npm {PI_INSTALL_STEP}\n"
     )
     _, rebuilt = _run(tmp_path / "a", inspect_status="1", cache=cache)
     _, removed = _run(tmp_path / "b", tags="old", cache=cache)
     _, quiet = _run(tmp_path / "c", cache=cache)
 
-    assert _pruned(rebuilt) == ["id=aaa111"]
-    assert _pruned(removed) == ["id=aaa111"]
+    assert _pruned(rebuilt) == [f"id={record}"]
+    assert _pruned(removed) == [f"id={record}"]
     # Nothing was rebuilt or removed, so nothing new can be stale, and the
     # listing, which sizes every volume, is not paid for at every exit.
     assert _pruned(quiet) == []

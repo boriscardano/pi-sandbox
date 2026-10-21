@@ -71,60 +71,37 @@ untested.
 ## Images and rebuilds
 
 Edits to `Dockerfile.pi` or `entrypoint.sh` rebuild automatically on the next
-launch. The image is tagged by the contents of those files, so a changed file
-produces a tag that does not exist yet and the wrapper builds it before
-starting. It also rebuilds when npm answers with a newer release than the
-image's label records. When that lookup fails it keeps the existing image and
-says so. With no image there is nothing to fall back to and the Dockerfile
-carries no default version, so the wrapper stops and says the newest Pi could
-not be looked up. Any launch with no image under the current tag, the first one
-or the first after an edit to `Dockerfile.pi` or `entrypoint.sh`, therefore
-needs that lookup to answer. A rebuild that fails keeps the image the tag
-already held and starts it, so a registry blip does not leave you without Pi,
-while a first build that fails stops with docker's status. It removes the older
-images after the session, so nothing accumulates. That removal reaches every
-other `pi-sandbox` image it can, including one built by another checkout of
-this repository or, on Linux, by another host user, whose next launch then
-rebuilds. It also prunes the build cache an old image's Pi install left, about
-190 MB per Pi release, picked by that Dockerfile step's own text so no other
-project's cache is touched. Pi is the last layer of the image, so a new
-release rebuilds only that layer.
+launch, and so does a new Pi release on npm. If the npm lookup fails, an
+existing image under the current tag is used. With none, as on the first
+launch or the first after an edit to those files, the wrapper stops and says
+so. A failed rebuild falls back to the image the tag already held.
 
-The container is removed however the session ends. `--rm` covers Pi exiting,
-but not the wrapper or the docker client dying under it, which left the
-container running with nobody attached. So each container is named after the
-project, where the wrapper runs and its process id. The wrapper removes it as
-soon as `docker run` returns, and a small watcher it starts removes it once
-the wrapper is gone, which covers a closed pane, a SIGHUP, a SIGTERM and a
-SIGKILL to the wrapper. `e2e.py` checks every one of those paths on real
-Docker. The watcher is in the wrapper's process group, so a SIGKILL to the
-whole group takes it too and leaves the container running until the next
-launch, in any project: where `ps` works, every launch removes the
-pi-sandbox containers whose wrapper, named by the process id at the end of the
-container's name, no longer runs. Where the wrapper runs, a hash of the
-machine's id (Linux's machine-id, macOS's kern.uuid), the user and the process
-namespace, is part of the name, and only containers from the same place are
-removed by name. So a session started by another user, from a container with
-its own process namespace, or on another machine using the same Docker daemon
-is not taken for a dead one. WSL distros are told apart only by their process
-namespaces, which has not been checked on WSL.
+After the session the wrapper removes every other `pi-sandbox` image it can,
+and the build cache their Pi installs left, so nothing accumulates. That
+includes images from another checkout or, on Linux, another host user, whose
+next launch then rebuilds.
+
+The container is removed however the session ends: Pi exiting, a closed pane,
+a SIGHUP, SIGTERM or SIGKILL to the wrapper, or the docker client dying.
+`e2e.py` checks every one of those paths on real Docker. A SIGKILL to the
+wrapper's whole process group leaves the container running until the next
+launch in any project removes it, where `ps` works.
+[docs/design.md](docs/design.md#removing-the-container) explains how, and how
+sessions of other users or machines are left alone.
 
 ## What the container can and cannot see
 
 Mounted:
 
 - the project you launched from, at `/workspace`, read-write. Inside a Git
-  repository this is the repository root, even when you launch from a
-  subdirectory. It is found from the nearest `.git` up the tree, not from
-  `git rev-parse --show-toplevel`, whose answer a planted `core.worktree` or
-  `.git` file can point at any host directory. With no `.git` anywhere above
-  it, the launch directory itself is mounted, and the wrapper prints a warning
-  naming it, since that may be far more than you meant to share.
+  repository this is the repository root, found from the nearest `.git` up the
+  tree. With no `.git` above it, the launch directory itself is mounted, with
+  a warning naming it.
 - a per-project Docker volume at `/home/agent` for Pi's own state.
-- inside a Git repository, `.git` itself is bind-mounted over the project, so
-  it cannot be renamed away, and the parts of it that can name a command are
-  then mounted read-only inside it: `.git/config`, `.git/config.worktree`,
-  `.git/hooks`, `.git/worktrees`, `.git/modules` and `.git/commondir`.
+- inside a Git repository, `.git` itself is bind-mounted over the project, and
+  `.git/config`, `.git/config.worktree`, `.git/hooks`, `.git/worktrees`,
+  `.git/modules` and `.git/commondir` are mounted read-only inside it. Git
+  below says what that means in practice.
 
 Not mounted, and unreachable: your home directory, `~/.ssh`, `~/.aws`,
 `~/.config`, the system keychain, every other project, the Docker socket, your
@@ -155,16 +132,12 @@ one is optional. Nothing else from your environment is passed in: the container
 starts from a clean environment and gets these, `TERM` and `COLORTERM`.
 
 `OPENCODE_GO_API_KEY` is the one the default model needs, and the wrapper
-checks for it whenever the run reaches opencode-go. Pi reads that provider from
-`~/.pi/agent/auth.json` rather than from the environment, so the entrypoint
-writes the forwarded key there, mode 0600, leaving any other provider in the
-file alone. Set `OPENCODE_API_KEY` as well if you want the models that are on
-Zen instead.
-
-That file is in the state volume, so unlike the environment the key outlives
-the container. `docker volume rm` is what removes it, as under State and reset.
-Providers that need an OAuth flow still cannot work here: nothing mounts your
-host `~/.pi`, and the sandbox has no browser to complete one.
+checks for it whenever the run reaches opencode-go. The entrypoint writes it to
+`~/.pi/agent/auth.json` in the state volume, mode 0600, because Pi reads that
+provider from there, so the key outlives the container until you remove the
+volume. Set `OPENCODE_API_KEY` as well if you want the models that are on Zen
+instead. Providers that need an OAuth flow cannot work here: nothing mounts
+your host `~/.pi`, and the sandbox has no browser to complete one.
 
 ### Forwarding other variables
 
@@ -249,18 +222,15 @@ container.
 
 They live in the agent's home, so they reach a project through its state
 volume. A new project's first start downloads them. Offline, that start
-proceeds without them, and the next start with a network installs them. The
-entrypoint installs any of the four that is missing and then runs `pi update
---extensions`, so an existing volume ends up at their newest releases even
-though an image rebuild does not reach it. That step took about 3 seconds of a
-warm start, so after one that worked it is skipped for 24 hours, unless one of
-the four is missing. Delete `~/.pi-sandbox-extensions-updated` in the volume
-to force it on the next start. npm's download cache for it goes to `/tmp`,
-which is removed with the container, so releases do not pile up in the
-volume. That update also moves
-any extension you added without a version, while one installed as
-`npm:<package>@<version>` stays at it. A `pi remove npm:<package>` of one of the
-four therefore lasts only until the next start, which installs it again.
+proceeds without them, and the next start with a network installs them. A
+start installs any of the four that is missing and updates every unpinned
+extension to its newest release. After an update that worked, this is
+skipped for 24 hours unless one of the four is missing. Delete
+`~/.pi-sandbox-extensions-updated` in the volume to force it on the next
+start. An extension you added yourself
+as `npm:<package>@<version>` stays at that version, while a pin on one of the
+four is undone at the next update.
+
 Pi's own subcommands run against the volume rather than your host Pi, so
 `pi list` shows what a project actually has and `pi install npm:<package>` adds
 one. `install`, `remove`, `uninstall`, `list`, `config` and `auth` all work this
@@ -272,10 +242,9 @@ up a change.
 Change the set by editing the four names in `entrypoint.sh`, which is where the
 install list lives. To drop one for good, run `pi remove npm:<package>` and
 delete its name from that list, then relaunch, which rebuilds the image.
-pi-sandbox always runs the newest releases rather than reviewed pins, which
-means a new upstream release reaches the sandbox, and the API key it holds,
-without review. Lifecycle scripts stay off, which limits what a release can run
-at install time but not what the extension code does once it is loaded.
+pi-sandbox runs the newest releases rather than reviewed pins, so a new
+upstream release reaches the sandbox, and the API key it holds, without review.
+[docs/design.md](docs/design.md#extension-updates) has the details.
 
 ## Git
 
@@ -286,64 +255,34 @@ because the mounted files belong to the host user, and commits use the identity
 `Pi Sandbox <pi-sandbox@localhost>` rather than yours. Override it per commit
 with `git -c user.name=... -c user.email=...`.
 
-The bind mounts listed above are what protect this. The hooks, worktrees and
-modules directories are created first if they are missing, and so is the
-worktree config, as an empty file. Git ignores an empty `.git/config.worktree`
-while `extensions.worktreeConfig` is off, which is the default, so creating it
-changes nothing for the host, and an existing one is left untouched. Git reads
-`.git/commondir` in any repository and takes its config and hooks from the
-directory it names, so the wrapper creates it holding `.`, which names the same
-directory and leaves Git behaving as before, and refuses to run when one names
-anything else. A symlink at `.git` or at any of the six read-only paths is
-refused before the wrapper creates or mounts anything, because Git, the mount
-and the `mkdir` would all follow it outside the project. A
-`.git/config.worktree` or `.git/commondir` that is not an ordinary file, such
-as a FIFO, is refused for the same reason, since creating or mounting it as a
-file would block or fail. Git runs commands named in those
-places, through `core.fsmonitor`, `core.pager`, `core.hooksPath` and
-`filter.<name>.clean`, so leaving them writable would let the agent leave a
-command behind that you run yourself with the next `git status`. A linked
-worktree keeps its git directory at `.git/worktrees/<name>`, and `commondir`,
-`gitdir` and `config.worktree` there redirect Git to the config and hooks it
-reads, so the whole directory is read-only too. `git worktree add` therefore
-fails in the sandbox, which costs nothing because the paths in those files are
-host paths.
+What fails, because the protected parts of `.git` are read-only: `git config`,
+`git remote add`, installing a hook, most `git submodule` operations and `git
+worktree add`. Do those on the host. `git add`, `git commit` and the rest still
+work, because they write to `.git/index`, `.git/objects` and `.git/refs`, which
+stay writable. Launched from a linked worktree or a submodule checkout, the
+sandbox gives its Git directory no protection, and Git does not work there
+anyway. No credentials are mounted,
+so `git push` fails inside the sandbox by design. Push from the host after
+reviewing the diff.
 
-Mounting `.git` matters on its own. Read-only mounts on the files inside it do
-not stop `mv .git .git-old`, which succeeds while `.git` is still an ordinary
-directory of the project, and the agent can then build a fresh `.git` with its
-own config. A bind mount makes `.git` a mount point, which cannot be renamed
-or removed, so that move fails with `Device or resource busy`.
+The wrapper refuses to start on a symlink at `.git` or at any of the
+read-only paths, a `.git/config.worktree` or `.git/commondir` that is not an
+ordinary file, and a `.git/commondir` that holds anything but `.`.
 
-The cost is that anything writing there fails in the sandbox: `git config`,
-`git remote add`, installing a hook and most `git submodule` operations. Do
-those on the host. `git add`, `git commit` and the rest still work, because
-they write to `.git/index`, `.git/objects` and `.git/refs`, which stay
-writable. A linked worktree or a submodule checkout keeps its real Git
-directory outside the mount and gets no such protection, and Git does not work
-in the sandbox for it anyway.
+Warned at exit, not prevented, when created or changed during the session:
 
-A repository the agent creates inside the project is not covered by any mount.
-`git init sub` leaves `sub/.git/config` in your checkout, and on Docker Desktop
-the host user owns the files the agent writes, so host Git trusts them and
-would run a command named there. The wrapper cannot prevent that, so it warns
-instead: when the container exits it looks for `.git` entries, `.git/config`
-files and `.git/hooks` entries under the project whose ctime is newer than a
-marker made before the container started, and prints what it found. It only
-warns, and deletes nothing.
+- a repository the agent made inside the project, such as `git init sub`, or a
+  root `.git` in a project that was not a repository at launch.
+- a planted rebase, merge or cherry-pick: `.git/rebase-merge`,
+  `.git/rebase-apply`, `.git/sequencer`, `.git/MERGE_HEAD` or
+  `.git/CHERRY_PICK_HEAD`.
 
-No credentials are mounted, so `git push` fails inside the sandbox by design.
-Push from the host after reviewing the diff.
+Host Git would run a command named in either. The wrapper only warns, and
+deletes nothing. Inspect a nested repository before running Git in it, and
+abort a planted operation rather than continuing it.
 
-A planted rebase, merge or cherry-pick is not prevented either. The agent can
-write `.git/rebase-merge/git-rebase-todo` with `exec` lines in it, or the
-files the other backends read, so the next host `git status` reports an
-operation in progress and `git rebase --continue` would run what the file
-names. An empty directory there cannot be blocked, because Git reads the empty
-directory as a rebase in progress, so the wrapper warns instead: at exit it
-names `.git/rebase-merge`, `.git/rebase-apply`, `.git/sequencer`,
-`.git/MERGE_HEAD` or `.git/CHERRY_PICK_HEAD` when its ctime is newer than the
-marker. Inspect those and abort the operation rather than continuing it.
+[docs/design.md](docs/design.md#protecting-git) explains why each of these is
+needed.
 
 ## Herdr
 
@@ -358,11 +297,10 @@ herdr pane split --current --direction right --cwd ~/any/project --no-focus
 herdr pane run <pane-id> '/path/to/pi-sandbox/pi'
 ```
 
-For the same reason the script must not `exec docker`: that would replace the
-`pi`-named process with `docker` and Herdr would see a plain shell. `test_pi.py`
-pins that, and that the wrapper ignores the pane's own `HERDR_SOCKET_PATH`.
-Mounting your socket would undo the sandbox rather than extend it, since
-`herdr pane run` executes on the host, outside the container.
+The script must not `exec docker`, or Herdr would no longer see a `pi`
+process. The wrapper ignores a pane's own `HERDR_SOCKET_PATH`, since `herdr
+pane run` through that socket would execute on the host.
+[docs/design.md](docs/design.md#herdr) says why.
 
 ## Limitations
 

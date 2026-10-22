@@ -162,15 +162,39 @@ agent genuinely needs and use credentials you are willing to rotate.
 
 Pi's config and sessions live in a Docker volume named
 `pi-sandbox-<project>-<hash>`, one per project, so `pi --continue` and
-`pi --resume` work without exposing your host `~/.pi`. The volume also holds the
-uv cache and `UV_PROJECT_ENVIRONMENT`, so a Linux `uv sync` in the sandbox
-cannot overwrite a macOS or Windows virtualenv in the mounted checkout.
+`pi --resume` work without exposing your host `~/.pi`. The volume also holds
+`UV_PROJECT_ENVIRONMENT`, so a Linux `uv sync` in the sandbox cannot overwrite a
+macOS or Windows virtualenv in the mounted checkout. uv's cache stays in the
+container's `/tmp` and goes with it. uv uses Debian's Python 3.11 for a
+project that accepts it and the image's Python 3.14 for one that needs 3.12 or
+newer, so either keeps only its venv in the volume. A project that pins
+another Python, in `.python-version` or `requires-python`, makes uv download
+that one into its volume, about 90 MB. A volume created by an earlier
+pi-sandbox, one that kept uv's cache in `~/uv-cache`, keeps that cache and its
+uv-downloaded Python until you reset it.
 
 ```sh
 docker volume ls --filter name=pi-sandbox-     # list
 docker system df -v | grep pi-sandbox-         # sizes
 docker volume rm pi-sandbox-<project>-<hash>   # reset one project
 ```
+
+Every worktree is a project of its own, so volumes pile up as worktrees come
+and go. Each volume is labelled with its project's path, and this removes the
+ones whose directory no longer exists (a volume in use is refused and kept):
+
+```sh
+docker volume ls -q --filter label=pi-sandbox.project | while read -r v; do [ -d "$(docker volume inspect -f '{{index .Labels "pi-sandbox.project"}}' "$v")" ] || docker volume rm "$v"; done
+```
+
+Run it on the machine whose Docker created the volumes: it checks the paths
+there, and a project on a disk that is not mounted counts as gone, as does
+a worktree inside another project whose agent renamed its directory. Volumes
+created before
+the label existed are not listed by it. Remove those by name, or every unused
+one at once with
+`docker volume ls -q --filter name=pi-sandbox- | xargs docker volume rm`, which
+also drops the sessions of projects you still have.
 
 ### What an agent installs
 
@@ -182,7 +206,9 @@ own sessions. `~/.local/bin` and `~/.cargo/bin` are on `PATH`, so these are
 found again on the next run rather than reinstalled.
 
 Lost, because `--rm` deletes the container's writable layer: anything in
-`/usr/local`, `/usr/bin` or `/opt`, and anything in `/tmp`. The agent cannot
+`/usr/local`, `/usr/bin` or `/opt`, and anything in `/tmp`, uv's cache among
+it. A venv already synced needs no cache, so only a changed lock downloads
+again. The agent cannot
 install system packages at all, since it is not root and there is no `sudo`, so
 `apt-get install` fails. Put anything system-level in `Dockerfile.pi` instead.
 
@@ -344,7 +370,7 @@ pane run` through that socket would execute on the host.
   runaway fan-out before it takes the machine's memory. Docker Desktop's VM may
   have less than that, in which case its own limit is the one reached first.
 - The image is roughly 1.2 GB, mostly Pi's npm dependency tree. It carries
-  Node 24, Python 3.11, uv, Git, ripgrep and fd.
+  Node 24, Python 3.11 and 3.14, uv, Git, ripgrep and fd.
 
 These are accepted limits, and [SECURITY.md](SECURITY.md) defines what does
 count as a vulnerability here and how to report it privately.
@@ -360,9 +386,11 @@ agent writes is owned by you and that the memory limit is set, then ends a
 session each way one can end and checks that no container is left. Last it
 puts an image of an older Pi under the tag, starts a session, which rebuilds
 it, and checks that no Pi install build cache is left unused. It writes its
-findings to `e2e-report.txt`, which CI keeps as an artifact. No API key and no
-model call. `python3 e2e.py --storage` runs 30 sessions in turn and then 10 at
-once in one project, the ten racing to build a removed image, and checks that
+findings to `e2e-report.txt`, which CI keeps as an artifact. It also checks
+that uv picks Debian's Python 3.11 for a project that accepts it, syncs a
+Python project and fails if the state volume grows more than 30 MB. No API key
+and no model call. `python3 e2e.py --storage` runs 30 sessions in turn and then 10 at
+once in one project, all writing the key, and checks that
 what pi-sandbox keeps on disk stays flat. It is not run in CI.
 
 The tests in `test_pi.py` use a fake `docker` on `PATH`, so they neither build

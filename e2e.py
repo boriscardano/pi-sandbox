@@ -3,7 +3,10 @@
 Starts the real wrapper in a pseudo-terminal in a throwaway repository, the
 way a Herdr pane does, and proves from inside the container it started that
 the project is writable and the parts of `.git` that can name a command are
-not. Then it ends sessions every way one can end and checks that no container
+not. It checks that uv still picks Debian's Python for a project that
+accepts it, syncs a Python project and checks that the state volume grows by
+little more than the venv, which the next session imports from offline.
+Then it ends sessions every way one can end and checks that no container
 is left behind, and rebuilds the image for a new Pi release and checks that
 the build cache the old one left is pruned. No API key and no model call: Pi
 starts its interface and waits for input.
@@ -13,10 +16,13 @@ starts its interface and waits for input.
 
 `--storage` runs 30 sessions in turn and then 10 at once in one project and
 checks that pi-sandbox keeps its image and no new unused build cache. It also
-reports the state volume's size. Both modes retag or remove this checkout's
-image, so the next real launch rebuilds it, and they count build cache across
-the whole host, so run them without other sessions building. The report is printed and
-written to the file (default e2e-report.txt or e2e-storage.txt).
+reports the state volume's size. This script itself deletes only the
+project, volume and containers it created, but the wrapper it runs removes
+every other pi-sandbox image and unused Pi install build cache when a session
+ends, as the README says, so run it where no session needs an older image.
+Both modes count build cache across the whole host, so run them without other
+sessions building. The report is printed and written to the file (default
+e2e-report.txt or e2e-storage.txt).
 """
 
 import contextlib
@@ -67,6 +73,35 @@ EXPECTED_CHECKS = [
     "readonly .git/modules",
     "readonly mv .git",
 ]
+
+# What an agent does first in a Python project: install its dependencies. The
+# project asks for a recent Python without pinning one, as most do, which the
+# image's Python must satisfy without uv downloading another into the volume.
+# Prints the state volume's size in KB before and after, then what is in it.
+UV_SYNC = r"""
+cd /workspace
+cat > pyproject.toml <<'EOF'
+[project]
+name = "e2e-probe"
+version = "0"
+requires-python = ">=3.12"
+dependencies = ["httpx", "pydantic"]
+EOF
+du -sk "$HOME" | cut -f1
+timeout 300 uv sync -q >&2
+du -sk "$HOME" | cut -f1
+du -sk "$HOME"/* "$HOME"/.[!.]* 2>/dev/null | sort -rn
+"""
+# The venv the sync left, used by the next session with nothing downloaded.
+UV_REUSE = "timeout 60 uv run --offline python -c 'import httpx, pydantic'"
+# Per project, so dozens of worktrees must not add up to gigabytes. A Python
+# uv downloaded (about 90 MB) or uv's cache in the volume fails it, the venv
+# alone (9 MB measured) does not.
+VOLUME_GROWTH_KB = 30 * 1024
+# A project that accepts Debian's Python must still get it, as before the image
+# carried 3.14: one with a dependency that has no 3.14 wheel synced on 3.11
+# and fails on 3.14, since there is no compiler.
+UV_FIND = "uv python find '>=3.10'"
 
 
 def docker(*args: str, check: bool = False) -> str:
@@ -384,6 +419,36 @@ def checks(lines: list[str]) -> bool:
         )
         lines.append(f"  memory limit {memory} bytes")
         failed |= memory != str(8 * 1024**3)
+        found = docker("exec", session.container, "sh", "-c", UV_FIND)
+        lines.append(f"  uv's Python for a >=3.10 project: {found}")
+        failed |= found != "/usr/bin/python3"
+
+        before, after, *contents = docker(
+            "exec", session.container, "sh", "-c", UV_SYNC, check=True
+        ).splitlines()
+        grown = int(after) - int(before)
+        lines.append("")
+        lines.append(
+            f"state volume after uv sync of a Python >=3.12 project: "
+            f"{int(before) // 1024} MB -> {int(after) // 1024} MB, "
+            f"grew {grown // 1024} MB (allowed {VOLUME_GROWTH_KB // 1024} MB)"
+        )
+        lines += [f"  {line}" for line in contents]
+        failed |= grown > VOLUME_GROWTH_KB
+        quit_pi(session)
+
+        session = start(project)
+        reuse = subprocess.run(
+            ["docker", "exec", session.container, "sh", "-c", UV_REUSE],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        lines.append(
+            f"  next session imports from that venv offline: {reuse.returncode == 0}"
+            + (f"\n{reuse.stderr}" if reuse.returncode else "")
+        )
+        failed |= reuse.returncode != 0
         quit_pi(session)
 
         lines.append("")
@@ -427,12 +492,10 @@ def checks(lines: list[str]) -> bool:
 
         # The tag now holds an image of an older Pi, as if npm had moved on
         # since it was built, so the next launch rebuilds it. Unused Pi
-        # install cache an earlier run left is pruned first, so the build
-        # cannot reuse it and hide a prune that no longer works. Records of
-        # the old layer order cannot be pruned on their own, and are set aside.
-        for record in unshared_pi_installs():
-            docker("builder", "prune", "-f", "--filter", f"id={record}")
-        stale = unshared_pi_installs()
+        # install cache an earlier run left is not counted. This script no
+        # longer prunes it first, so a build that reuses one can hide a prune
+        # that no longer works, which a fresh CI runner, with none, catches.
+        cache_before = unshared_pi_installs()
         ids = []
         if sys.platform.startswith("linux"):
             ids = [f"--build-arg=AGENT_UID={os.getuid()}"]
@@ -455,7 +518,7 @@ def checks(lines: list[str]) -> bool:
             check=True,
         )
         kept = bool(docker("image", "inspect", "--format", "{{.Id}}", older))
-        left = unshared_pi_installs() - stale
+        left = unshared_pi_installs() - cache_before
         lines.append("")
         lines.append(
             f"a new Pi release: {OLDER_PI} rebuilt as {version}, "
@@ -513,10 +576,9 @@ def storage(lines: list[str]) -> bool:
                 lines.append(f"  session {index + 1} left a container")
         figures.append(("after 30 sessions in turn", storage_figures(volume, image)))
 
-        # Without the image, ten sessions starting at once all build it.
-        docker("rmi", image)
-        if docker("images", "-q", image):
-            raise RuntimeError(f"could not remove {image} to race its build")
+        # Ten sessions starting at once, all writing the key. The image is
+        # kept, since this run deletes only what it created, so they do not
+        # race a build.
         sessions = [Session(project) for _ in range(10)]
         wait_ready(sessions)
         lost = sum(KEY_LOST in s.output for s in sessions)

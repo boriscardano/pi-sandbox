@@ -87,6 +87,49 @@ means a new upstream release reaches the sandbox, and the API key it holds,
 without review. Lifecycle scripts stay off, which limits what a release can run
 at install time but not what the extension code does once it is loaded.
 
+## What the state volume holds
+
+Docker seeds a new volume from the image's `/home/agent`, which is a few
+kilobytes. What filled volumes was written at run time: on 2026-10-22 one host
+had 94 volumes, 24 GB, mostly uv's cache (253 MB each) and a Python that uv
+downloaded because Debian ships 3.11 (about 90 MB in a measured run, 184 MB of
+`~/.local` in those volumes). Every worktree is a project of its own, so each
+got its own copy.
+
+The image therefore carries Python 3.14, installed by uv as root outside the
+agent's home, beside Debian's 3.11. uv may still download a Python for any
+project that needs one: the image only saves the download, it never limits
+what a project can ask for. Its directory comes after `/usr/bin` on `PATH`,
+which keeps uv's choice what it was before. A project that accepts 3.11 still
+gets 3.11, and one that needs 3.12 or newer gets 3.14 where uv used to
+download it. Measured on 2026-10-22 with `uv sync`:
+
+| Project | Before | Now |
+| --- | --- | --- |
+| `>=3.10`, numpy 1.26.4 (wheels up to 3.12) | 3.11 | 3.11 |
+| `>=3.12`, httpx and pydantic | 3.14 downloaded, 102 MB | 3.14 from the image, 10 MB |
+| `.python-version` 3.12 | 3.12 downloaded, 101 MB | 3.12 downloaded, 95 MB |
+
+With 3.14 as `python3`, or as `python3.14` in `/usr/local/bin`, uv chose it for
+the first project too, and that sync failed: numpy 1.26.4 has no 3.14 wheel
+and the sandbox has no compiler. 3.14 rather than 3.15 for the same reason: a
+real project that depends on onnxruntime 1.24.3, which has no 3.15 wheel,
+failed on a 3.15 image and syncs on 3.14. 3.15 can replace it once wheels
+catch up. Baking 3.12 and 3.13 as well would save pinned projects their
+download at about 90 MB of image each, which was not worth it.
+
+A volume that already holds a uv-downloaded Python keeps
+using it, since uv prefers its own installs to one on `PATH`. uv's cache
+lives in the container's `/tmp`, so a session that changes the lock downloads
+again. A cache shared across projects would avoid that, but one project's agent
+could then plant a package that another project's venv installs. The four
+extensions stay in the volume, about 46 MB, because they are updated per volume
+as described above.
+
+Each volume carries a `pi-sandbox.project` label with the host path it serves,
+set when Docker creates it, so the README's one-liner can remove the volumes
+whose project is gone. Nothing in the container can change a volume's labels.
+
 ## Protecting `.git`
 
 Git runs its hooks, and commands its config names through `core.fsmonitor`,

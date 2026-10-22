@@ -358,7 +358,10 @@ trap : INT
 # POSIX sh has no arrays. Prepend in reverse, because each `set --` puts its
 # arguments first and the last mount must end up closest to the project.
 set -- "$image" "$@"
-set -- --mount "type=volume,source=$state_volume,target=/home/agent" "$@"
+# The label names the project, so the README's one-liner can remove the
+# volumes of projects that are gone. Docker sets it only when it creates the
+# volume.
+set -- --mount "type=volume,source=$state_volume,target=/home/agent,volume-label=pi-sandbox.project=$project" "$@"
 if [ -d "$project/.git" ]; then
     # Remembered for the exit check: a root `.git` this launch protected is the
     # one the container could not have replaced, and is the only one to prune.

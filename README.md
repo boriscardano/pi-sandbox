@@ -165,14 +165,13 @@ Pi's config and sessions live in a Docker volume named
 `pi --resume` work without exposing your host `~/.pi`. The volume also holds
 `UV_PROJECT_ENVIRONMENT`, so a Linux `uv sync` in the sandbox cannot overwrite a
 macOS or Windows virtualenv in the mounted checkout. uv's cache stays in the
-container's `/tmp` and goes with it, and the image's Python is 3.15, so a
-project that accepts 3.15 keeps only its venv in the volume. A project that
-pins an older Python, in `.python-version` or `requires-python`, makes uv
-download that one into its volume, about 90 MB. Pin one too when a
-dependency has no wheel for 3.15 yet, since the sandbox has no compiler to
-build it from source. A volume created by an earlier pi-sandbox, one that kept
-uv's cache in `~/uv-cache`, keeps that cache and its uv-downloaded Python until
-you reset it.
+container's `/tmp` and goes with it. uv uses Debian's Python 3.11 for a
+project that accepts it and the image's Python 3.14 for one that needs 3.12 or
+newer, so either keeps only its venv in the volume. A project that pins
+another Python, in `.python-version` or `requires-python`, makes uv download
+that one into its volume, about 90 MB. A volume created by an earlier
+pi-sandbox, one that kept uv's cache in `~/uv-cache`, keeps that cache and its
+uv-downloaded Python until you reset it.
 
 ```sh
 docker volume ls --filter name=pi-sandbox-     # list
@@ -371,7 +370,7 @@ pane run` through that socket would execute on the host.
   runaway fan-out before it takes the machine's memory. Docker Desktop's VM may
   have less than that, in which case its own limit is the one reached first.
 - The image is roughly 1.2 GB, mostly Pi's npm dependency tree. It carries
-  Node 24, Python 3.15, uv, Git, ripgrep and fd.
+  Node 24, Python 3.11 and 3.14, uv, Git, ripgrep and fd.
 
 These are accepted limits, and [SECURITY.md](SECURITY.md) defines what does
 count as a vulnerability here and how to report it privately.

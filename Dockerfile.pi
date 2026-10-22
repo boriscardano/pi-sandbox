@@ -20,6 +20,8 @@ RUN apt-get update \
         git \
         less \
         procps \
+        python3 \
+        python3-venv \
         ripgrep \
     && ln -s /usr/bin/fdfind /usr/local/bin/fd \
     && rm -rf /var/lib/apt/lists/*
@@ -33,20 +35,21 @@ RUN apt-get update \
 COPY --from=ghcr.io/astral-sh/uv:0.13.5@sha256:32a7bb39b496babbd997b0a39a4d66c126bdaf5661b302bf6f06abda8deca6ff \
     /uv /uvx /usr/local/bin/
 
-# The image's only Python, 3.15, root-owned outside the agent's home, as
-# python, python3 and python3.15 on PATH. A project that accepts it syncs
-# without a download. One that pins another version makes uv download that one
-# into its state volume, about 90 MB. The build downloads the interpreter from
-# python-build-standalone on GitHub, and the uv pinned above names the exact
-# build and checks it against the sha256 it carries, so Python's own fixes
-# arrive by bumping uv. The entrypoint runs python3 from PATH, where the only
-# other candidate is one the agent can leave in ~/.local/bin, so the build
-# fails if the link is missing.
-RUN UV_PYTHON_INSTALL_DIR=/opt/uv-python UV_PYTHON_BIN_DIR=/usr/local/bin \
+# Python 3.14 for projects that need more than Debian's 3.11, root-owned
+# outside the agent's home. Its bin directory comes after /usr/bin on PATH, so
+# python3 stays Debian's, and uv keeps choosing 3.11 for a project that accepts
+# it, as it did before, and finds 3.14 without a download for one that needs
+# 3.12 or newer. 3.14 rather than 3.15 because compiled packages still lack
+# 3.15 wheels and there is no compiler here. A project that pins another
+# version makes uv download that one into its state volume, about 90 MB. The
+# build downloads the interpreter from python-build-standalone on GitHub, and
+# the uv pinned above names the exact build and checks it against the sha256 it
+# carries, so Python's own fixes arrive by bumping uv.
+RUN UV_PYTHON_INSTALL_DIR=/opt/uv-python UV_PYTHON_BIN_DIR=/opt/uv-python/bin \
         UV_CACHE_DIR=/tmp/uv-build-cache \
-        uv python install --default 3.15.1 \
+        uv python install 3.14.9 \
     && rm -rf /tmp/uv-build-cache \
-    && /usr/local/bin/python3 -I -c ''
+    && /opt/uv-python/bin/python3.14 -I -c ''
 
 # The entrypoint, which writes the subscription key Pi expects in auth.json
 # before becoming Pi. Copied in while still root, since /usr/local/bin is not
@@ -94,7 +97,7 @@ ENV UV_PROJECT_ENVIRONMENT=/home/agent/workspace-venv \
 # into its home (rustup, cargo install, uv tool install, pip --user) are still
 # found on the next run instead of being reinstalled. Appended rather than
 # prepended, so nothing in the volume can shadow a system binary.
-ENV PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/home/agent/.local/bin:/home/agent/.cargo/bin
+ENV PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/opt/uv-python/bin:/home/agent/.local/bin:/home/agent/.cargo/bin
 
 # Extensions. The entrypoint installs the four into the state volume, which is
 # also what reaches a project whose volume already exists, so that is the one

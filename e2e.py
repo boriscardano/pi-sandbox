@@ -68,6 +68,30 @@ EXPECTED_CHECKS = [
     "readonly mv .git",
 ]
 
+# What an agent does first in a Python project: install its dependencies. The
+# project wants a Python the image's Debian one is not, as most projects here
+# do, so uv needs another interpreter as well as the packages. Prints the
+# state volume's size in KB before and after, then what is in it.
+UV_SYNC = r"""
+cd /workspace
+cat > pyproject.toml <<'EOF'
+[project]
+name = "e2e-probe"
+version = "0"
+requires-python = ">=3.12,<3.13"
+dependencies = ["httpx", "pydantic"]
+EOF
+du -sk "$HOME" | cut -f1
+timeout 300 uv sync -q >&2
+du -sk "$HOME" | cut -f1
+du -sk "$HOME"/* "$HOME"/.[!.]* 2>/dev/null | sort -rn
+"""
+# The venv the sync left, used by the next session with nothing downloaded.
+UV_REUSE = "timeout 60 uv run --offline python -c 'import httpx, pydantic'"
+# Per project, so dozens of worktrees must not add up to gigabytes. The
+# interpreter and uv's cache are not the project's, only its venv is.
+VOLUME_GROWTH_KB = 30 * 1024
+
 
 def docker(*args: str, check: bool = False) -> str:
     """docker's output. Pass check where a failed call reading as empty would
@@ -384,6 +408,33 @@ def checks(lines: list[str]) -> bool:
         )
         lines.append(f"  memory limit {memory} bytes")
         failed |= memory != str(8 * 1024**3)
+
+        before, after, *contents = docker(
+            "exec", session.container, "sh", "-c", UV_SYNC, check=True
+        ).splitlines()
+        grown = int(after) - int(before)
+        lines.append("")
+        lines.append(
+            f"state volume after uv sync of a Python 3.12 project: "
+            f"{int(before) // 1024} MB -> {int(after) // 1024} MB, "
+            f"grew {grown // 1024} MB (allowed {VOLUME_GROWTH_KB // 1024} MB)"
+        )
+        lines += [f"  {line}" for line in contents]
+        failed |= grown > VOLUME_GROWTH_KB
+        quit_pi(session)
+
+        session = start(project)
+        reuse = subprocess.run(
+            ["docker", "exec", session.container, "sh", "-c", UV_REUSE],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        lines.append(
+            f"  next session imports from that venv offline: {reuse.returncode == 0}"
+            + (f"\n{reuse.stderr}" if reuse.returncode else "")
+        )
+        failed |= reuse.returncode != 0
         quit_pi(session)
 
         lines.append("")

@@ -96,7 +96,8 @@ ENV UV_PROJECT_ENVIRONMENT=/home/agent/workspace-venv \
 # Put the state volume's bin directories on PATH so tools the agent installs
 # into its home (rustup, cargo install, uv tool install, pip --user) are still
 # found on the next run instead of being reinstalled. Appended rather than
-# prepended, so nothing in the volume can shadow a system binary.
+# prepended, so nothing in the volume can shadow a system binary. The
+# image's Python 3.14 stays after /usr/bin, as the step installing it explains.
 ENV PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/opt/uv-python/bin:/home/agent/.local/bin:/home/agent/.cargo/bin
 
 # Extensions. The entrypoint installs the four into the state volume, which is

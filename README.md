@@ -386,9 +386,10 @@ agent writes is owned by you and that the memory limit is set, then ends a
 session each way one can end and checks that no container is left. Last it
 puts an image of an older Pi under the tag, starts a session, which rebuilds
 it, and checks that no Pi install build cache is left unused. It writes its
-findings to `e2e-report.txt`, which CI keeps as an artifact. It also syncs a
-Python project and fails if the state volume grows more than 30 MB. No API key and no
-model call. `python3 e2e.py --storage` runs 30 sessions in turn and then 10 at
+findings to `e2e-report.txt`, which CI keeps as an artifact. It also checks
+that uv picks Debian's Python 3.11 for a project that accepts it, syncs a
+Python project and fails if the state volume grows more than 30 MB. No API key
+and no model call. `python3 e2e.py --storage` runs 30 sessions in turn and then 10 at
 once in one project, all writing the key, and checks that
 what pi-sandbox keeps on disk stays flat. It is not run in CI.
 

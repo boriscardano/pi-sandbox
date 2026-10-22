@@ -3,7 +3,8 @@
 Starts the real wrapper in a pseudo-terminal in a throwaway repository, the
 way a Herdr pane does, and proves from inside the container it started that
 the project is writable and the parts of `.git` that can name a command are
-not. It syncs a Python project and checks that the state volume grows by
+not. It checks that uv still picks Debian's Python for a project that
+accepts it, syncs a Python project and checks that the state volume grows by
 little more than the venv, which the next session imports from offline.
 Then it ends sessions every way one can end and checks that no container
 is left behind, and rebuilds the image for a new Pi release and checks that
@@ -97,6 +98,10 @@ UV_REUSE = "timeout 60 uv run --offline python -c 'import httpx, pydantic'"
 # uv downloaded (about 90 MB) or uv's cache in the volume fails it, the venv
 # alone (9 MB measured) does not.
 VOLUME_GROWTH_KB = 30 * 1024
+# A project that accepts Debian's Python must still get it, as before the image
+# carried 3.14: one with a dependency that has no 3.14 wheel synced on 3.11
+# and fails on 3.14, since there is no compiler.
+UV_FIND = "uv python find '>=3.10'"
 
 
 def docker(*args: str, check: bool = False) -> str:
@@ -414,6 +419,9 @@ def checks(lines: list[str]) -> bool:
         )
         lines.append(f"  memory limit {memory} bytes")
         failed |= memory != str(8 * 1024**3)
+        found = docker("exec", session.container, "sh", "-c", UV_FIND)
+        lines.append(f"  uv's Python for a >=3.10 project: {found}")
+        failed |= found != "/usr/bin/python3"
 
         before, after, *contents = docker(
             "exec", session.container, "sh", "-c", UV_SYNC, check=True

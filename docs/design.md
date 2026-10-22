@@ -91,7 +91,7 @@ at install time but not what the extension code does once it is loaded.
 
 Docker seeds a new volume from the image's `/home/agent`, which is a few
 kilobytes. What filled volumes was written at run time: on 2026-10-22 one host
-had 94 volumes, 24 GB, mostly uv's cache (253 MB each) and a Python 3.12 that uv
+had 94 volumes, 24 GB, mostly uv's cache (253 MB each) and a Python that uv
 downloaded because Debian ships 3.11 (about 90 MB in a measured run, 184 MB of
 `~/.local` in those volumes). Every worktree is a project of its own, so each
 got its own copy.

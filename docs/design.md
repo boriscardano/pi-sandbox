@@ -87,6 +87,27 @@ means a new upstream release reaches the sandbox, and the API key it holds,
 without review. Lifecycle scripts stay off, which limits what a release can run
 at install time but not what the extension code does once it is loaded.
 
+## What the state volume holds
+
+Docker seeds a new volume from the image's `/home/agent`, which is a few
+kilobytes. What filled volumes was written at run time: on 2026-10-22 one host
+had 94 volumes, 24 GB, mostly uv's cache (253 MB each) and a Python 3.12 that uv
+downloaded because Debian ships 3.11 (87 MB in a measured run, 184 MB of
+`~/.local` in those volumes). Every worktree is a project of its own, so each
+got its own copy.
+
+Python 3.12 and 3.13 are therefore installed in the image, root-owned, and uv
+finds them on `PATH`. Any other version still lands in the volume. uv's cache
+lives in the container's `/tmp`, so a session that changes the lock downloads
+again. A cache shared across projects would avoid that, but one project's agent
+could then plant a package that another project's venv installs. The four
+extensions stay in the volume, about 46 MB, because they are updated per volume
+as described above.
+
+Each volume carries a `pi-sandbox.project` label with the host path it serves,
+set when Docker creates it, so the README's one-liner can remove the volumes
+whose project is gone. Nothing in the container can change a volume's labels.
+
 ## Protecting `.git`
 
 Git runs its hooks, and commands its config names through `core.fsmonitor`,

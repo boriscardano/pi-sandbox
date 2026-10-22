@@ -162,15 +162,31 @@ agent genuinely needs and use credentials you are willing to rotate.
 
 Pi's config and sessions live in a Docker volume named
 `pi-sandbox-<project>-<hash>`, one per project, so `pi --continue` and
-`pi --resume` work without exposing your host `~/.pi`. The volume also holds the
-uv cache and `UV_PROJECT_ENVIRONMENT`, so a Linux `uv sync` in the sandbox
-cannot overwrite a macOS or Windows virtualenv in the mounted checkout.
+`pi --resume` work without exposing your host `~/.pi`. The volume also holds
+`UV_PROJECT_ENVIRONMENT`, so a Linux `uv sync` in the sandbox cannot overwrite a
+macOS or Windows virtualenv in the mounted checkout. uv's cache stays in the
+container's `/tmp` and goes with it, and Python 3.12 and 3.13 come with the
+image, so a volume holds the project's venv but not a copy of either.
 
 ```sh
 docker volume ls --filter name=pi-sandbox-     # list
 docker system df -v | grep pi-sandbox-         # sizes
 docker volume rm pi-sandbox-<project>-<hash>   # reset one project
 ```
+
+Every worktree is a project of its own, so volumes pile up as worktrees come
+and go. Each volume is labelled with its project's path, and this removes the
+ones whose directory no longer exists (a volume in use is refused and kept):
+
+```sh
+docker volume ls -q --filter label=pi-sandbox.project | while read -r v; do [ -d "$(docker volume inspect -f '{{index .Labels "pi-sandbox.project"}}' "$v")" ] || docker volume rm "$v"; done
+```
+
+A project on a disk that is not mounted counts as gone. Volumes created before
+the label existed are not listed by it. Remove those by name, or every unused
+one at once with
+`docker volume ls -q --filter name=pi-sandbox- | xargs docker volume rm`, which
+also drops the sessions of projects you still have.
 
 ### What an agent installs
 
@@ -182,7 +198,9 @@ own sessions. `~/.local/bin` and `~/.cargo/bin` are on `PATH`, so these are
 found again on the next run rather than reinstalled.
 
 Lost, because `--rm` deletes the container's writable layer: anything in
-`/usr/local`, `/usr/bin` or `/opt`, and anything in `/tmp`. The agent cannot
+`/usr/local`, `/usr/bin` or `/opt`, and anything in `/tmp`, uv's cache among
+it. A venv already synced needs no cache, so only a changed lock downloads
+again. The agent cannot
 install system packages at all, since it is not root and there is no `sudo`, so
 `apt-get install` fails. Put anything system-level in `Dockerfile.pi` instead.
 

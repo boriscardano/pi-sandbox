@@ -336,7 +336,9 @@ def test_wrapper_mounts_only_the_chosen_project_and_a_state_volume(
     mounts = [argv[index + 1] for index, arg in enumerate(argv) if arg == "--mount"]
     assert mounts[0] == f"type=bind,source={tmp_path / 'project'},target=/workspace"
     assert mounts[1].startswith("type=volume,source=pi-sandbox-project-")
-    assert mounts[1].endswith(",target=/home/agent")
+    assert mounts[1].endswith(
+        f",target=/home/agent,volume-label=pi-sandbox.project={tmp_path / 'project'}"
+    )
     assert len(mounts) == 2
     assert "--volume" not in argv
     assert "-v" not in argv
@@ -472,7 +474,9 @@ def test_wrapper_mounts_git_config_and_hooks_read_only(tmp_path: Path) -> None:
     # state volume is still last.
     assert len(mounts) == 9
     assert mounts[8].startswith("type=volume,source=pi-sandbox-")
-    assert mounts[8].endswith(",target=/home/agent")
+    assert mounts[8].endswith(
+        f",target=/home/agent,volume-label=pi-sandbox.project={repo}"
+    )
 
 
 def test_wrapper_mounts_git_worktrees_read_only(tmp_path: Path) -> None:

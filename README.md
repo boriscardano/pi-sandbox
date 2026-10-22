@@ -165,8 +165,11 @@ Pi's config and sessions live in a Docker volume named
 `pi --resume` work without exposing your host `~/.pi`. The volume also holds
 `UV_PROJECT_ENVIRONMENT`, so a Linux `uv sync` in the sandbox cannot overwrite a
 macOS or Windows virtualenv in the mounted checkout. uv's cache stays in the
-container's `/tmp` and goes with it, and Python 3.12 and 3.13 come with the
-image, so a volume holds the project's venv but not a copy of either.
+container's `/tmp` and goes with it, and the image's Python is 3.15, so a
+project that accepts 3.15 keeps only its venv in the volume. A project that
+pins an older Python, in `.python-version` or `requires-python`, makes uv
+download that one into its volume, about 90 MB. A volume from before this
+change keeps its old `~/uv-cache` and uv-downloaded Python until you reset it.
 
 ```sh
 docker volume ls --filter name=pi-sandbox-     # list
@@ -182,7 +185,9 @@ ones whose directory no longer exists (a volume in use is refused and kept):
 docker volume ls -q --filter label=pi-sandbox.project | while read -r v; do [ -d "$(docker volume inspect -f '{{index .Labels "pi-sandbox.project"}}' "$v")" ] || docker volume rm "$v"; done
 ```
 
-A project on a disk that is not mounted counts as gone. Volumes created before
+Run it on the machine whose Docker created the volumes: it checks the paths
+there, and a project on a disk that is not mounted counts as gone. Volumes
+created before
 the label existed are not listed by it. Remove those by name, or every unused
 one at once with
 `docker volume ls -q --filter name=pi-sandbox- | xargs docker volume rm`, which
@@ -362,7 +367,7 @@ pane run` through that socket would execute on the host.
   runaway fan-out before it takes the machine's memory. Docker Desktop's VM may
   have less than that, in which case its own limit is the one reached first.
 - The image is roughly 1.2 GB, mostly Pi's npm dependency tree. It carries
-  Node 24, Python 3.11, uv, Git, ripgrep and fd.
+  Node 24, Python 3.15, uv, Git, ripgrep and fd.
 
 These are accepted limits, and [SECURITY.md](SECURITY.md) defines what does
 count as a vulnerability here and how to report it privately.

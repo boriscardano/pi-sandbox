@@ -69,16 +69,16 @@ EXPECTED_CHECKS = [
 ]
 
 # What an agent does first in a Python project: install its dependencies. The
-# project wants a Python the image's Debian one is not, as most projects here
-# do, so uv needs another interpreter as well as the packages. Prints the
-# state volume's size in KB before and after, then what is in it.
+# project asks for a recent Python without pinning one, as most do, which the
+# image's Python must satisfy without uv downloading another into the volume.
+# Prints the state volume's size in KB before and after, then what is in it.
 UV_SYNC = r"""
 cd /workspace
 cat > pyproject.toml <<'EOF'
 [project]
 name = "e2e-probe"
 version = "0"
-requires-python = ">=3.12,<3.13"
+requires-python = ">=3.12"
 dependencies = ["httpx", "pydantic"]
 EOF
 du -sk "$HOME" | cut -f1
@@ -415,7 +415,7 @@ def checks(lines: list[str]) -> bool:
         grown = int(after) - int(before)
         lines.append("")
         lines.append(
-            f"state volume after uv sync of a Python 3.12 project: "
+            f"state volume after uv sync of a Python >=3.12 project: "
             f"{int(before) // 1024} MB -> {int(after) // 1024} MB, "
             f"grew {grown // 1024} MB (allowed {VOLUME_GROWTH_KB // 1024} MB)"
         )

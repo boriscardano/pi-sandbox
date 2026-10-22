@@ -3,7 +3,9 @@
 Starts the real wrapper in a pseudo-terminal in a throwaway repository, the
 way a Herdr pane does, and proves from inside the container it started that
 the project is writable and the parts of `.git` that can name a command are
-not. Then it ends sessions every way one can end and checks that no container
+not. It syncs a Python project and checks that the state volume grows by
+little more than the venv, which the next session imports from offline.
+Then it ends sessions every way one can end and checks that no container
 is left behind, and rebuilds the image for a new Pi release and checks that
 the build cache the old one left is pruned. No API key and no model call: Pi
 starts its interface and waits for input.
@@ -13,11 +15,13 @@ starts its interface and waits for input.
 
 `--storage` runs 30 sessions in turn and then 10 at once in one project and
 checks that pi-sandbox keeps its image and no new unused build cache. It also
-reports the state volume's size. The default mode retags this checkout's
-image, so the next real launch rebuilds it. Neither deletes anything it did
-not create in the same run. Both count build cache across
-the whole host, so run them without other sessions building. The report is printed and
-written to the file (default e2e-report.txt or e2e-storage.txt).
+reports the state volume's size. This script itself deletes only the
+project, volume and containers it created, but the wrapper it runs removes
+every other pi-sandbox image and unused Pi install build cache when a session
+ends, as the README says, so run it where no session needs an older image.
+Both modes count build cache across the whole host, so run them without other
+sessions building. The report is printed and written to the file (default
+e2e-report.txt or e2e-storage.txt).
 """
 
 import contextlib
@@ -89,8 +93,9 @@ du -sk "$HOME"/* "$HOME"/.[!.]* 2>/dev/null | sort -rn
 """
 # The venv the sync left, used by the next session with nothing downloaded.
 UV_REUSE = "timeout 60 uv run --offline python -c 'import httpx, pydantic'"
-# Per project, so dozens of worktrees must not add up to gigabytes. The
-# interpreter and uv's cache are not the project's, only its venv is.
+# Per project, so dozens of worktrees must not add up to gigabytes. A Python
+# uv downloaded (about 90 MB) or uv's cache in the volume fails it, the venv
+# alone (9 MB measured) does not.
 VOLUME_GROWTH_KB = 30 * 1024
 
 
@@ -479,11 +484,10 @@ def checks(lines: list[str]) -> bool:
 
         # The tag now holds an image of an older Pi, as if npm had moved on
         # since it was built, so the next launch rebuilds it. Unused Pi
-        # install cache an earlier run left is set aside, not deleted, since
-        # this run deletes only what it created. A build that reuses one of
-        # those can hide a prune that no longer works, which a fresh CI
-        # runner, with none, still catches.
-        stale = unshared_pi_installs()
+        # install cache an earlier run left is not counted. This script no
+        # longer prunes it first, so a build that reuses one can hide a prune
+        # that no longer works, which a fresh CI runner, with none, catches.
+        cache_before = unshared_pi_installs()
         ids = []
         if sys.platform.startswith("linux"):
             ids = [f"--build-arg=AGENT_UID={os.getuid()}"]
@@ -506,7 +510,7 @@ def checks(lines: list[str]) -> bool:
             check=True,
         )
         kept = bool(docker("image", "inspect", "--format", "{{.Id}}", older))
-        left = unshared_pi_installs() - stale
+        left = unshared_pi_installs() - cache_before
         lines.append("")
         lines.append(
             f"a new Pi release: {OLDER_PI} rebuilt as {version}, "

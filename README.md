@@ -189,7 +189,8 @@ docker volume ls -q --filter label=pi-sandbox.project | while read -r v; do [ -d
 ```
 
 Run it on the machine whose Docker created the volumes: it checks the paths
-there, and a project on a disk that is not mounted counts as gone. Volumes
+there, and a project on a disk that is not mounted counts as gone, as does
+a worktree inside another project whose agent renamed its directory. Volumes
 created before
 the label existed are not listed by it. Remove those by name, or every unused
 one at once with
@@ -386,7 +387,8 @@ agent writes is owned by you and that the memory limit is set, then ends a
 session each way one can end and checks that no container is left. Last it
 puts an image of an older Pi under the tag, starts a session, which rebuilds
 it, and checks that no Pi install build cache is left unused. It writes its
-findings to `e2e-report.txt`, which CI keeps as an artifact. No API key and no
+findings to `e2e-report.txt`, which CI keeps as an artifact. It also syncs a
+Python project and fails if the state volume grows more than 30 MB. No API key and no
 model call. `python3 e2e.py --storage` runs 30 sessions in turn and then 10 at
 once in one project, all writing the key, and checks that
 what pi-sandbox keeps on disk stays flat. It is not run in CI.

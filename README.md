@@ -385,7 +385,7 @@ puts an image of an older Pi under the tag, starts a session, which rebuilds
 it, and checks that no Pi install build cache is left unused. It writes its
 findings to `e2e-report.txt`, which CI keeps as an artifact. No API key and no
 model call. `python3 e2e.py --storage` runs 30 sessions in turn and then 10 at
-once in one project, the ten racing to build a removed image, and checks that
+once in one project, all writing the key, and checks that
 what pi-sandbox keeps on disk stays flat. It is not run in CI.
 
 The tests in `test_pi.py` use a fake `docker` on `PATH`, so they neither build

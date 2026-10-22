@@ -13,8 +13,9 @@ starts its interface and waits for input.
 
 `--storage` runs 30 sessions in turn and then 10 at once in one project and
 checks that pi-sandbox keeps its image and no new unused build cache. It also
-reports the state volume's size. Both modes retag or remove this checkout's
-image, so the next real launch rebuilds it, and they count build cache across
+reports the state volume's size. The default mode retags this checkout's
+image, so the next real launch rebuilds it. Neither deletes anything it did
+not create in the same run. Both count build cache across
 the whole host, so run them without other sessions building. The report is printed and
 written to the file (default e2e-report.txt or e2e-storage.txt).
 """
@@ -478,11 +479,10 @@ def checks(lines: list[str]) -> bool:
 
         # The tag now holds an image of an older Pi, as if npm had moved on
         # since it was built, so the next launch rebuilds it. Unused Pi
-        # install cache an earlier run left is pruned first, so the build
-        # cannot reuse it and hide a prune that no longer works. Records of
-        # the old layer order cannot be pruned on their own, and are set aside.
-        for record in unshared_pi_installs():
-            docker("builder", "prune", "-f", "--filter", f"id={record}")
+        # install cache an earlier run left is set aside, not deleted, since
+        # this run deletes only what it created. A build that reuses one of
+        # those can hide a prune that no longer works, which a fresh CI
+        # runner, with none, still catches.
         stale = unshared_pi_installs()
         ids = []
         if sys.platform.startswith("linux"):
@@ -564,10 +564,9 @@ def storage(lines: list[str]) -> bool:
                 lines.append(f"  session {index + 1} left a container")
         figures.append(("after 30 sessions in turn", storage_figures(volume, image)))
 
-        # Without the image, ten sessions starting at once all build it.
-        docker("rmi", image)
-        if docker("images", "-q", image):
-            raise RuntimeError(f"could not remove {image} to race its build")
+        # Ten sessions starting at once, all writing the key. The image is
+        # kept, since this run deletes only what it created, so they do not
+        # race a build.
         sessions = [Session(project) for _ in range(10)]
         wait_ready(sessions)
         lost = sum(KEY_LOST in s.output for s in sessions)

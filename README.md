@@ -168,8 +168,11 @@ macOS or Windows virtualenv in the mounted checkout. uv's cache stays in the
 container's `/tmp` and goes with it, and the image's Python is 3.15, so a
 project that accepts 3.15 keeps only its venv in the volume. A project that
 pins an older Python, in `.python-version` or `requires-python`, makes uv
-download that one into its volume, about 90 MB. A volume from before this
-change keeps its old `~/uv-cache` and uv-downloaded Python until you reset it.
+download that one into its volume, about 90 MB. Pin one too when a
+dependency has no wheel for 3.15 yet, since the sandbox has no compiler to
+build it from source. A volume created by an earlier pi-sandbox, one that kept
+uv's cache in `~/uv-cache`, keeps that cache and its uv-downloaded Python until
+you reset it.
 
 ```sh
 docker volume ls --filter name=pi-sandbox-     # list

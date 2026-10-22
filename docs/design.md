@@ -92,14 +92,14 @@ at install time but not what the extension code does once it is loaded.
 Docker seeds a new volume from the image's `/home/agent`, which is a few
 kilobytes. What filled volumes was written at run time: on 2026-10-22 one host
 had 94 volumes, 24 GB, mostly uv's cache (253 MB each) and a Python 3.12 that uv
-downloaded because Debian ships 3.11 (88 MB in a measured run, 184 MB of
+downloaded because Debian ships 3.11 (about 90 MB in a measured run, 184 MB of
 `~/.local` in those volumes). Every worktree is a project of its own, so each
 got its own copy.
 
 The image's only Python is therefore 3.15, installed by uv as root outside
 the agent's home and found on `PATH`. A project that pins another version
 still gets it downloaded into its volume: measured on 2026-10-22, a 3.12 pin
-cost 87 MB per volume. Baking 3.12 and 3.13 as well would have saved that for
+cost 87 MB of interpreter per volume, plus its venv. Baking 3.12 and 3.13 as well would have saved that for
 pinned projects at about 90 MB of image each, but the image follows the newest
 stable Python instead. A volume that already holds a uv-downloaded Python keeps
 using it, since uv prefers its own installs to one on `PATH`. uv's cache

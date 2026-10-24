@@ -2293,6 +2293,45 @@ def test_wrapper_refuses_while_a_session_of_an_enclosing_directory_runs(
     assert started.returncode == 0, started.stderr
 
 
+def test_wrapper_refuses_a_second_session_under_another_spelling(
+    tmp_path: Path,
+) -> None:
+    """A shell keeps the path it was given in $PWD, so a second launch of a
+    running project through a symlink, to it or to a directory above it, or
+    on a case-insensitive disk through another case, hashed another name and
+    was let through while the first session's agent could swap `.git`. The
+    state volume keeps the spelling the user launched from."""
+
+    outer = tmp_path / "outer"
+    project = outer / "project"
+    project.mkdir(parents=True)
+    live = _prefix(tmp_path, project) + str(os.getpid())
+    (tmp_path / "to-project").symlink_to(project)
+    (tmp_path / "to-outer").symlink_to(outer)
+    spellings = {
+        "symlink": tmp_path / "to-project",
+        "symlinked parent": tmp_path / "to-outer" / "project",
+    }
+    if (outer / "PROJECT").exists():  # a case-insensitive disk, such as APFS
+        spellings["another case"] = outer / "PROJECT"
+
+    for name, cwd in spellings.items():
+        completed, invocations = _run(
+            tmp_path / name,
+            cwd=cwd,
+            containers=f"{live}\n",
+            also={"PWD": str(cwd)},
+        )
+        assert completed.returncode == 2, name
+        assert live in completed.stderr, name
+        assert not any(argv[0] == "run" for argv in invocations), name
+
+    link = tmp_path / "to-project"
+    started, invocations = _run(tmp_path / "alone", cwd=link, also={"PWD": str(link)})
+    assert started.returncode == 0, started.stderr
+    assert f"pi-sandbox.project={link}" in " ".join(_docker_run(invocations))
+
+
 def test_wrapper_refuses_when_a_dead_sessions_container_will_not_go(
     tmp_path: Path,
 ) -> None:

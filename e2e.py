@@ -272,6 +272,9 @@ class Session:
                         os.tcsetpgrp(0, os.getpgrp())
                         signal.signal(signal.SIGTTOU, signal.SIG_DFL)
                         os.chdir(project)
+                        # As a shell does, so a launch through a symlink keeps
+                        # that spelling.
+                        os.environ["PWD"] = str(project)
                         # Python ignores SIGPIPE, and a shell would not.
                         signal.signal(signal.SIGPIPE, signal.SIG_DFL)
                         os.execv(
@@ -639,14 +642,24 @@ def refusals(lines: list[str], image: str) -> bool:
                 + [SWAP_GIT.format(canary)],
                 check=True,
             )
-            output = refused(project)
-            left = sorted(path.name for path in canary.iterdir())
-            refusal = "still running" in output
-            lines.append(
-                "a second launch while a session swaps .git for a symlink: "
-                f"refused {refusal}, host directory holds {left}"
-            )
-            failed |= not refusal or left != ["keep"]
+            # Under the project's own name, so a launch wrongly let through
+            # leaves a volume the cleanup still finds.
+            alias = canary.parent / f"{canary.name}-alias" / project.name
+            alias.parent.mkdir()
+            alias.symlink_to(project)
+            try:
+                for spelling in (project, alias):
+                    output = refused(spelling)
+                    left = sorted(path.name for path in canary.iterdir())
+                    refusal = "still running" in output
+                    lines.append(
+                        "a second launch while a session swaps .git for a "
+                        f"symlink, from {'a symlink' if spelling == alias else 'it'}: "
+                        f"refused {refusal}, host directory holds {left}"
+                    )
+                    failed |= not refusal or left != ["keep"]
+            finally:
+                shutil.rmtree(alias.parent)
             quit_pi(session)
     finally:
         shutil.rmtree(canary, ignore_errors=True)

@@ -1089,6 +1089,31 @@ def test_wrapper_warns_about_a_bare_repository_the_container_left(
     assert lines[start + 2].startswith("your host git trusts it")
 
 
+def test_wrapper_warns_about_git_metadata_named_in_another_case(
+    tmp_path: Path,
+) -> None:
+    """macOS file systems ignore case by default, so host git there opens
+    `SUB/.GIT` for `.git` and takes a bare repository's `head` for `HEAD`. The
+    report matches the names in any case."""
+
+    completed, _ = _run(
+        tmp_path,
+        agent=(
+            "mkdir -p SUB/.GIT src/objects src/refs && touch SUB/.GIT/config && "
+            "printf 'ref: refs/heads/main\\n' > src/head"
+        ),
+    )
+
+    lines = completed.stderr.splitlines()
+    start = lines.index(
+        "pi-sandbox: warning: the container left nested git metadata in the project:"
+    )
+    assert lines[start + 1 : start + 3] == [
+        str(tmp_path / "project/SUB/.GIT"),
+        str(tmp_path / "project/src"),
+    ]
+
+
 def test_wrapper_keeps_what_find_found_when_a_directory_is_unreadable(
     tmp_path: Path,
 ) -> None:
@@ -1131,6 +1156,28 @@ def test_wrapper_prints_no_control_bytes_from_a_name_the_agent_chose(
     assert "\x1b" not in completed.stderr
     assert str(tmp_path / "project/sub?[1A?[2K/.git") in completed.stderr
     assert "nested git metadata" in completed.stderr
+
+
+def test_wrapper_prints_a_newline_in_a_name_as_a_question_mark(
+    tmp_path: Path,
+) -> None:
+    """The report is one path per line, so a newline in a name the agent
+    chose would add a line of its choosing under the warning, one that reads
+    as the wrapper's own."""
+
+    completed, _ = _run(
+        tmp_path,
+        agent=(
+            "d=$(printf 'x\\npi-sandbox: this is safe to ignore\\ny') && "
+            'mkdir -p "$d/.git" && touch "$d/.git/config"'
+        ),
+    )
+
+    assert "pi-sandbox: this is safe to ignore" not in completed.stderr.splitlines()
+    assert (
+        str(tmp_path / "project/x?pi-sandbox: this is safe to ignore?y/.git")
+        in completed.stderr
+    )
 
 
 def test_wrapper_resets_the_terminal_before_its_exit_warnings(

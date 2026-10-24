@@ -1973,18 +1973,24 @@ def _run_entrypoint(
         f'printf "SCRIPTS=%s\\n" "${{npm_config_ignore_scripts:-}}" >>{calls_log}\n'
         f'printf "%s\\n" "$@" >{argv_log}\n'
         f"env >{env_log}\n"
-        # Fails the one call whose second word is named, an install or the
-        # update.
-        'if [ -n "${PI_SANDBOX_FAKE_PI_INSTALL_FAIL:-}" ] && [ "${2:-}" = "${PI_SANDBOX_FAKE_PI_INSTALL_FAIL}" ]; then\n'
-        "    exit 1\n"
-        "fi\n"
+        # Fails the install of the one package named, at any version.
+        'case "${PI_SANDBOX_FAKE_PI_INSTALL_FAIL:-}" in\n'
+        '    ?*) case "${2:-}" in "$PI_SANDBOX_FAKE_PI_INSTALL_FAIL" | "$PI_SANDBOX_FAKE_PI_INSTALL_FAIL"@*) exit 1 ;; esac ;;\n'
+        "esac\n"
         'if [ "$1" = install ]; then\n'
         '    if [ "${PI_SANDBOX_FAKE_PI_INSTALL_STATUS:-0}" != 0 ]; then\n'
         '        exit "${PI_SANDBOX_FAKE_PI_INSTALL_STATUS}"\n'
         "    fi\n"
-        # Where Pi puts an installed npm package, and where npm caches it.
-        '    mkdir -p "$HOME/.pi/agent/npm/node_modules/${2#npm:}"\n'
-        '    mkdir -p "${npm_config_cache:-$HOME/.npm}/_cacache"\n'
+        # Where Pi puts an installed npm package, with the version asked for
+        # (none for a bare name, scoped or not), and where npm caches it.
+        '    spec=${2#npm:} name=${2#npm:} version=""\n'
+        '    case "${spec#@}" in *@*) name=${spec%@*} version=${spec##*@} ;; esac\n'
+        '    mkdir -p "$HOME/.pi/agent/npm/node_modules/$name"\n'
+        '    rm -f "$HOME/.pi/agent/npm/node_modules/$name/package.json"\n'
+        '    printf \'{"name": "%s", "version": "%s"}\\n\' "$name" "$version" >"$HOME/.pi/agent/npm/node_modules/$name/package.json"\n'
+        # Pi's settings list each install as it was named, one per line here,
+        # which is all a fixed-string search of the real JSON needs.
+        '    printf \'"%s"\\n\' "$2" >>"$HOME/.pi/agent/settings.json"\n'
         "fi\n"
         "exit 0\n"
     )
@@ -2040,36 +2046,42 @@ def _run_entrypoint(
     )
 
 
-def test_the_entrypoint_updates_the_extensions_on_start(tmp_path: Path) -> None:
-    """The extensions live in the state volume, so an image rebuild does not
-    reach an existing project. Installing all four without a version adds the
-    missing ones, but leaves an installed one at its version, so the update
-    after them is what moves the volume to the newest releases. Lifecycle
-    scripts stay off and the step is bounded so a hung registry cannot stop
-    Pi."""
+PINNED = re.compile(r"npm:(@[a-z0-9-]+/)?[a-z0-9-]+@[0-9]+\.[0-9]+\.[0-9]+")
+
+
+def _unpinned(spec: str) -> str:
+    """The package a spec names, without the version it is pinned to."""
+
+    return re.sub(r"@[0-9][^/]*$", "", spec)
+
+
+def test_the_entrypoint_installs_the_pinned_extensions_on_start(
+    tmp_path: Path,
+) -> None:
+    """The extensions run with the forwarded keys in every project, so they
+    are pinned to exact versions, bumped in a reviewed change, and nothing
+    moves them to a newer release on its own. Lifecycle scripts stay off and
+    the step is bounded so a hung registry cannot stop Pi."""
 
     started = _run_entrypoint(tmp_path)
-    installs = [call for call in started.calls if call[:1] == ["install"]]
+    installs = [call[1] for call in started.calls[:-1]]
 
-    assert [call[1] for call in installs] == [
+    assert [_unpinned(spec) for spec in installs] == [
         "npm:pi-subagents",
         "npm:@tintinweb/pi-subagents",
         "npm:pi-background-tasks",
         "npm:pi-extension-manager",
     ]
-    assert started.calls[len(installs)] == ["update", "--extensions"]
-    assert all(
-        started.scripts[index] == "true"
-        for index, call in enumerate(started.calls)
-        if call[:1] in (["install"], ["update"])
-    )
+    assert all(PINNED.fullmatch(spec) for spec in installs), installs
+    assert all(call[0] == "install" for call in started.calls[:-1])
+    assert all(scripts == "true" for scripts in started.scripts[:-1])
     # The final exec is Pi itself, which must not inherit the setting.
     assert started.calls[-1] == ["--model", "kimi-k3"]
     assert started.scripts[-1] == ""
-    assert any(timeout.startswith("120 ") for timeout in started.timeouts)
+    assert started.timeouts
 
 
-def test_the_entrypoint_skips_the_extension_update_for_subcommands(
+def test_the_entrypoint_skips_the_extension_install_for_subcommands(
     tmp_path: Path,
 ) -> None:
     """`pi install` and the rest are passed through to Pi, so the entrypoint
@@ -2081,19 +2093,19 @@ def test_the_entrypoint_skips_the_extension_update_for_subcommands(
     assert started.timeouts == []
 
 
-def test_the_entrypoint_starts_pi_when_the_extension_update_fails(
+def test_the_entrypoint_starts_pi_when_the_extension_install_fails(
     tmp_path: Path,
 ) -> None:
     """A registry that is down or a volume the agent has ruined must cost the
-    update, not the session."""
+    install, not the session."""
 
     started = _run_entrypoint(tmp_path, PI_SANDBOX_FAKE_PI_INSTALL_STATUS="1")
 
     assert started.argv == ["--model", "kimi-k3"]
-    assert "could not update the extensions" in started.stderr
+    assert "could not install the extensions" in started.stderr
 
 
-def test_the_entrypoint_reports_a_partial_extension_update_failure(
+def test_the_entrypoint_reports_a_partial_extension_install_failure(
     tmp_path: Path,
 ) -> None:
     """One package failing must be reported even though the other three
@@ -2106,7 +2118,7 @@ def test_the_entrypoint_reports_a_partial_extension_update_failure(
 
     assert started.argv == ["--model", "kimi-k3"]
     assert len(installs) == 4
-    assert "could not update the extensions" in started.stderr
+    assert "could not install the extensions" in started.stderr
 
 
 def _restart(tmp_path: Path, **env: str) -> list[list[str]]:
@@ -2117,59 +2129,77 @@ def _restart(tmp_path: Path, **env: str) -> list[list[str]]:
     return _run_entrypoint(tmp_path, **env).calls[:-1]
 
 
-def test_the_entrypoint_updates_the_extensions_at_most_once_a_day(
+def test_the_entrypoint_makes_no_call_at_the_pins(tmp_path: Path) -> None:
+    """Every Herdr pane is a start, and an install costs about a second
+    each, so a volume that already holds the pins makes no call."""
+
+    _run_entrypoint(tmp_path)
+
+    assert _restart(tmp_path) == []
+
+
+def test_the_entrypoint_moves_an_existing_volume_to_the_pinned_versions(
     tmp_path: Path,
 ) -> None:
-    """The update costs seconds on every start, and every Herdr pane is a
-    start, so a fresh update is not repeated within a day."""
+    """An image rebuild does not reach an existing volume, so a bump in the
+    list has to, in either direction: an older release from before the bump
+    and a newer one the agent installed both go back to the pin."""
 
-    first = _run_entrypoint(tmp_path).calls[:-1]
-    soon = _restart(tmp_path)
-    day_old = time.time() - 25 * 3600
-    for path in (tmp_path / "home").rglob("*"):
-        os.utime(path, (day_old, day_old), follow_symlinks=False)
-    next_day = _restart(tmp_path)
+    first = [call[1] for call in _run_entrypoint(tmp_path).calls[:-1]]
+    modules = tmp_path / "home/.pi/agent/npm/node_modules"
+    (modules / "pi-subagents/package.json").write_text('{"version": "0.0.1"}')
+    (modules / "@tintinweb/pi-subagents/package.json").write_text(
+        '{"version":"99.0.0"}'
+    )
 
-    assert len(first) == 5
-    assert soon == []
-    assert next_day == first
+    assert [call[1] for call in _restart(tmp_path)] == first[:2]
+
+
+def test_the_entrypoint_pins_an_extension_pi_lists_without_a_version(
+    tmp_path: Path,
+) -> None:
+    """A volume from before the pins, or a bare `pi install` of one of the
+    four, leaves Pi's settings naming it without a version while npm holds
+    the pinned one. `pi update --extensions` moves exactly those entries, so
+    the next start must pin it again."""
+
+    first = [call[1] for call in _run_entrypoint(tmp_path).calls[:-1]]
+    settings = tmp_path / "home/.pi/agent/settings.json"
+    settings.write_text(
+        settings.read_text().replace(first[1], "npm:@tintinweb/pi-subagents")
+    )
+
+    assert [call[1] for call in _restart(tmp_path)] == [first[1]]
 
 
 def test_the_entrypoint_installs_a_missing_extension_on_any_start(
     tmp_path: Path,
 ) -> None:
-    """A day's pause is for updates only: an extension the agent removed is
-    put back on the next start."""
+    """An extension the agent removed is put back on the next start, at its
+    pinned version."""
 
-    _run_entrypoint(tmp_path)
+    first = [call[1] for call in _run_entrypoint(tmp_path).calls[:-1]]
     shutil.rmtree(tmp_path / "home/.pi/agent/npm/node_modules/pi-background-tasks")
 
-    installs = [call[1] for call in _restart(tmp_path) if call[0] == "install"]
-
-    assert "npm:pi-background-tasks" in installs
+    assert [call[1] for call in _restart(tmp_path)] == [first[2]]
 
 
-def test_the_entrypoint_retries_a_failed_update_on_the_next_start(
+def test_the_entrypoint_does_not_block_on_a_fifo_the_agent_left(
     tmp_path: Path,
 ) -> None:
-    """The update failing leaves all four installed, so only the missing
-    record of a success can bring it back on the next start."""
-
-    _run_entrypoint(tmp_path, PI_SANDBOX_FAKE_PI_INSTALL_FAIL="--extensions")
-
-    assert len(_restart(tmp_path)) == 5
-
-
-def test_the_entrypoint_keeps_the_npm_cache_out_of_the_state_volume(
-    tmp_path: Path,
-) -> None:
-    """npm keeps every version it downloads in ~/.npm by default, so a cache
-    in the volume grows with each extension release however little the user
-    does. The fake pi caches its install where npm would."""
+    """The installed version is read from the volume, which the agent owns.
+    A FIFO in place of a package.json would block that read forever, and
+    the session with it."""
 
     _run_entrypoint(tmp_path)
+    package = tmp_path / "home/.pi/agent/npm/node_modules/pi-subagents/package.json"
+    package.unlink()
+    os.mkfifo(package)
+    (tmp_path / "pi.calls").unlink()
 
-    assert not (tmp_path / "home/.npm").exists()
+    started = _run_entrypoint(tmp_path, timeout=20)
+
+    assert started.argv == ["--model", "kimi-k3"]
 
 
 def test_the_entrypoint_writes_the_subscription_key_where_pi_reads_it(

@@ -59,3 +59,18 @@ Notes for agents and contributors changing this repo, from the security work on
   (Herdr identifies the pane by the `pi` process), and keeps docker's exit
   status. Its body stays in one brace group so an edit or `git pull` during a
   session cannot change what the running wrapper executes.
+
+## Image and volume notes
+
+- `Dockerfile.pi` sets `HOME=/home/agent` before its root `RUN` steps, so
+  anything a root step writes under `$HOME` lands root-owned in the image and
+  is copied into every new state volume, where the agent cannot write it. The
+  Pi install left a root-owned `~/.npm` that made `pi install` inside the
+  sandbox fail with EACCES (found 2026-10-24). That step now removes it, and
+  `ENV npm_config_cache` keeps npm out of it in older volumes. Remove what a
+  root step leaves under `$HOME`.
+- The four extensions are pinned in `entrypoint.sh`. `pi install
+  npm:<package>@<version>` moves an installed one down as well as up and
+  replaces its entry in Pi's settings, and an install without a version
+  unpins it (measured 2026-10-24), which is why the entrypoint also checks
+  Pi's settings for the pinned entry.

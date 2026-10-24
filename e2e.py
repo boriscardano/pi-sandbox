@@ -127,6 +127,45 @@ class Answer(http.server.BaseHTTPRequestHandler):
         pass
 
 
+# The extensions the volume holds, from Pi's settings and the version npm
+# installed, sorted, and changes to them by hand, run as the user would, which
+# must work in the volume, leave no npm cache in it, and be undone by the next
+# start. Then the real entrypoint, run again on the volume at the pins with a
+# stub `pi` that records its calls, must make none but the final exec, which
+# shows its checks match the files real Pi and npm write.
+INSTALLED = r"""python3 -I -c 'import json, pathlib, re
+agent = pathlib.Path.home() / ".pi/agent"
+for spec in json.loads((agent / "settings.json").read_text())["packages"]:
+    name = re.sub(r"^npm:|@[0-9][^/]*$", "", spec)
+    package = agent / "npm/node_modules" / name / "package.json"
+    print(spec, json.loads(package.read_text())["version"])
+' | sort"""
+BY_HAND = (
+    "pi install npm:pi-background-tasks@2.6.9 && pi remove npm:pi-extension-manager"
+    " && test ! -e ~/.npm"
+)
+AT_PINS = r"""
+mkdir -p /tmp/stub
+cat >/tmp/stub/pi <<'EOF'
+#!/bin/sh
+echo "$*" >>/tmp/stub/calls
+EOF
+chmod +x /tmp/stub/pi
+PATH=/tmp/stub:$PATH pi-sandbox-entrypoint --version
+cat /tmp/stub/calls
+"""
+
+
+def pinned_extensions() -> list[str]:
+    """What the entrypoint pins, each as Pi's settings and npm should hold it."""
+
+    for line in (WRAPPER.parent / "entrypoint.sh").read_text().splitlines():
+        if line.strip().startswith("packages="):
+            specs = line.split("=", 1)[1].strip("'").split()
+            return sorted(f"npm:{spec} {spec.rpartition('@')[2]}" for spec in specs)
+    raise SystemExit("no packages= line in entrypoint.sh")
+
+
 def docker(*args: str, check: bool = False) -> str:
     """docker's output. Pass check where a failed call reading as empty would
     pass a check, so it raises instead."""
@@ -507,6 +546,27 @@ def checks(lines: list[str]) -> bool:
         lines.append(
             f"  host service on 127.0.0.1, from the container: {reach or 'probe failed'}"
         )
+        pinned = pinned_extensions()
+        installed = docker("exec", session.container, "sh", "-c", INSTALLED)
+        lines.append("  extensions a fresh volume got:")
+        lines += [f"    {line}" for line in installed.splitlines()]
+        if installed.splitlines() != pinned:
+            failed = True
+            lines.append(f"    FAIL: expected {pinned}")
+        by_hand = subprocess.run(
+            ["docker", "exec", session.container, "sh", "-c", BY_HAND],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if by_hand.returncode:
+            failed = True
+            lines.append(f"    FAIL: {BY_HAND}\n{by_hand.stdout}{by_hand.stderr}")
+        installed = docker("exec", session.container, "sh", "-c", INSTALLED)
+        took = "npm:pi-background-tasks@2.6.9 2.6.9" in installed.splitlines()
+        took &= "pi-extension-manager" not in installed
+        lines.append(f"  {BY_HAND}: took {took}")
+        failed |= not took
 
         before, after, *contents = docker(
             "exec", session.container, "sh", "-c", UV_SYNC, check=True
@@ -534,6 +594,17 @@ def checks(lines: list[str]) -> bool:
             + (f"\n{reuse.stderr}" if reuse.returncode else "")
         )
         failed |= reuse.returncode != 0
+        installed = docker("exec", session.container, "sh", "-c", INSTALLED)
+        lines.append(
+            "  next start undid them, back at the pins: "
+            f"{installed.splitlines() == pinned}"
+        )
+        failed |= installed.splitlines() != pinned
+        calls = docker("exec", session.container, "sh", "-c", AT_PINS)
+        lines.append(
+            f"  a start at the pins calls pi only to exec it: {calls == '--version'}"
+        )
+        failed |= calls != "--version"
         quit_pi(session)
 
         lines.append("")

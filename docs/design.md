@@ -67,25 +67,44 @@ there, mode 0600, leaving any other provider in the file alone. That file is in
 the state volume, so unlike the environment the key outlives the container.
 `docker volume rm` is what removes it.
 
-## Extension updates
+## Extension pins
 
-The entrypoint installs any of the four extensions that is missing and then
-runs `pi update --extensions`, so an existing volume ends up at their newest
-releases even though an image rebuild does not reach it. That step took about
-3 seconds of a warm start, so after one that worked it is skipped for 24 hours,
-unless one of the four is missing. npm's download cache for it goes to `/tmp`,
-which is removed with the container, so releases do not pile up in the volume.
+The four extensions are pinned to exact versions in the entrypoint's list. A
+start installs any of them unless npm holds the pinned version, judged by the
+`package.json` under Pi's npm directory, and Pi's settings name it pinned. So
+an existing volume follows a bumped pin even though an image rebuild does not
+reach it, and an entry without a version, from a volume older than the pins or
+a bare `pi install` of one of the four, is pinned again at the next start,
+since `pi update --extensions` moves exactly those. A volume already at the
+pins makes no call, since each install costs about a second of a warm start
+and every Herdr pane is a start. An install that names a version moves an
+installed release down as well as up and replaces the entry in Pi's settings
+(measured with `pi-background-tasks`, 2.6.9 to 2.6.10 and back). npm's
+download cache goes to `/tmp`, which is removed with the container, so
+releases do not pile up in the volume.
 
-That update also moves any extension you added without a version, while one
-installed as `npm:<package>@<version>` stays at it. A `pi remove
-npm:<package>` of one of the four therefore lasts only until the next start,
-which installs it again, and a pin on one of the four is undone, since that
-install names no version.
+Nothing runs `pi update --extensions`. An extension you added stays at the
+version it was installed at, and a `pi remove npm:<package>` of one of the four
+lasts only until the next start, which installs it again. pi-extension-manager
+can schedule updates of its own, off by default, and the pins come back at the
+next start, not during the session. The check repairs
+drift, not tampering: the agent owns these files and can edit an extension's
+code while leaving its version alone, and only resetting the volume undoes
+that.
 
-pi-sandbox always runs the newest releases rather than reviewed pins, which
-means a new upstream release reaches the sandbox, and the API key it holds,
-without review. Lifecycle scripts stay off, which limits what a release can run
-at install time but not what the extension code does once it is loaded.
+The pins are bumped by hand in a reviewed pull request, as the base image and
+uv are pinned by digest in `Dockerfile.pi`. Each of the four is maintained by
+one person on npm, and the extensions run with every key a project forwards,
+in every project. Following the newest release would let a compromised
+account or a bad release reach every project's sandbox, which is more than a
+hostile model gets, since the model is confined to one project. To bump one,
+read the release's changes against the pinned version, change the version in
+the list in `entrypoint.sh`, and open a pull request. The pins do not cover
+the extensions' own dependencies, which npm resolves from version ranges when
+it installs, so a new volume can still get a newer dependency than the last
+one did. Pi itself still runs its newest release, as above. Lifecycle scripts
+stay off, which limits what a release can run at install time but not what
+the extension code does once it is loaded.
 
 ## What the state volume holds
 
@@ -123,7 +142,7 @@ using it, since uv prefers its own installs to one on `PATH`. uv's cache
 lives in the container's `/tmp`, so a session that changes the lock downloads
 again. A cache shared across projects would avoid that, but one project's agent
 could then plant a package that another project's venv installs. The four
-extensions stay in the volume, about 46 MB, because they are updated per volume
+extensions stay in the volume, about 46 MB, because each volume installs them
 as described above.
 
 Each volume carries a `pi-sandbox.project` label with the host path it serves,

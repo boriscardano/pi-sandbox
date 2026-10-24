@@ -210,16 +210,16 @@ also drops the sessions of projects you still have.
 Whether a tool survives the container exiting depends only on where it writes.
 
 Kept, because it lands in the volume under `/home/agent`: `rustup` and
-`cargo install`, `uv tool install`, `pip install --user`, npm's cache, and Pi's
-own sessions. `~/.local/bin` and `~/.cargo/bin` are on `PATH`, so these are
+`cargo install`, `uv tool install`, `pip install --user`, and Pi's own
+sessions. `~/.local/bin` and `~/.cargo/bin` are on `PATH`, so these are
 found again on the next run rather than reinstalled.
 
 Lost, because `--rm` deletes the container's writable layer: anything in
-`/usr/local`, `/usr/bin` or `/opt`, and anything in `/tmp`, uv's cache among
-it. A venv already synced needs no cache, so only a changed lock downloads
-again. The agent cannot
-install system packages at all, since it is not root and there is no `sudo`, so
-`apt-get install` fails. Put anything system-level in `Dockerfile.pi` instead.
+`/usr/local`, `/usr/bin` or `/opt`, and anything in `/tmp`, uv's and npm's
+caches among it. A venv already synced needs no cache, so only a changed lock
+downloads again. The agent cannot install system packages at all, since it is
+not root and there is no `sudo`, so `apt-get install` fails. Put anything
+system-level in `Dockerfile.pi` instead.
 
 These volumes grow. A project whose agent installed a Rust toolchain reached
 2.6 GB.
@@ -239,7 +239,8 @@ docker exec -it "$(docker ps -q --filter label=pi-sandbox=1 | head -1)" bash
 
 ## Extensions
 
-The entrypoint installs four Pi extensions from npm at their newest release:
+The entrypoint installs four Pi extensions from npm, each pinned to an exact
+version in the list in `entrypoint.sh`:
 
 - `npm:pi-subagents`, delegation to subagents and scripted multi-agent
   workflows, under `/subagents`.
@@ -257,29 +258,32 @@ with the container.
 
 They live in the agent's home, so they reach a project through its state
 volume. A new project's first start downloads them. Offline, that start
-proceeds without them, and the next start with a network installs them. A
-start installs any of the four that is missing and updates every unpinned
-extension to its newest release. After an update that worked, this is
-skipped for 24 hours unless one of the four is missing. Delete
-`~/.pi-sandbox-extensions-updated` in the volume to force it on the next
-start. An extension you added yourself
-as `npm:<package>@<version>` stays at that version, while a pin on one of the
-four is undone at the next update.
+proceeds without them, and the next start with a network installs them. A start
+installs any of the four that is missing, not at its pinned version or listed
+by Pi without it, so a new pin reaches existing volumes too, and makes no call
+otherwise. Nothing updates them on its own. An extension you added yourself
+stays at the version it was installed at, and another version of one of the
+four is put back to the pin at the next start. That repairs drift, not
+tampering, since the agent owns these files, and resetting the volume is the
+only real reset.
 
 Pi's own subcommands run against the volume rather than your host Pi, so
 `pi list` shows what a project actually has and `pi install npm:<package>` adds
 one. `install`, `remove`, `uninstall`, `list`, `config` and `auth` all work this
 way. So does `pi update --extensions`, but bare `pi update` targets Pi itself,
 which lives outside the volume in a root-owned directory the agent cannot
-write. Resetting the volume, as under State and reset, is the other way to pick
-up a change.
+write. Resetting the volume, as under State and reset, also drops any extension
+no longer in the list.
 
-Change the set by editing the four names in `entrypoint.sh`, which is where the
-install list lives. To drop one for good, run `pi remove npm:<package>` and
-delete its name from that list, then relaunch, which rebuilds the image.
-pi-sandbox runs the newest releases rather than reviewed pins, so a new
-upstream release reaches the sandbox, and the API key it holds, without review.
-[docs/design.md](docs/design.md#extension-updates) has the details.
+Change the set by editing the list in `entrypoint.sh`, which is where the
+four names and their versions live. To drop one for good, run
+`pi remove npm:<package>` and delete it from that list, then relaunch, which
+rebuilds the image. The pins are bumped by hand in a reviewed pull request, so
+a new release of the four reaches no sandbox until someone has looked at it,
+though their own dependencies still resolve from version ranges. To
+bump one, read the release's changes on npm, change its version in that list,
+and open a pull request. The next start of each project installs it.
+[docs/design.md](docs/design.md#extension-pins) has the details.
 
 ## Git
 
@@ -427,7 +431,10 @@ writable while `.git/config`, `config.worktree`, `commondir`, `hooks`,
 `worktrees` and `modules` are not and `.git` cannot be moved, that a file the
 agent writes is owned by you, that the memory and CPU limits are set, that
 the terminal output is not logged and that a copy of the wrapper launched on
-the project holding it refuses to start, then ends a session each way one can
+the project holding it refuses to start. It checks that a new volume holds the
+four extensions at their pins, that installing and removing one by hand works
+with no npm cache in the volume, and that the next start restores the pins
+without a call to Pi once they are. Then it ends a session each way one can
 end and checks that no container is left. Last it puts an image of an older Pi
 under the tag, starts a session, which rebuilds it, and checks that no Pi
 install build cache is left unused. It writes its findings to
@@ -447,7 +454,7 @@ flags present and no privileged or host namespace flags, the home-directory
 refusal, and that a Herdr pane's socket stays on the host. The rest run
 `entrypoint.sh` against stub binaries and a throwaway home, for the default
 model, where the subscription key is written, what happens when the agent has
-ruined the file it is written to, and when the extensions are updated. Two
+ruined the file it is written to, and when the extensions are installed. Two
 check that `Dockerfile.pi` pins its base image and uv by digest, a supply chain
 property no behaviour test can see.
 

@@ -115,9 +115,9 @@ The container runs as non-root (`agent`, your own uid and gid on Linux and
 `--security-opt no-new-privileges` and `--pids-limit 512`, and may use half
 the CPUs Docker has (at least one), so a spinning agent cannot hold every core.
 Its terminal output is not logged (`--log-driver none`), so it cannot fill the
-disk through a log nobody reads. No `--privileged`, and no host PID, IPC or
-network namespace. Outbound networking is on, since the
-agent has to reach the model API. No port is published.
+disk through Docker's log file. No `--privileged`, and no host PID, IPC or
+network namespace. Outbound networking is on, since the agent has to reach the
+model API. No port is published.
 
 ## The API keys
 
@@ -246,8 +246,8 @@ The entrypoint installs four Pi extensions from npm at their newest release:
 
 The subagent and background-task extensions let the agent start work that
 keeps running while you are not watching, with the same key, open network,
-`--pids-limit` and CPU share as the foreground session. Everything still dies with the
-container.
+`--pids-limit` and CPU share as the foreground session. Everything still dies
+with the container.
 
 They live in the agent's home, so they reach a project through its state
 volume. A new project's first start downloads them. Offline, that start
@@ -371,8 +371,7 @@ pane run` through that socket would execute on the host.
   enforces a limit beyond `--pids-limit` and the container's 8 GB memory
   limit, plus as much again in swap where the host has it, which stops a
   runaway fan-out before it takes the machine's memory. Docker Desktop's VM may
-  have less than that, in which case its own limit is the one reached first. The
-  CPU share caps how much of the machine they can keep busy, not how long.
+  have less than that, in which case its own limit is the one reached first.
 - The image is roughly 1.2 GB, mostly Pi's npm dependency tree. It carries
   Node 24, Python 3.11 and 3.14, uv, Git, ripgrep and fd.
 
@@ -387,10 +386,10 @@ throwaway repository, checks from inside the container that `/workspace` is
 writable while `.git/config`, `config.worktree`, `commondir`, `hooks`,
 `worktrees` and `modules` are not and `.git` cannot be moved, that a file the
 agent writes is owned by you, that the memory and CPU limits are set and that
-the terminal output is not logged, then ends a
-session each way one can end and checks that no container is left. Last it
-puts an image of an older Pi under the tag, starts a session, which rebuilds
-it, and checks that no Pi install build cache is left unused. It writes its
+the terminal output is not logged, then ends a session each way one can end and
+checks that no container is left. Last it puts an image of an older Pi under
+the tag, starts a session, which rebuilds it, and checks that no Pi install
+build cache is left unused. It writes its
 findings to `e2e-report.txt`, which CI keeps as an artifact. It also checks
 that uv picks Debian's Python 3.11 for a project that accepts it, syncs a
 Python project and fails if the state volume grows more than 30 MB. No API key

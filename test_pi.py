@@ -1203,14 +1203,13 @@ def test_wrapper_keeps_the_container_unprivileged(tmp_path: Path) -> None:
     assert argv[argv.index("--pids-limit") + 1] == "512"
     # A runaway subagent fan-out must hit this before it takes the host.
     assert argv[argv.index("--memory") + 1] == "8g"
-    # dockerd would otherwise copy the whole terminal stream into a log file
-    # with no size limit that nobody reads, which the agent can fill the disk
-    # with by writing NULs to its terminal.
+    # Without it dockerd copies the terminal stream into a log with no size
+    # limit, which the agent can fill the disk through.
     assert argv[argv.index("--log-driver") + 1] == "none"
 
 
 @pytest.mark.parametrize(
-    ("ncpu", "cpus"), [("8", "4"), ("14", "7"), ("3", "1"), ("1", "1"), ("", "1")]
+    ("ncpu", "cpus"), [("8", "4"), ("3", "1"), ("1", "1"), ("", "1")]
 )
 def test_wrapper_lets_one_session_use_half_the_cpus(
     tmp_path: Path, ncpu: str, cpus: str

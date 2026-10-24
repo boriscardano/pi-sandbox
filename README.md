@@ -110,7 +110,9 @@ Not mounted: your home directory, `~/.ssh`, `~/.aws`,
 Herdr socket, and `~/.pi` on the host, which holds Pi's provider OAuth tokens.
 The script refuses to start if the directory it would mount is your home
 directory, contains it, is `/`, contains the script itself, or has a comma in
-its path, which Docker's `--mount` syntax would read as another field.
+its path, which Docker's `--mount` syntax would read as another field. It
+compares physical paths, so a symlink or another case of the name does not get
+around these checks.
 
 The container runs as non-root (`agent`, your own uid and gid on Linux and
 1001 on Docker Desktop) with `--cap-drop ALL`,

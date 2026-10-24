@@ -7,7 +7,8 @@ when it shows the agent, or anything it runs in the container, breaking that
 boundary. For example:
 
 - reading or writing a host file outside the project mounted at `/workspace`
-- running a command on the host
+- running a command on the host, including by changing the wrapper,
+  `Dockerfile.pi` or `entrypoint.sh` that a later launch runs
 - reaching a host socket, including the Docker socket or a host Herdr socket
 - obtaining a credential the README says the container does not receive, such
   as a host Pi OAuth token or any key other than the ones the README lists

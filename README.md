@@ -107,8 +107,8 @@ Not mounted, and unreachable: your home directory, `~/.ssh`, `~/.aws`,
 `~/.config`, the system keychain, every other project, the Docker socket, your
 Herdr socket, and `~/.pi` on the host, which holds Pi's provider OAuth tokens.
 The script refuses to start if the directory it would mount is your home
-directory, contains it, is `/`, or has a comma in its path, which Docker's
-`--mount` syntax would read as another field.
+directory, contains it, is `/`, contains the script itself, or has a comma in
+its path, which Docker's `--mount` syntax would read as another field.
 
 The container runs as non-root (`agent`, your own uid and gid on Linux and
 1001 on Docker Desktop) with `--cap-drop ALL`,
@@ -360,9 +360,15 @@ pane run` through that socket would execute on the host.
   after `docker run` returns, so they do not run at all if the wrapper itself
   is killed, and anything they find has already been written to your checkout.
   They warn rather than fixing.
-- If the script lives inside the project it mounts, the agent can edit the
-  script that defines its own sandbox, which would take effect on the next
-  launch. Keeping it in its own directory, as here, avoids that.
+- The script runs on your host for every project, and `Dockerfile.pi` and
+  `entrypoint.sh` build the image every project runs in, so it refuses to
+  mount a directory that holds them, even through a symlink. To work on
+  pi-sandbox itself with the sandbox, launch one checkout's wrapper from
+  another checkout, your working copy, and review the diff before it reaches
+  the checkout your launcher runs from. A clone as the working copy keeps Git
+  working in the sandbox, a linked worktree does not (see Git above). The
+  session runs the launcher checkout's `Dockerfile.pi` and `entrypoint.sh`,
+  not the working copy's.
 - A container is not a virtual machine. A container escape defeats this
   boundary. On macOS and Windows, Docker Desktop's own VM is a second layer.
 - The agent can start other agents through the extensions, and they spend the
@@ -385,12 +391,13 @@ with `python3 e2e.py` on Docker Desktop. It starts Pi in a pseudo-terminal in a
 throwaway repository, checks from inside the container that `/workspace` is
 writable while `.git/config`, `config.worktree`, `commondir`, `hooks`,
 `worktrees` and `modules` are not and `.git` cannot be moved, that a file the
-agent writes is owned by you, that the memory and CPU limits are set and that
-the terminal output is not logged, then ends a session each way one can end and
-checks that no container is left. Last it puts an image of an older Pi under
-the tag, starts a session, which rebuilds it, and checks that no Pi install
-build cache is left unused. It writes its findings to `e2e-report.txt`, which
-CI keeps as an artifact. It also checks
+agent writes is owned by you, that the memory and CPU limits are set, that
+the terminal output is not logged and that a copy of the wrapper launched on
+the project holding it refuses to start, then ends a session each way one can
+end and checks that no container is left. Last it puts an image of an older Pi
+under the tag, starts a session, which rebuilds it, and checks that no Pi
+install build cache is left unused. It writes its findings to
+`e2e-report.txt`, which CI keeps as an artifact. It also checks
 that uv picks Debian's Python 3.11 for a project that accepts it, syncs a
 Python project and fails if the state volume grows more than 30 MB. No API key
 and no model call. `python3 e2e.py --storage` runs 30 sessions in turn and then 10 at

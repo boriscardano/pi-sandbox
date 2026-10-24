@@ -110,6 +110,17 @@ if [ "$project" = "${HOME%/}" ] || case "${HOME%/}/" in "$project"/*) true ;; *)
     exit 2
 fi
 
+# This script runs on the host for every project, and Dockerfile.pi and
+# entrypoint.sh build the image every project runs in. Mounting the directory
+# that holds them would let the agent rewrite what the host runs at the next
+# launch anywhere. Compare physical paths, so a symlink cannot hide it.
+case "$(CDPATH= cd -- "$script_dir" && pwd -P)/" in
+    "$(CDPATH= cd -- "$project" && pwd -P)"/*)
+        printf '%s\n' "refusing to mount $project: it contains this wrapper ($script_dir), which the agent could rewrite to run on your host at the next launch. Run a copy of the wrapper from outside the project" >&2
+        exit 2
+        ;;
+esac
+
 # Docker parses --mount as comma-separated fields, so a comma anywhere in the
 # project path would split the source and mount something else.
 case "$project" in

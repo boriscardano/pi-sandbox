@@ -112,8 +112,11 @@ directory, contains it, is `/`, or has a comma in its path, which Docker's
 
 The container runs as non-root (`agent`, your own uid and gid on Linux and
 1001 on Docker Desktop) with `--cap-drop ALL`,
-`--security-opt no-new-privileges` and `--pids-limit 512`. No `--privileged`,
-and no host PID, IPC or network namespace. Outbound networking is on, since the
+`--security-opt no-new-privileges` and `--pids-limit 512`, and may use half
+the CPUs Docker has (at least one), so a spinning agent cannot hold every core.
+Its terminal output is not logged (`--log-driver none`), so it cannot fill the
+disk through a log nobody reads. No `--privileged`, and no host PID, IPC or
+network namespace. Outbound networking is on, since the
 agent has to reach the model API. No port is published.
 
 ## The API keys
@@ -242,8 +245,8 @@ The entrypoint installs four Pi extensions from npm at their newest release:
   `/extensions`.
 
 The subagent and background-task extensions let the agent start work that
-keeps running while you are not watching, with the same key, open network and
-`--pids-limit` as the foreground session. Everything still dies with the
+keeps running while you are not watching, with the same key, open network,
+`--pids-limit` and CPU share as the foreground session. Everything still dies with the
 container.
 
 They live in the agent's home, so they reach a project through its state
@@ -368,7 +371,8 @@ pane run` through that socket would execute on the host.
   enforces a limit beyond `--pids-limit` and the container's 8 GB memory
   limit, plus as much again in swap where the host has it, which stops a
   runaway fan-out before it takes the machine's memory. Docker Desktop's VM may
-  have less than that, in which case its own limit is the one reached first.
+  have less than that, in which case its own limit is the one reached first. The
+  CPU share caps how much of the machine they can keep busy, not how long.
 - The image is roughly 1.2 GB, mostly Pi's npm dependency tree. It carries
   Node 24, Python 3.11 and 3.14, uv, Git, ripgrep and fd.
 
@@ -382,7 +386,8 @@ with `python3 e2e.py` on Docker Desktop. It starts Pi in a pseudo-terminal in a
 throwaway repository, checks from inside the container that `/workspace` is
 writable while `.git/config`, `config.worktree`, `commondir`, `hooks`,
 `worktrees` and `modules` are not and `.git` cannot be moved, that a file the
-agent writes is owned by you and that the memory limit is set, then ends a
+agent writes is owned by you, that the memory and CPU limits are set and that
+the terminal output is not logged, then ends a
 session each way one can end and checks that no container is left. Last it
 puts an image of an older Pi under the tag, starts a session, which rebuilds
 it, and checks that no Pi install build cache is left unused. It writes its

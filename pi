@@ -486,6 +486,16 @@ fi
 ) </dev/null >/dev/null 2>&1 &
 watcher=$!
 
+# Half the daemon's CPUs, at least one, so a few spinning processes, far under
+# the pids and memory limits, cannot hold every core. Docker refuses `--cpus`
+# above its own count, so a fixed number would not start on a small machine.
+cpus=$(docker info --format '{{.NCPU}}' 2>/dev/null) || cpus=1
+case "$cpus" in
+    '' | *[!0-9]*) cpus=1 ;;
+esac
+cpus=$((cpus / 2))
+[ "$cpus" -ge 1 ] || cpus=1
+
 docker_status=0
 # shellcheck disable=SC2086
 docker run \
@@ -500,6 +510,8 @@ docker run \
     --security-opt no-new-privileges \
     --pids-limit 512 \
     --memory 8g \
+    --cpus "$cpus" \
+    --log-driver none \
     --env OPENCODE_GO_API_KEY \
     --env OPENCODE_API_KEY \
     $extra_env \

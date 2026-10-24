@@ -55,8 +55,13 @@ case "$1" in
     # The build cache listing, as the wrapper's template prints it.
     system) printf '%s' "${PI_SANDBOX_FAKE_CACHE:-}"; exit 0 ;;
     ps) printf '%s' "${PI_SANDBOX_FAKE_CONTAINERS:-}"; exit 0 ;;
-    # The daemon's CPU count, as `docker info --format '{{.NCPU}}'` prints it.
-    info) printf '%s\\n' "${PI_SANDBOX_FAKE_NCPU-8}"; exit 0 ;;
+    # The daemon's CPU count, as `docker info --format '{{.NCPU}}'` prints it,
+    # and an unreachable daemon when there is none.
+    info)
+        [ -n "${PI_SANDBOX_FAKE_NCPU-8}" ] || exit 1
+        printf '%s\\n' "${PI_SANDBOX_FAKE_NCPU-8}"
+        exit 0
+        ;;
 esac
 if [ "$1" = build ]; then
     exit "${PI_SANDBOX_FAKE_BUILD_STATUS:-0}"
@@ -1216,8 +1221,8 @@ def test_wrapper_lets_one_session_use_half_the_cpus(
 ) -> None:
     """A few spinning processes stay far under the pids and memory limits and
     would hold every core the daemon has. Docker refuses `--cpus` above its own
-    count, so the bound comes from the daemon, and a one-CPU machine or an
-    unreadable count still gets a bound that starts."""
+    count, so the bound comes from the daemon, and a one-CPU machine or a
+    failed `docker info` still gets a bound that starts."""
 
     _, invocations = _run(tmp_path, also={"PI_SANDBOX_FAKE_NCPU": ncpu})
     argv = _docker_run(invocations)

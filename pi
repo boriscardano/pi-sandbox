@@ -490,9 +490,6 @@ watcher=$!
 # the pids and memory limits, cannot hold every core. Docker refuses `--cpus`
 # above its own count, so a fixed number would not start on a small machine.
 cpus=$(docker info --format '{{.NCPU}}' 2>/dev/null) || cpus=1
-case "$cpus" in
-    '' | *[!0-9]*) cpus=1 ;;
-esac
 cpus=$((cpus / 2))
 [ "$cpus" -ge 1 ] || cpus=1
 

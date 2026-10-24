@@ -114,10 +114,10 @@ The container runs as non-root (`agent`, your own uid and gid on Linux and
 1001 on Docker Desktop) with `--cap-drop ALL`,
 `--security-opt no-new-privileges` and `--pids-limit 512`, and may use half
 the CPUs Docker has (at least one), so a spinning agent cannot hold every core.
-Its terminal output is not logged (`--log-driver none`), so it cannot fill the
-disk through Docker's log file. No `--privileged`, and no host PID, IPC or
-network namespace. Outbound networking is on, since the agent has to reach the
-model API. No port is published.
+Its terminal output is not written to a Docker log file (`--log-driver none`),
+which would otherwise grow without limit. No `--privileged`, and no host PID,
+IPC or network namespace. Outbound networking is on, since the agent has to
+reach the model API. No port is published.
 
 ## The API keys
 

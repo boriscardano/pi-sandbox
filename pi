@@ -476,6 +476,7 @@ set -- "$image" "$@"
 # volumes of projects that are gone. Docker sets it only when it creates the
 # volume.
 set -- --mount "type=volume,source=$state_volume,target=/home/agent,volume-label=pi-sandbox.project=$project" "$@"
+lock_git=''
 if [ -d "$project/.git" ]; then
     # Remembered for the exit check: a root `.git` this launch protected is the
     # one the container could not have replaced, and is the only one to prune.
@@ -532,7 +533,31 @@ if [ -d "$project/.git" ]; then
     set -- --mount "type=bind,source=$project/.git/config.worktree,target=/workspace/.git/config.worktree,readonly" "$@"
     set -- --mount "type=bind,source=$project/.git/config,target=/workspace/.git/config,readonly" "$@"
     set -- --mount "type=bind,source=$project/.git,target=/workspace/.git" "$@"
+    # On a macOS disk, which ignores case, Docker Desktop resolved
+    # `.git/CONFIG` to the host's `.git/config` past the read-only file
+    # mounts, so the three files are also locked with the user-immutable flag
+    # for the session. docs/design.md has the details. The container carries
+    # the identity of `.git`, which no other path to the same repository
+    # changes, and which, unlike the config file, Git never replaces.
+    if [ "$(uname -s)" = Darwin ]; then
+        lock_git=1
+        git_id=$(stat -f %d-%i "$project/.git")
+        set -- --label "pi-sandbox.git=$git_id" "$@"
+    fi
 fi
+
+flag_git_files() {
+    [ -n "$lock_git" ] || return 0
+    chflags "$1" "$project/.git/config" "$project/.git/config.worktree" "$project/.git/commondir"
+}
+# Only once no container using these files is left, so a session ending while
+# another one runs does not unlock the files under it.
+release_git_files() {
+    [ -n "$lock_git" ] || return 0
+    # A failed listing cannot rule one out, so the files stay locked.
+    left=$(docker ps -aq --filter "label=pi-sandbox.git=$git_id" 2>/dev/null) || return 0
+    [ -n "$left" ] || flag_git_files nouchg
+}
 
 # A nested repository cannot be stopped by a mount: the agent can `git init
 # sub`, the host user owns what it writes, and host git trusts the config and
@@ -554,13 +579,23 @@ marker=$(mktemp)
 (
     trap '' HUP INT TERM
     while kill -0 $$ 2>/dev/null; do
+        # A session that ends while this one starts sees no container of the
+        # project yet and releases the files, so they are locked again here.
+        flag_git_files uchg || true
         sleep 1
     done
     docker rm -f "$name" || true
     sleep 5
     docker rm -f "$name" || true
+    release_git_files
 ) </dev/null >/dev/null 2>&1 &
 watcher=$!
+
+if ! flag_git_files uchg; then
+    rm -f "$marker"
+    printf '%s\n' "refusing to run: could not lock $project/.git/config, config.worktree and commondir with chflags, which is what keeps the agent from rewriting them on a case-insensitive disk" >&2
+    exit 2
+fi
 
 docker_status=0
 # shellcheck disable=SC2086
@@ -589,11 +624,22 @@ docker run \
 # A killed client returns here while the container runs on, still able to
 # write the project, so remove it before the checks below look at it.
 docker rm -f "$name" >/dev/null 2>&1 || true
-# The wrapper got here, so the watcher has nothing left to do. It ignores TERM.
-# Reaping it keeps bash, which is macOS /bin/sh, from printing `Killed: 9` and
-# the watcher's source on every exit.
-kill -KILL "$watcher" 2>/dev/null || true
-wait "$watcher" 2>/dev/null || true
+# The wrapper got here, so the watcher has nothing left to do, and it would
+# lock the files again. It ignores TERM. Reaping it keeps bash, which is macOS
+# /bin/sh, from printing `Killed: 9` and the watcher's source on every exit. A
+# status of 128 or more may be a killed client, which can still be creating
+# the container, so the watcher, whose second removal catches that, releases
+# the files then instead.
+if [ "$docker_status" -lt 128 ]; then
+    kill -KILL "$watcher" 2>/dev/null || true
+    wait "$watcher" 2>/dev/null || true
+    release_git_files || true
+fi
+if [ "$docker_status" -lt 128 ]; then
+    kill -KILL "$watcher" 2>/dev/null || true
+    wait "$watcher" 2>/dev/null || true
+    release_git_files || true
+fi
 
 # Prune the project's own .git, but only when this launch protected it with a
 # mount, and look for nested git metadata the container created. Warn only,

@@ -182,6 +182,43 @@ from the directory it names, so the wrapper creates it holding `.`, which names
 the same directory and leaves Git behaving as before, and refuses to run when
 one names anything else.
 
+### Case variants on macOS
+
+Docker Desktop shares the project into its Linux VM, and a macOS disk ignores
+case by default. Linux sees `.git/CONFIG` as a name the read-only mount over
+`.git/config` does not cover, so the write goes through the writable `.git`
+mount, and the host resolves it to the protected file. Appending to it,
+renaming another file over it and deleting it all worked, for all three file
+mounts (reproduced 2026-10-24). The directory mounts held for every variant
+tried, since Linux gives a directory one name and a lookup of `HOOKS` lands on
+the mounted `hooks`.
+
+So on macOS the wrapper sets the user-immutable flag on the three files right
+before `docker run`. It refuses every change to the file itself, whatever name
+the write arrives under, while host Git still reads it, and nothing in the
+container can clear it: the container has no capabilities, and a `chattr`
+there left the flag in place.
+
+The flag comes off when no container labelled with the device and inode of
+`.git` is left, so a session of the same repository reached by a symlink or a
+path in another case keeps it too. The wrapper releases it after its own
+`docker rm`, and its watcher does when the wrapper was killed, or when the
+docker client was, since that client can still be creating the container
+after the wrapper's removal. A failed container listing keeps it on. A
+session that ends while another starts, before the new container exists,
+still releases it, so the watcher of every live session sets it again each
+second. That leaves the files open for up to a second while the new Pi is
+still starting, before its agent can act. A launch that cannot set the flag
+stops. A session whose container ended on a signal, an out-of-memory kill
+among them, is released by the watcher a few seconds after the wrapper exits. The release also clears a flag you set on those files yourself,
+and sessions on two Docker daemons do not see each other's containers.
+
+A comparison of the files at exit was the alternative, but host Git can run
+during the session and would act on a planted config before any exit check.
+A native Linux host on a case-sensitive filesystem is not affected. A
+casefolded ext4 directory was not tested, and neither was Docker Desktop on
+Windows, where a project on a case-insensitive NTFS drive is not locked.
+
 ### Symlinks and FIFOs
 
 A symlink at `.git` or at any of the six read-only paths is refused before the

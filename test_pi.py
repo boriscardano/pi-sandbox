@@ -65,7 +65,18 @@ case "$1" in
     rm) exit "${PI_SANDBOX_FAKE_RM_STATUS:-0}" ;;
     # The build cache listing, as the wrapper's template prints it.
     system) printf '%s' "${PI_SANDBOX_FAKE_CACHE:-}"; exit 0 ;;
+    # A label filter is answered from the labels of the runs in progress,
+    # which every run sharing the PI_SANDBOX_FAKE_RUNNING directory records.
     ps)
+        for arg in "$@"; do
+            case "$arg" in
+                label=pi-sandbox.git=*)
+                    cat "${PI_SANDBOX_FAKE_RUNNING:-/dev/null}"/* 2>/dev/null \
+                        | grep -xF -- "${arg#label=}"
+                    exit 0
+                    ;;
+            esac
+        done
         printf '%s' "${PI_SANDBOX_FAKE_CONTAINERS:-}"
         exit "${PI_SANDBOX_FAKE_PS_STATUS:-0}"
         ;;
@@ -81,9 +92,15 @@ if [ "$1" = build ]; then
     exit "${PI_SANDBOX_FAKE_BUILD_STATUS:-0}"
 fi
 if [ "$1" = run ]; then
+    # One file of labels per run in progress, in a directory runs share.
+    if [ -n "${PI_SANDBOX_FAKE_RUNNING:-}" ]; then
+        mkdir -p "$PI_SANDBOX_FAKE_RUNNING"
+        printf '%s\n' "$@" | sed -n '/^--label$/{n;p;}' > "$PI_SANDBOX_FAKE_RUNNING/$$"
+    fi
     if [ -n "${PI_SANDBOX_FAKE_AGENT:-}" ]; then
         sh -c "$PI_SANDBOX_FAKE_AGENT"
     fi
+    [ -z "${PI_SANDBOX_FAKE_RUNNING:-}" ] || rm -f "$PI_SANDBOX_FAKE_RUNNING/$$"
     exit "${PI_SANDBOX_FAKE_RUN_STATUS:-0}"
 fi
 exit 0
@@ -792,6 +809,203 @@ def test_wrapper_refuses_a_planted_commondir(tmp_path: Path) -> None:
         assert "commondir" in completed.stderr, content
         assert not any(argv[0] == "run" for argv in invocations), content
         assert (repo / ".git/commondir").read_text() == content
+
+
+# The files the wrapper mounts read-only one by one, as opposed to whole
+# directories.
+PROTECTED_GIT_FILES = ("config", "config.worktree", "commondir")
+
+
+def _git_files(repo: Path) -> dict[str, bytes | None]:
+    return {
+        name: (repo / ".git" / name).read_bytes()
+        if (repo / ".git" / name).exists()
+        else None
+        for name in PROTECTED_GIT_FILES
+    }
+
+
+@pytest.mark.skipif(shutil.which("chflags") is None, reason="needs macOS chflags")
+def test_wrapper_locks_the_git_files_for_the_session(tmp_path: Path) -> None:
+    """Docker Desktop on macOS resolved `.git/CONFIG` to the host's
+    `.git/config` past the read-only mount, so the files themselves are
+    locked. The agent here writes them on the host by every route that worked
+    there: append, rename over and unlink. e2e.py tries the case variants.
+    Host git must write its config again afterwards."""
+
+    repo = tmp_path / "repo"
+    subprocess.run(["git", "init", "--quiet", str(repo)], check=True)
+    (repo / ".git/commondir").write_text(".\n")
+    (repo / ".git/config.worktree").write_text("")
+    before = _git_files(repo)
+    agent = (
+        "for f in " + " ".join(PROTECTED_GIT_FILES) + "; do "
+        "printf x >> .git/$f; "
+        "printf x > tmp-$f && mv tmp-$f .git/$f; "
+        "rm -f .git/$f; "
+        "done"
+    )
+
+    completed, _ = _run(tmp_path, cwd=repo, agent=agent)
+
+    assert completed.returncode == 0, completed.stderr
+    assert _git_files(repo) == before
+    written = subprocess.run(
+        ["git", "-C", str(repo), "config", "test.after", "1"], check=False
+    )
+    assert written.returncode == 0
+
+
+@pytest.mark.skipif(shutil.which("chflags") is None, reason="needs macOS chflags")
+def test_wrapper_releases_the_git_files_when_it_is_killed(tmp_path: Path) -> None:
+    """A SIGKILL skips the wrapper's own release after `docker run`, which
+    would leave host git unable to write its config until the next launch.
+    The watcher releases them once the container is gone."""
+
+    repo = tmp_path / "repo"
+    subprocess.run(["git", "init", "--quiet", str(repo)], check=True)
+
+    killed, _ = _run(tmp_path, cwd=repo, agent='kill -KILL "$(ps -o ppid= -p "$PPID")"')
+
+    assert killed.returncode == -signal.SIGKILL
+    # The watcher removes the container twice, five seconds apart, so allow 15 s.
+    for _ in range(150):
+        written = subprocess.run(
+            ["git", "-C", str(repo), "config", "test.after", "1"],
+            capture_output=True,
+            check=False,
+        )
+        if written.returncode == 0:
+            break
+        time.sleep(0.1)
+    assert written.returncode == 0, written.stderr
+
+
+@pytest.mark.skipif(shutil.which("chflags") is None, reason="needs macOS chflags")
+def test_wrapper_locks_the_git_files_again_when_another_session_releases_them(
+    tmp_path: Path,
+) -> None:
+    """A session that ends while this one starts sees no container of the
+    project yet, so it releases the files this one has just locked. The
+    agent here does that release itself, then waits and writes."""
+
+    repo = tmp_path / "repo"
+    subprocess.run(["git", "init", "--quiet", str(repo)], check=True)
+    files = " ".join(f".git/{f}" for f in PROTECTED_GIT_FILES)
+    agent = f"chflags nouchg {files}; sleep 3; printf x >> .git/config"
+
+    _run(tmp_path, cwd=repo, agent=agent)
+
+    assert not (repo / ".git/config").read_bytes().endswith(b"x")
+
+
+@pytest.mark.skipif(shutil.which("chflags") is None, reason="needs macOS chflags")
+def test_wrapper_keeps_the_lock_for_a_session_reached_by_another_path(
+    tmp_path: Path,
+) -> None:
+    """The flag is on the files, not on a path. A session of the same
+    repository launched through a symlink, or a path in another case, which
+    macOS accepts, ends while the first one runs. It must not unlock the
+    first one's files, whose agent keeps trying to write them."""
+
+    repo = tmp_path / "repo"
+    subprocess.run(["git", "init", "--quiet", str(repo)], check=True)
+    link = tmp_path / "link"
+    link.symlink_to(repo)
+    running = {"PI_SANDBOX_FAKE_RUNNING": str(tmp_path / "running")}
+    agent = (
+        "end=$(($(date +%s) + 4)); "
+        'while [ "$(date +%s)" -lt "$end" ]; do '
+        "printf x >> .git/config 2>/dev/null; done"
+    )
+
+    with ThreadPoolExecutor() as pool:
+        first = pool.submit(_run, tmp_path / "a", cwd=repo, agent=agent, also=running)
+        # The second session ends while the first one's container runs.
+        while not any((tmp_path / "running").glob("*")):
+            time.sleep(0.1)
+        _run(tmp_path / "b", cwd=link, also=running)
+        first.result()
+
+    assert not (repo / ".git/config").read_bytes().endswith(b"x")
+
+
+@pytest.mark.skipif(shutil.which("chflags") is None, reason="needs macOS chflags")
+def test_wrapper_keeps_the_lock_when_its_docker_client_is_killed(
+    tmp_path: Path,
+) -> None:
+    """A docker client killed in its first second can still be creating the
+    container after the wrapper's `docker rm`, so a release then would leave
+    that container running on unlocked files. Here the container shows up a
+    second after `docker run` returned 137, and its agent writes."""
+
+    repo = tmp_path / "repo"
+    subprocess.run(["git", "init", "--quiet", str(repo)], check=True)
+    running = tmp_path / "running"
+    late = (
+        "(sleep 1; "
+        f"mkdir -p {running}; "
+        f"echo pi-sandbox.git=$(stat -f %d-%i .git) > {running}/late; "
+        "end=$(($(date +%s) + 7)); "
+        'while [ "$(date +%s)" -lt "$end" ]; do '
+        "printf x >> .git/config 2>/dev/null; done) >/dev/null 2>&1 &"
+    )
+
+    try:
+        _run(
+            tmp_path,
+            cwd=repo,
+            agent=late,
+            run_status="137",
+            also={"PI_SANDBOX_FAKE_RUNNING": str(running)},
+        )
+        time.sleep(9)
+        config = (repo / ".git/config").read_bytes()
+    finally:
+        subprocess.run(
+            ["chflags", "nouchg", *(repo / ".git" / f for f in PROTECTED_GIT_FILES)],
+            check=True,
+        )
+
+    assert not config.endswith(b"x")
+
+
+# The Darwin case runs macOS's `stat -f`, which GNU stat reads differently.
+@pytest.mark.parametrize(
+    "platform",
+    [
+        pytest.param(
+            "Darwin",
+            marks=pytest.mark.skipif(
+                shutil.which("chflags") is None, reason="needs macOS stat"
+            ),
+        ),
+        "Linux",
+    ],
+)
+def test_wrapper_stops_on_macos_when_it_cannot_lock_the_git_files(
+    tmp_path: Path, platform: str
+) -> None:
+    """On macOS the wrapper must not start a session it cannot protect, say on
+    a disk without file flags. A Linux host does not lock, so it runs
+    although chflags fails."""
+
+    repo = tmp_path / "repo"
+    subprocess.run(["git", "init", "--quiet", str(repo)], check=True)
+    fakebin = tmp_path / "fakebin"
+    fakebin.mkdir()
+    (fakebin / "chflags").write_text("#!/bin/sh\nexit 1\n")
+    (fakebin / "chflags").chmod(0o755)
+
+    completed, invocations = _run(tmp_path, cwd=repo, uname=platform)
+
+    if platform == "Darwin":
+        assert completed.returncode == 2
+        assert "could not lock" in completed.stderr
+        assert "run" not in [argv[0] for argv in invocations]
+    else:
+        assert completed.returncode == 0, completed.stderr
+        _docker_run(invocations)
 
 
 def test_wrapper_refuses_a_non_regular_commondir(tmp_path: Path) -> None:

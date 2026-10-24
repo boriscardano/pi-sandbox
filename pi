@@ -565,19 +565,32 @@ fi
 # could erase the warning on the terminal or add a line to it, so each name is
 # printed with every byte that is not printable ASCII as a `?`. A directory the
 # agent made unreadable makes find fail, but what it found elsewhere is still
-# reported, with a note that the check is incomplete.
+# reported, with a note that the check is incomplete. Docker Desktop turns the
+# agent's mode 000 into 0600 on the host, and macOS find skips what is inside
+# such a directory without failing, so a directory without its search bit
+# counts as a failure too. Git only takes a file or a symlink for HEAD.
 find_failed=''
-found=$(LC_ALL=C find "$project" -path "$git_prune" -prune -o \
-    \( -iname .git -o -iname HEAD -o -ipath '*/.git/config' -o -ipath '*/.git/hooks/*' \) \
+# The script below is the sh's own, so its `$p` must not expand here.
+# shellcheck disable=SC2016
+found=$(LC_ALL=C find "$project" -ipath "$git_prune" -prune -o \
+    -type d ! -perm -0100 -prune -exec echo unsearchable \; -o \
+    \( -iname .git -o \( -iname HEAD ! -type d \) \
+    -o -ipath '*/.git/config' -o -ipath '*/.git/hooks/*' \) \
     -cnewer "$marker" \
     -exec sh -c 'for p do printf %s "$p" | tr -c "[:print:]" "?"; echo; done' sh {} + \
     2>/dev/null) || find_failed=1
+# Every name starts with the project path, so no name can read as the marker.
+if printf '%s\n' "$found" | grep -qx unsearchable; then
+    find_failed=1
+fi
 # A `git init sub` writes sub/.git, its config and a hooks/*.sample for every
 # hook, so one repository printed fifteen lines. Keep the `.git` path once and
 # drop what is under it, matching the last `/.git` so a project path that
 # itself contains one still names the right repository.
 nested=$(printf '%s\n' "$found" \
-    | LC_ALL=C sed -e 's#\(.*/\.[Gg][Ii][Tt]\)/.*#\1#' -e 's#/[Hh][Ee][Aa][Dd]$##' \
+    | LC_ALL=C sed -e '/^unsearchable$/d' \
+        -e 's#\(.*/\.[Gg][Ii][Tt]\)/.*#\1#' \
+        -e 's#/[Hh][Ee][Aa][Dd]$##' \
     | LC_ALL=C sort -u)
 # A rebase, merge or cherry-pick the container planted makes the host's Git
 # report an operation in progress, and `git rebase --continue` then runs the
@@ -595,12 +608,13 @@ done
 rm -f "$marker"
 # The agent can leave the terminal drawing black on black, concealed, in the
 # alternate screen or with the default colours swapped, and kill Pi so that
-# nothing undoes it. DECSTR resets how text is drawn, the private modes leave
-# the alternate screen and synchronized output and turn wrapping back on, and
-# OSC 104, 110 and 111 restore the palette and the default colours. Only before
-# a warning, since they also undo colours the user set on purpose.
+# nothing undoes it. DECSTR and SGR 0 reset how text is drawn, the private
+# modes leave the alternate screen and synchronized output and turn wrapping
+# back on, and OSC 104, 110 and 111 restore the palette and the default
+# colours. Only before a warning, since they also undo colours the user set on
+# purpose.
 if [ -t 2 ] && [ -n "$nested$find_failed$interrupted" ]; then
-    printf '\033[!p\033[?1047l\033[?2026l\033[?7h\033]104\007\033]110\007\033]111\007' >&2
+    printf '\033[!p\033[m\033[?1047l\033[?2026l\033[?7h\033]104\007\033]110\007\033]111\007' >&2
 fi
 if [ -n "$nested" ]; then
     printf '%s\n' "pi-sandbox: warning: the container left nested git metadata in the project:" >&2
@@ -608,7 +622,7 @@ if [ -n "$nested" ]; then
     printf '%s\n' "your host git trusts it and would run the commands it names, so inspect it before running git there" >&2
 fi
 if [ -n "$find_failed" ]; then
-    printf '%s\n' "pi-sandbox: warning: the nested-git check could not run in full because find could not read part of the project, so it may hold nested git metadata not listed here" >&2
+    printf '%s\n' "pi-sandbox: warning: the nested-git check could not run in full because find failed or could not read part of the project, so it may hold nested git metadata not listed here" >&2
 fi
 if [ -n "$interrupted" ]; then
     printf '%s\n' "pi-sandbox: warning: the container left a git operation in progress:" >&2

@@ -180,14 +180,15 @@ printf 'ref: refs/heads/main\n' > src/head
 printf '[core]\n\tfsmonitor = true\n' > src/config
 d=$(printf 'sub\033[1A\033[2K')
 mkdir -p "$d/.git" && touch "$d/.git/config"
-# Docker Desktop still lets the host user list a mode 000 directory, though
-# not enter one inside it, so find fails on locked/x.
+# Host find cannot read locked/x: on Linux it cannot read locked at all, and
+# Docker Desktop lists locked but not what is inside it.
 mkdir -p locked/x && chmod 000 locked
 # docker exec has no terminal, so pts/0 is the one docker run gave Pi.
 printf '\033[30;40m\033[8m\033]10;#010203\007\033]11;#010203\007' > /dev/pts/0
+sleep 1
 kill -KILL -1
 """
-RESETS = [b"\033[!p", b"\033]104\007", b"\033]110\007", b"\033]111\007"]
+RESETS = [b"\033[!p\033[m", b"\033]104\007", b"\033]110\007", b"\033]111\007"]
 
 
 def docker(*args: str, check: bool = False) -> str:
@@ -720,10 +721,12 @@ def exit_report(project: Path, lines: list[str]) -> bool:
         capture_output=True,
         check=False,
     )
-    finished = wrapper_finished(session)
-    session.read(1)
-    session.end()
-    (project / "locked").chmod(0o755)
+    try:
+        finished = wrapper_finished(session)
+        session.read(1)
+        session.end()
+    finally:
+        (project / "locked").chmod(0o755)
     out = session.output
     hidden = out.rfind(b"\033]11;#010203\007")
     warning = out.find(b"pi-sandbox: warning:", max(hidden, 0))
@@ -744,7 +747,9 @@ def exit_report(project: Path, lines: list[str]) -> bool:
     lines.append("exit report after a hostile session:")
     lines += [f"  {name}: {ok}" for name, ok in results.items()]
     if not all(results.values()):
-        lines.append(f"  FAIL, output after the agent's write:\n{out[hidden:]!r}")
+        lines.append(
+            f"  FAIL, output after the agent's write:\n{out[max(hidden, 0) :]!r}"
+        )
     return not all(results.values())
 
 

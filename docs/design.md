@@ -199,16 +199,18 @@ the write arrives under, while host Git still reads it, and nothing in the
 container can clear it: the container has no capabilities, and a `chattr`
 there left the flag in place.
 
-The flag comes off when no container labelled with the file's device and
-inode is left, so a session of the same repository reached by a symlink or a
+The flag comes off when no container labelled with the device and inode of
+`.git` is left, so a session of the same repository reached by a symlink or a
 path in another case keeps it too. The wrapper releases it after its own
 `docker rm`, and its watcher does when the wrapper was killed, or when the
 docker client was, since that client can still be creating the container
 after the wrapper's removal. A failed container listing keeps it on. A
 session that ends while another starts, before the new container exists,
 still releases it, so the watcher of every live session sets it again each
-second, before the new agent can be running. A launch that cannot set the
-flag stops. The release also clears a flag you set on those files yourself,
+second. That leaves the files open for up to a second while the new Pi is
+still starting, before its agent can act. A launch that cannot set the flag
+stops. A session whose container ended on a signal, an out-of-memory kill
+among them, is released by the watcher a few seconds after the wrapper exits. The release also clears a flag you set on those files yourself,
 and sessions on two Docker daemons do not see each other's containers.
 
 A comparison of the files at exit was the alternative, but host Git can run

@@ -921,7 +921,9 @@ def test_wrapper_keeps_the_lock_for_a_session_reached_by_another_path(
 
     with ThreadPoolExecutor() as pool:
         first = pool.submit(_run, tmp_path / "a", cwd=repo, agent=agent, also=running)
-        time.sleep(1.5)
+        # The second session ends while the first one's container runs.
+        while not any((tmp_path / "running").glob("*")):
+            time.sleep(0.1)
         _run(tmp_path / "b", cwd=link, also=running)
         first.result()
 
@@ -943,7 +945,7 @@ def test_wrapper_keeps_the_lock_when_its_docker_client_is_killed(
     late = (
         "(sleep 1; "
         f"mkdir -p {running}; "
-        f"echo pi-sandbox.git=$(stat -f %d-%i .git/config) > {running}/late; "
+        f"echo pi-sandbox.git=$(stat -f %d-%i .git) > {running}/late; "
         "end=$(($(date +%s) + 7)); "
         'while [ "$(date +%s)" -lt "$end" ]; do '
         "printf x >> .git/config 2>/dev/null; done) >/dev/null 2>&1 &"

@@ -537,10 +537,11 @@ if [ -d "$project/.git" ]; then
     # `.git/CONFIG` to the host's `.git/config` past the read-only file
     # mounts, so the three files are also locked with the user-immutable flag
     # for the session. docs/design.md has the details. The container carries
-    # the file's identity, which no other path to the same repository changes.
+    # the identity of `.git`, which no other path to the same repository
+    # changes, and which, unlike the config file, Git never replaces.
     if [ "$(uname -s)" = Darwin ]; then
         lock_git=1
-        git_id=$(stat -f %d-%i "$project/.git/config")
+        git_id=$(stat -f %d-%i "$project/.git")
         set -- --label "pi-sandbox.git=$git_id" "$@"
     fi
 fi

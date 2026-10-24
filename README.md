@@ -313,7 +313,10 @@ but a host command that changes the config, such as `git config`, `git remote
 add` or `git push -u`, fails until the session ends and the wrapper releases
 them. After a SIGKILL to the wrapper's whole process group the container
 keeps running and the files stay locked until the next session of the project
-ends. Do not unlock them by hand while that container runs.
+ends, even if a session of another project removes that container first. Do
+not unlock them by hand while that container runs. A session that ends on a
+signal, such as an out-of-memory kill, releases them a few seconds after it
+exits.
 [docs/design.md](docs/design.md#case-variants-on-macos) has the details.
 
 The wrapper refuses to start on a symlink at `.git` or at any of the

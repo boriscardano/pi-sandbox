@@ -867,6 +867,39 @@ def test_wrapper_releases_the_git_files_when_it_is_killed(tmp_path: Path) -> Non
     assert written.returncode == 0, written.stderr
 
 
+@pytest.mark.skipif(shutil.which("chflags") is None, reason="needs macOS chflags")
+def test_wrapper_leaves_the_git_files_locked_for_another_session(
+    tmp_path: Path,
+) -> None:
+    """The watcher of a killed session releases the files seconds after the
+    pane closed, by when the project may be open again. Releasing them then
+    would leave the new session's agent free to write them."""
+
+    repo = tmp_path / "repo"
+    subprocess.run(["git", "init", "--quiet", str(repo)], check=True)
+    _, invocations = _run(tmp_path / "first", cwd=repo)
+    project_tag = _container_name(invocations).split("-")[2]
+
+    try:
+        _run(
+            tmp_path / "second",
+            cwd=repo,
+            containers=f"pi-sandbox-{project_tag}-0123456789ab-{os.getpid()}\n",
+        )
+        written = subprocess.run(
+            ["git", "-C", str(repo), "config", "test.after", "1"],
+            capture_output=True,
+            check=False,
+        )
+    finally:
+        subprocess.run(
+            ["chflags", "nouchg", *(repo / ".git" / f for f in PROTECTED_GIT_FILES)],
+            check=True,
+        )
+
+    assert written.returncode != 0
+
+
 @pytest.mark.parametrize("platform", ["Darwin", "Linux"])
 def test_wrapper_stops_on_macos_when_it_cannot_lock_the_git_files(
     tmp_path: Path, platform: str

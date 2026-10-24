@@ -130,51 +130,6 @@ case "$project" in
         ;;
 esac
 
-# A symlink at any of these is followed by Git, by the mkdir below and by the
-# bind mounts, so the agent can point the host's Git at a config it wrote, or
-# make this script create directories outside the project. The `.git` symlink
-# was reproduced: the next launch mounted the target read-write and the agent
-# read a host key from it. Refuse one rather than follow it, before the image
-# build and every mount, and whether or not this is a repository.
-for link in .git .git/config .git/hooks .git/modules .git/worktrees .git/config.worktree .git/commondir; do
-    if [ -L "$project/$link" ]; then
-        printf '%s\n' "refusing to run: $project/$link is a symlink, which Git and this script would follow outside the project, so inspect and remove it" >&2
-        exit 2
-    fi
-done
-
-# `.git/config.worktree` and `.git/commondir` are created below when missing
-# and then bind-mounted as files. `set -C` does not save that write from a
-# FIFO, which dash opens and blocks on waiting for a reader, and Docker cannot
-# mount a directory or a socket as a file either, so refuse anything there
-# that is not an ordinary file. A symlink was caught above, and `[ -e ]`
-# follows one, so a dangling link cannot slip past this.
-for file in .git/config.worktree .git/commondir; do
-    if [ -e "$project/$file" ] && [ ! -f "$project/$file" ]; then
-        printf '%s\n' "refusing to run: $project/$file is not a regular file, which this script would create or mount as one, so inspect and remove it" >&2
-        exit 2
-    fi
-done
-
-# Git reads `commondir` in any git directory, not only a linked worktree's,
-# and takes the config and hooks from the directory it names, so a
-# `.git/commondir` the agent wrote makes the host's next `git status` run a
-# command from a config it controls (reproduced 2026-09-23). A repository's
-# own `.git` never has one, and the one this script creates holds `.`, so
-# anything else was planted, possibly by a session from before this check.
-# Git uses the whole file with trailing whitespace trimmed, and the shell
-# cannot see a NUL byte, so `.\n\0` would compare as `.` here while Git
-# followed `.git/.\n` (reproduced). Anything longer than the two bytes this
-# script writes is therefore refused before the rest is compared, which also
-# keeps a huge file out of this script.
-if [ -f "$project/.git/commondir" ] && {
-    [ "$(wc -c < "$project/.git/commondir")" -gt 2 ] \
-        || [ "$(cat "$project/.git/commondir")" != . ]
-}; then
-    printf '%s\n' "refusing to run: $project/.git/commondir redirects Git to another directory's config and hooks, which your host git would run, so inspect and remove it" >&2
-    exit 2
-fi
-
 # Extra host variables to forward, by name only. Names are validated so a
 # stray value cannot smuggle in another docker flag. The command substitution
 # is word-split and would also be pathname-expanded, so `set -f` stops a value
@@ -348,6 +303,130 @@ if [ "$image_exists" -eq 1 ] && [ -z "$want_version" ]; then
     printf '%s\n' "pi-sandbox: could not check the newest Pi, using the existing image" >&2
 fi
 
+# Another session's container can change the project while this launch
+# checks it, so the checks below must come after every such container is
+# gone. In a project that was not a repository when that session started,
+# nothing is mounted over `.git`, and its agent can turn `.git` into a
+# symlink to a host directory a moment after the checks passed, which the
+# mkdir and the mounts below then follow. That container can be a live
+# session's, or one whose wrapper was SIGKILLed with its watcher. So the
+# dead sessions' containers are removed and a live one of this project
+# refuses the launch, here, after the lookup and the build, so the checks and
+# `docker run` follow at once.
+#
+# The name is the project's tag, where this wrapper runs and its pid. A pid
+# means something only where it was read, so where it runs, the machine, the
+# user and the pid namespace, is hashed into the name. Every removal by name
+# then only reaches containers started from here: another user, a container
+# or a second machine on the same daemon has its own. The machine is its id,
+# Linux's machine-id or macOS's kern.uuid, since a Mac's host name changes
+# from one network to the next and would strand a container left before the
+# change. The host name stands in only where neither id exists.
+origin=$(
+    {
+        cat /etc/machine-id 2>/dev/null || sysctl -n kern.uuid 2>/dev/null || uname -n
+        id -u
+        readlink /proc/self/ns/pid 2>/dev/null || true
+    } | "$hash_cmd" | cut -c1-12
+)
+name=pi-sandbox-$project_tag-$origin-$$
+# A dead session can have left a container under this launch's pid, which
+# would make `docker run --name` fail, and only this launch can hold it now.
+docker rm -f "$name" >/dev/null 2>&1 || true
+# Remove every container from here whose wrapper, the pid at the end of its
+# name, no longer runs. A reused pid can only keep a dead session's container,
+# never remove a live one. A `ps` that cannot see this wrapper either would
+# call every session gone, so then nothing is removed and a container of this
+# project counts as live. A listing that failed could have hidden one.
+if ! containers=$(docker ps -a --filter label=pi-sandbox=1 --format '{{.Names}}' 2>/dev/null); then
+    printf '%s\n' "refusing to run: could not list the pi-sandbox containers, so another session of $project may still be running" >&2
+    exit 2
+fi
+ps_works=''
+if ps -p $$ >/dev/null 2>&1; then
+    ps_works=1
+fi
+for stale in $containers; do
+    case "$stale" in
+        pi-sandbox-*-"$origin"-*) ;;
+        *) continue ;;
+    esac
+    case "${stale##*-}" in
+        '' | *[!0-9]*) continue ;;
+    esac
+    if [ -n "$ps_works" ] && ! ps -p "${stale##*-}" >/dev/null 2>&1; then
+        docker rm -f "$stale" >/dev/null 2>&1 || true
+        continue
+    fi
+    case "$stale" in
+        pi-sandbox-"$project_tag"-"$origin"-*)
+            printf '%s\n' "refusing to run: another session of $project is still running in container $stale, and its agent could change the project while this launch checks it, so end that session first" >&2
+            exit 2
+            ;;
+    esac
+done
+
+# A symlink at any of these is followed by Git, by the mkdir below and by the
+# bind mounts, so the agent can point the host's Git at a config it wrote, or
+# make this script create directories outside the project. The `.git` symlink
+# was reproduced: the next launch mounted the target read-write and the agent
+# read a host key from it. Refuse one rather than follow it, before every
+# mount, and whether or not this is a repository.
+for link in .git .git/config .git/hooks .git/modules .git/worktrees .git/config.worktree .git/commondir; do
+    if [ -L "$project/$link" ]; then
+        printf '%s\n' "refusing to run: $project/$link is a symlink, which Git and this script would follow outside the project, so inspect and remove it" >&2
+        exit 2
+    fi
+done
+
+# A read-only mount protects a path, not the file behind it. In a session
+# where `.git` was not protected, because the project was not a repository
+# yet or `.git` was a file, the agent can hard-link a hook or config to a
+# project file and rewrite it through that file in every later session, with
+# the read-only mounts below in place (shown on Docker by e2e.py). Inside the
+# mounts it cannot make a new link, since they are read-only and a link
+# across mounts fails, so refuse a file with a second link there. The objects
+# are left alone: a local clone hard-links them, and they name no command.
+for path in config config.worktree commondir hooks modules worktrees; do
+    [ -e "$project/.git/$path" ] || continue
+    if ! linked=$(find "$project/.git/$path" -type f -links +1 -print) || [ -n "$linked" ]; then
+        printf '%s\n' "refusing to run: a file under $project/.git/$path has another hard link, through which the agent could rewrite what your host git runs, so replace it with a copy: $linked" >&2
+        exit 2
+    fi
+done
+
+# `.git/config.worktree` and `.git/commondir` are created below when missing
+# and then bind-mounted as files. `set -C` does not save that write from a
+# FIFO, which dash opens and blocks on waiting for a reader, and Docker cannot
+# mount a directory or a socket as a file either, so refuse anything there
+# that is not an ordinary file. A symlink was caught above, and `[ -e ]`
+# follows one, so a dangling link cannot slip past this.
+for file in .git/config.worktree .git/commondir; do
+    if [ -e "$project/$file" ] && [ ! -f "$project/$file" ]; then
+        printf '%s\n' "refusing to run: $project/$file is not a regular file, which this script would create or mount as one, so inspect and remove it" >&2
+        exit 2
+    fi
+done
+
+# Git reads `commondir` in any git directory, not only a linked worktree's,
+# and takes the config and hooks from the directory it names, so a
+# `.git/commondir` the agent wrote makes the host's next `git status` run a
+# command from a config it controls (reproduced 2026-09-23). A repository's
+# own `.git` never has one, and the one this script creates holds `.`, so
+# anything else was planted, possibly by a session from before this check.
+# Git uses the whole file with trailing whitespace trimmed, and the shell
+# cannot see a NUL byte, so `.\n\0` would compare as `.` here while Git
+# followed `.git/.\n` (reproduced). Anything longer than the two bytes this
+# script writes is therefore refused before the rest is compared, which also
+# keeps a huge file out of this script.
+if [ -f "$project/.git/commondir" ] && {
+    [ "$(wc -c < "$project/.git/commondir")" -gt 2 ] \
+        || [ "$(cat "$project/.git/commondir")" != . ]
+}; then
+    printf '%s\n' "refusing to run: $project/.git/commondir redirects Git to another directory's config and hooks, which your host git would run, so inspect and remove it" >&2
+    exit 2
+fi
+
 # Allocate a TTY only when there is one, so the same wrapper serves a Herdr
 # pane and a non-interactive check. Unquoted on purpose: these are two words.
 tty_flags=--interactive
@@ -447,45 +526,7 @@ marker=$(mktemp)
 # still be creating it, and the sweep below catches one that takes longer. It
 # is in the wrapper's process group, so a SIGKILL to the whole group, which
 # cannot be trapped, takes it too and leaves the container running until the
-# next launch, which removes it below.
-#
-# The name is the project's tag, where this wrapper runs and its pid. A pid
-# means something only where it was read, so where it runs, the machine, the
-# user and the pid namespace, is hashed into the name. Every removal by name
-# then only reaches containers started from here: another user, a container
-# or a second machine on the same daemon has its own. The machine is its id,
-# Linux's machine-id or macOS's kern.uuid, since a Mac's host name changes
-# from one network to the next and would strand a container left before the
-# change. The host name stands in only where neither id exists.
-origin=$(
-    {
-        cat /etc/machine-id 2>/dev/null || sysctl -n kern.uuid 2>/dev/null || uname -n
-        id -u
-        readlink /proc/self/ns/pid 2>/dev/null || true
-    } | "$hash_cmd" | cut -c1-12
-)
-name=pi-sandbox-$project_tag-$origin-$$
-# A dead session can have left a container under this launch's pid, which
-# would make `docker run --name` fail, and only this launch can hold it now.
-docker rm -f "$name" >/dev/null 2>&1 || true
-# Remove every container from here whose wrapper, the pid at the end of its
-# name, no longer runs. A reused pid can only keep a dead session's container,
-# never remove a live one. A `ps` that cannot see this wrapper either would
-# call every session gone, so then nothing is swept.
-if ps -p $$ >/dev/null 2>&1; then
-    for stale in $(docker ps -a --filter label=pi-sandbox=1 --format '{{.Names}}' 2>/dev/null); do
-        case "$stale" in
-            pi-sandbox-*-"$origin"-*) ;;
-            *) continue ;;
-        esac
-        case "${stale##*-}" in
-            '' | *[!0-9]*) continue ;;
-        esac
-        if ! ps -p "${stale##*-}" >/dev/null 2>&1; then
-            docker rm -f "$stale" >/dev/null 2>&1 || true
-        fi
-    done
-fi
+# next launch, which removes it before its checks.
 (
     trap '' HUP INT TERM
     while kill -0 $$ 2>/dev/null; do

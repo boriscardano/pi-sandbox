@@ -732,7 +732,7 @@ def test_wrapper_refuses_a_non_regular_config_worktree(tmp_path: Path) -> None:
 
         assert completed.returncode == 2, index
         assert "not a regular file" in completed.stderr, index
-        assert invocations == [], index
+        assert not any(argv[0] == "run" for argv in invocations), index
 
 
 def test_wrapper_creates_commondir_as_dot_and_git_still_works(tmp_path: Path) -> None:
@@ -789,7 +789,7 @@ def test_wrapper_refuses_a_planted_commondir(tmp_path: Path) -> None:
 
         assert completed.returncode == 2, content
         assert "commondir" in completed.stderr, content
-        assert invocations == [], content
+        assert not any(argv[0] == "run" for argv in invocations), content
         assert (repo / ".git/commondir").read_text() == content
 
 
@@ -807,7 +807,7 @@ def test_wrapper_refuses_a_non_regular_commondir(tmp_path: Path) -> None:
 
         assert completed.returncode == 2, index
         assert "not a regular file" in completed.stderr, index
-        assert invocations == [], index
+        assert not any(argv[0] == "run" for argv in invocations), index
 
 
 def test_wrapper_refuses_a_symlinked_git_path(tmp_path: Path) -> None:
@@ -842,7 +842,7 @@ def test_wrapper_refuses_a_symlinked_git_path(tmp_path: Path) -> None:
         assert completed.returncode == 2, relative
         assert "symlink" in completed.stderr, relative
         assert str(project / relative) in completed.stderr, relative
-        assert invocations == [], relative
+        assert not any(argv[0] == "run" for argv in invocations), relative
         # Nothing was created through the link.
         assert sorted(path.name for path in target.iterdir()) == ["keep"], relative
 
@@ -1915,8 +1915,9 @@ def test_wrapper_refuses_when_it_cannot_tell_a_session_is_gone(
 
 
 def test_wrapper_names_each_container_apart(tmp_path: Path) -> None:
-    """Two sessions in one project run at once, so a name shared between them
-    would make one session's exit remove the other's container."""
+    """A session's watcher removes its container by name for seconds after
+    the session ends, so a name shared between sessions of one project would
+    let it remove the next session's container."""
 
     _, first = _run(tmp_path / "a", cwd=tmp_path / "project")
     _, second = _run(tmp_path / "b", cwd=tmp_path / "project")

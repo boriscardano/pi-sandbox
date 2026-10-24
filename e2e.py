@@ -135,7 +135,8 @@ for spec in json.loads((agent / "settings.json").read_text())["packages"]:
     package = agent / "npm/node_modules" / name / "package.json"
     print(spec, json.loads(package.read_text())["version"])
 '"""
-DOWNGRADE = "npm_config_ignore_scripts=true pi install npm:pi-background-tasks@2.6.9"
+# As the user would run it, which must also work in the volume.
+DOWNGRADE = "pi install npm:pi-background-tasks@2.6.9"
 
 
 def pinned_extensions() -> list[str]:

@@ -726,7 +726,8 @@ def exit_report(project: Path, lines: list[str]) -> bool:
         session.read(1)
         session.end()
     finally:
-        (project / "locked").chmod(0o755)
+        with contextlib.suppress(FileNotFoundError):
+            (project / "locked").chmod(0o755)
     out = session.output
     hidden = out.rfind(b"\033]11;#010203\007")
     warning = out.find(b"pi-sandbox: warning:", max(hidden, 0))

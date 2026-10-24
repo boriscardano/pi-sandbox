@@ -1198,7 +1198,8 @@ def test_wrapper_notes_a_directory_it_can_list_but_not_enter(
 ) -> None:
     """A mode 000 directory the agent makes on Docker Desktop reaches the host
     as 0600. macOS find lists it, skips what is inside without an error, and
-    the repository planted there went unreported with no note at all."""
+    the repository planted there went unreported with no note at all. GNU
+    find already fails there, so only macOS shows the fix."""
 
     if os.geteuid() == 0:
         pytest.skip("root enters a mode 0600 directory")

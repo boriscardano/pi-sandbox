@@ -54,6 +54,11 @@ Notes for agents and contributors changing this repo, from the security work on
   the edit at the next launch in any project (2026-10-24). The wrapper now
   refuses it by physical path, so run the sandbox on pi-sandbox from a clone
   with another checkout's `pi`.
+- Compare paths with `env pwd -P`, not the builtin. macOS `/bin/sh` is bash,
+  whose builtin `pwd -P` resolves symlinks but keeps the case it was given, so
+  `cd /users/BORIS && pwd -P` printed `/users/BORIS` and a launch from another
+  case of the home path passed the home refusal (2026-10-25). dash, zsh and the
+  `pwd` program ask the kernel and print `/Users/boris`. NixOS has no `/bin/pwd`.
 - Never ask host `git` where the project is. `git rev-parse --show-toplevel`
   honours `core.worktree`, and a planted `core.worktree=/etc` made a later
   launch mount `/etc` (round 4). The wrapper walks up to the nearest `.git`.

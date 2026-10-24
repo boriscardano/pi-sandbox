@@ -3,9 +3,10 @@
 Starts the real wrapper in a pseudo-terminal in a throwaway repository, the
 way a Herdr pane does, and proves from inside the container it started that
 the project is writable and the parts of `.git` that can name a command are
-not, and that a copy of the wrapper refuses the project it sits in. It checks that uv still picks Debian's Python for a project that
-accepts it, syncs a Python project and checks that the state volume grows by
-little more than the venv, which the next session imports from offline.
+not. It checks that a copy of the wrapper refuses the project it sits in,
+that uv still picks Debian's Python for a project that accepts it, syncs a
+Python project and checks that the state volume grows by little more than
+the venv, which the next session imports from offline.
 Then it ends sessions every way one can end and checks that no container
 is left behind, and rebuilds the image for a new Pi release and checks that
 the build cache the old one left is pruned. No API key and no model call: Pi
@@ -405,26 +406,28 @@ def self_mount(lines: list[str]) -> bool:
     with throwaway_project() as project:
         for name in ("pi", "Dockerfile.pi", "entrypoint.sh"):
             shutil.copy2(WRAPPER.parent / name, project / name)
-        refused = subprocess.run(
-            [str(project / "pi"), "--provider", "opencode", "--model", "x"],
-            cwd=project,
-            stdin=subprocess.DEVNULL,
-            capture_output=True,
-            text=True,
-            timeout=60,
-            check=False,
-        )
+        # The refusal comes before anything slow, so a run still going after
+        # a minute has got past it and is building or starting a session.
+        try:
+            refused = subprocess.run(
+                [str(project / "pi"), "--provider", "opencode", "--model", "x"],
+                cwd=project,
+                stdin=subprocess.DEVNULL,
+                capture_output=True,
+                text=True,
+                timeout=60,
+                check=False,
+            )
+            status, stderr = str(refused.returncode), refused.stderr
+        except subprocess.TimeoutExpired:
+            status, stderr = "none, still running after 60 s", ""
         container = find_container(project)
     lines.append(
-        f"wrapper inside its own project: exit {refused.returncode}, "
+        f"wrapper inside its own project: exit {status}, "
         f"container {container or 'none'}"
     )
-    lines += [f"  {line}" for line in refused.stderr.splitlines()]
-    return (
-        refused.returncode != 2
-        or "it contains this wrapper" not in refused.stderr
-        or bool(container)
-    )
+    lines += [f"  {line}" for line in stderr.splitlines()]
+    return status != "2" or "it contains this wrapper" not in stderr or bool(container)
 
 
 def checks(lines: list[str]) -> bool:

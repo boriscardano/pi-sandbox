@@ -1142,11 +1142,13 @@ def test_wrapper_refuses_a_project_that_contains_it(tmp_path: Path) -> None:
     (checkout / ".git").mkdir(parents=True)
     (checkout / "sub").mkdir()
     wrapper = _wrapper_with_inputs(checkout)
+    nested = _wrapper_with_inputs(checkout / "tools")
     (tmp_path / "link").symlink_to(checkout)
 
     launches = {
         "root": _run(tmp_path / "a", cwd=checkout, wrapper=wrapper),
         "subdirectory": _run(tmp_path / "b", cwd=checkout / "sub", wrapper=wrapper),
+        "wrapper below the project": _run(tmp_path / "e", cwd=checkout, wrapper=nested),
         "wrapper by symlink": _run(
             tmp_path / "c", cwd=checkout, wrapper=tmp_path / "link" / "pi"
         ),

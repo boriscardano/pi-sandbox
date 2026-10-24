@@ -362,11 +362,13 @@ pane run` through that socket would execute on the host.
   They warn rather than fixing.
 - The script runs on your host for every project, and `Dockerfile.pi` and
   `entrypoint.sh` build the image every project runs in, so it refuses to
-  mount the directory that holds them, compared by physical path. To work on
-  pi-sandbox itself with the sandbox, run the wrapper from a separate checkout
-  or worktree against the working copy (`git worktree add ../pi-sandbox-work`,
-  then launch the main checkout's `pi` from there), and review the diff before
-  it reaches the checkout your launcher runs from.
+  mount a directory that holds them, even through a symlink. To work on
+  pi-sandbox itself with the sandbox, launch one checkout's wrapper from
+  another checkout, your working copy, and review the diff before it reaches
+  the checkout your launcher runs from. A clone as the working copy keeps Git
+  working in the sandbox, a linked worktree does not (see Git above). The
+  session runs the launcher checkout's `Dockerfile.pi` and `entrypoint.sh`,
+  not the working copy's.
 - A container is not a virtual machine. A container escape defeats this
   boundary. On macOS and Windows, Docker Desktop's own VM is a second layer.
 - The agent can start other agents through the extensions, and they spend the

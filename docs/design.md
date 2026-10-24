@@ -75,16 +75,19 @@ start installs any of them unless npm holds the pinned version, judged by the
 an existing volume follows a bumped pin even though an image rebuild does not
 reach it, and an entry without a version, from a volume older than the pins or
 a bare `pi install` of one of the four, is pinned again at the next start,
-since `pi update --extensions` moves exactly those. A volume already at the pins makes no call, since each install costs
-about a second of a warm start and every Herdr pane is a start. An install
-that names a version moves an installed release down as well as up and
-replaces the entry in Pi's settings (measured with `pi-background-tasks`,
-2.6.9 to 2.6.10 and back). npm's download cache goes to `/tmp`, which is
-removed with the container, so releases do not pile up in the volume.
+since `pi update --extensions` moves exactly those. A volume already at the
+pins makes no call, since each install costs about a second of a warm start
+and every Herdr pane is a start. An install that names a version moves an
+installed release down as well as up and replaces the entry in Pi's settings
+(measured with `pi-background-tasks`, 2.6.9 to 2.6.10 and back). npm's
+download cache goes to `/tmp`, which is removed with the container, so
+releases do not pile up in the volume.
 
 Nothing runs `pi update --extensions`. An extension you added stays at the
 version it was installed at, and a `pi remove npm:<package>` of one of the four
-lasts only until the next start, which installs it again. The check repairs
+lasts only until the next start, which installs it again. pi-extension-manager
+can schedule updates of its own, off by default, and the pins come back at the
+next start, not during the session. The check repairs
 drift, not tampering: the agent owns these files and can edit an extension's
 code while leaving its version alone, and only resetting the volume undoes
 that.

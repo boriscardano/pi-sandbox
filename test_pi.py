@@ -2160,8 +2160,8 @@ def test_the_entrypoint_pins_an_extension_pi_lists_without_a_version(
 ) -> None:
     """A volume from before the pins, or a bare `pi install` of one of the
     four, leaves Pi's settings naming it without a version while npm holds
-    the pinned one. `pi update --extensions` moves exactly those entries, so the next start
-    must pin it again."""
+    the pinned one. `pi update --extensions` moves exactly those entries, so
+    the next start must pin it again."""
 
     first = [call[1] for call in _run_entrypoint(tmp_path).calls[:-1]]
     settings = tmp_path / "home/.pi/agent/settings.json"

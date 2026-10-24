@@ -216,10 +216,10 @@ found again on the next run rather than reinstalled.
 
 Lost, because `--rm` deletes the container's writable layer: anything in
 `/usr/local`, `/usr/bin` or `/opt`, and anything in `/tmp`, uv's and npm's
-caches among it. A venv already synced needs no cache, so only a changed lock downloads
-again. The agent cannot
-install system packages at all, since it is not root and there is no `sudo`, so
-`apt-get install` fails. Put anything system-level in `Dockerfile.pi` instead.
+caches among it. A venv already synced needs no cache, so only a changed lock
+downloads again. The agent cannot install system packages at all, since it is
+not root and there is no `sudo`, so `apt-get install` fails. Put anything
+system-level in `Dockerfile.pi` instead.
 
 These volumes grow. A project whose agent installed a Rust toolchain reached
 2.6 GB.
@@ -258,13 +258,14 @@ with the container.
 
 They live in the agent's home, so they reach a project through its state
 volume. A new project's first start downloads them. Offline, that start
-proceeds without them, and the next start with a network installs them. A
-start installs any of the four that is missing, not at its pinned version or
-listed by Pi without it, so a new pin reaches existing volumes too, and makes no call otherwise. Nothing
-updates them on its own. An extension you added yourself stays at the version
-it was installed at, and another version of one of the four is put back to
-the pin at the next start. That repairs drift, not tampering, since the agent
-owns these files, and resetting the volume is the only real reset.
+proceeds without them, and the next start with a network installs them. A start
+installs any of the four that is missing, not at its pinned version or listed
+by Pi without it, so a new pin reaches existing volumes too, and makes no call
+otherwise. Nothing updates them on its own. An extension you added yourself
+stays at the version it was installed at, and another version of one of the
+four is put back to the pin at the next start. That repairs drift, not
+tampering, since the agent owns these files, and resetting the volume is the
+only real reset.
 
 Pi's own subcommands run against the volume rather than your host Pi, so
 `pi list` shows what a project actually has and `pi install npm:<package>` adds

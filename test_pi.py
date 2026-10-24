@@ -1072,10 +1072,10 @@ def test_wrapper_reports_when_find_cannot_check_for_nested_git(
 def test_wrapper_warns_about_a_bare_repository_the_container_left(
     tmp_path: Path,
 ) -> None:
-    """Host git takes any directory holding HEAD, objects, refs and a config
-    for a repository, with no `.git` in sight, and trusts that config. A new
-    HEAD outside the protected root `.git` is never legitimate, so it is
-    reported by the directory it is in."""
+    """Host git takes any directory holding HEAD, objects and refs for a
+    repository, with no `.git` in sight, and trusts the config there. A new
+    HEAD outside the protected root `.git` is reported by the directory it is
+    in."""
 
     completed, _ = _run(
         tmp_path,
@@ -1092,6 +1092,16 @@ def test_wrapper_warns_about_a_bare_repository_the_container_left(
     )
     assert lines[start + 1] == str(tmp_path / "project/src")
     assert lines[start + 2].startswith("your host git trusts it")
+
+
+def test_wrapper_does_not_report_a_directory_named_head(tmp_path: Path) -> None:
+    """Git only takes a file or a symlink for HEAD, and a `components/Head`
+    directory is ordinary code. Reporting it would teach the reader to skip
+    the warning."""
+
+    completed, _ = _run(tmp_path, agent="mkdir -p components/Head src/head")
+
+    assert "nested git metadata" not in completed.stderr
 
 
 def test_wrapper_warns_about_git_metadata_named_in_another_case(
@@ -1147,7 +1157,8 @@ def test_wrapper_prints_no_control_bytes_from_a_name_the_agent_chose(
 ) -> None:
     """The agent names the paths the exit warning prints, and an escape
     sequence in a name could erase the warning or rewrite it once it reaches
-    the terminal. The wrapper prints a `?` for each control byte instead."""
+    the terminal. The wrapper prints a `?` for every byte that is not
+    printable ASCII instead."""
 
     completed, _ = _run(
         tmp_path,
@@ -1205,6 +1216,24 @@ def test_wrapper_resets_the_terminal_before_its_exit_warnings(
     between = output[hidden:warning]
     for reset in ("\x1b[!p", "\x1b]104\x07", "\x1b]110\x07", "\x1b]111\x07"):
         assert reset in between, reset
+
+
+def test_wrapper_leaves_the_terminal_alone_without_a_warning(
+    tmp_path: Path,
+) -> None:
+    """The reset also undoes colours the user set on purpose, such as a theme
+    a shell sets at startup, so a session that leaves nothing to warn about
+    must not send it."""
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "--quiet", str(repo)], check=True)
+
+    completed, _ = _run(tmp_path / "run", cwd=repo, terminal=True)
+
+    assert "pi-sandbox: warning" not in completed.stdout
+    assert "\x1b[!p" not in completed.stdout
+    assert "\x1b]110" not in completed.stdout
 
 
 def test_wrapper_ends_without_a_job_notice_for_its_watcher(tmp_path: Path) -> None:

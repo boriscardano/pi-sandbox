@@ -1152,6 +1152,24 @@ def test_wrapper_keeps_what_find_found_when_a_directory_is_unreadable(
     assert "nested-git check could not run" in completed.stderr
 
 
+def test_wrapper_notes_a_directory_it_can_list_but_not_enter(
+    tmp_path: Path,
+) -> None:
+    """A mode 000 directory the agent makes on Docker Desktop reaches the host
+    as 0600. macOS find lists it, skips what is inside without an error, and
+    the repository planted there went unreported with no note at all."""
+
+    if os.geteuid() == 0:
+        pytest.skip("root enters a mode 0600 directory")
+
+    completed, _ = _run(
+        tmp_path, agent=NESTED_GIT + " && mkdir hide && mv sub hide && chmod 600 hide"
+    )
+    (tmp_path / "project/hide").chmod(0o755)
+
+    assert "nested-git check could not run" in completed.stderr
+
+
 def test_wrapper_prints_no_control_bytes_from_a_name_the_agent_chose(
     tmp_path: Path,
 ) -> None:
@@ -1214,7 +1232,7 @@ def test_wrapper_resets_the_terminal_before_its_exit_warnings(
     hidden = output.index("\x1b]11;#010203\x07")
     warning = output.index("pi-sandbox: warning: the container left", hidden)
     between = output[hidden:warning]
-    for reset in ("\x1b[!p", "\x1b]104\x07", "\x1b]110\x07", "\x1b]111\x07"):
+    for reset in ("\x1b[!p\x1b[m", "\x1b]104\x07", "\x1b]110\x07", "\x1b]111\x07"):
         assert reset in between, reset
 
 

@@ -313,10 +313,12 @@ but a host command that changes the config, such as `git config`, `git remote
 add` or `git push -u`, fails until the session ends and the wrapper releases
 them. A session of the same project still running keeps them locked. If the
 wrapper and its watcher are killed together, with a SIGKILL to the whole
-process group, the lock stays until the next session of the project ends, or
-until you run `chflags nouchg .git/config .git/config.worktree
-.git/commondir`. The wrapper stops if it cannot set the flag, for example on a
-disk that has no file flags.
+process group, the container keeps running and the lock stays until the next
+session of the project, which removes that container, ends. Do not clear the
+flag by hand while such a container runs, since its agent could then write
+the files. The release also clears a flag you set on those files yourself.
+The wrapper stops if it cannot set the flag, for example on a disk that has no
+file flags.
 
 The wrapper refuses to start on a symlink at `.git` or at any of the
 read-only paths, any symlink under them, a config or hook there with a second
@@ -474,7 +476,7 @@ with `python3 e2e.py` on Docker Desktop. It starts Pi in a pseudo-terminal in a
 throwaway repository, checks from inside the container that `/workspace` is
 writable while `.git/config`, `config.worktree`, `commondir`, `hooks`,
 `worktrees` and `modules` are not, under case-variant names too, and `.git`
-cannot be moved, that host `git config` works again after a session, that a file the
+cannot be moved under any case, that host `git config` works again after a session, that a file the
 agent writes is owned by you, that the memory and CPU limits are set, that
 the terminal output is not logged and that a copy of the wrapper launched on
 the project holding it refuses to start. It checks that a new volume holds the

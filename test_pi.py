@@ -812,11 +812,9 @@ def _git_files(repo: Path) -> dict[str, bytes | None]:
 def test_wrapper_keeps_the_git_files_unwritable_under_any_name(
     tmp_path: Path,
 ) -> None:
-    """Docker Desktop shares the project into its VM, and a macOS disk ignores
-    case, so `.git/CONFIG` in the container reached the host's `.git/config`
-    through the writable `.git` mount, past the read-only file mount
-    (reproduced 2026-10-24). The agent here does what that file sharing does,
-    writing the host files themselves, by every route that worked: append,
+    """Docker Desktop on macOS resolved `.git/CONFIG` to the host's
+    `.git/config` past the read-only mount. The agent here writes the host
+    files as that file sharing does, by every route that worked: append,
     rename over and unlink. Host git must write its config again afterwards."""
 
     repo = tmp_path / "repo"

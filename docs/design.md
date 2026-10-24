@@ -199,12 +199,15 @@ the write arrives under, while host Git still reads it, and nothing in the
 container can clear it: the container has no capabilities, and a `chattr`
 there left the flag in place. The flag comes off when no container of the
 project is left, after the wrapper's own `docker rm`, or from its watcher when
-the wrapper was killed. Checking for a container first keeps a session that
-ended from unlocking one opened right after it. A launch that cannot set the
-flag stops. A comparison of the files at exit was the alternative, but host
+the wrapper was killed. A failed container listing keeps them locked. A
+session that ends while another of the project starts, before the new one's
+container exists, still releases them, so the watcher of every live session
+sets the flag again each second, while the new agent is not running yet. A
+launch that cannot set the flag stops. The release also clears a flag you set
+on those files yourself. A comparison of the files at exit was the alternative, but host
 Git can run during the session and would act on a planted config before any
-exit check. A native Linux host needs none of this: its kernel resolves a case
-variant on a case-insensitive directory to the mounted file.
+exit check. A native Linux host on a case-sensitive filesystem is not
+affected. A casefolded ext4 directory was not tested.
 
 ### Symlinks and FIFOs
 

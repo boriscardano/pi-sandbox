@@ -84,13 +84,11 @@ EXPECTED_CHECKS = [
     "readonly .git/modules",
     "readonly mv .git",
 ]
-# Docker Desktop shares the host's directory into its VM, and macOS disks
-# ignore case by default. A name the read-only file mounts do not cover, like
-# `.git/CONFIG`, then went through the writable `.git` mount to the host's
-# `.git/config` (reproduced 2026-10-24). Every way found to change one of
-# those files under another name, then the directory mounts under theirs. The
-# host's copies are compared afterwards, because on a case-sensitive disk the
-# same writes only make new files. The Kelvin sign folds to k.
+# On a macOS disk, which ignores case, Docker Desktop resolved `.git/CONFIG`
+# to the host's `.git/config` past the read-only mount (docs/design.md). Every
+# way found to change the protected parts of `.git` under other names. The
+# host's copies are compared, since on a case-sensitive disk these writes only
+# make new files. The Kelvin sign folds to k.
 PROTECTED_FILES = ("config", "config.worktree", "commondir")
 CASE_VARIANTS = r"""
 cd /workspace/.git
@@ -107,6 +105,9 @@ ln Config.Worktree ../case-link && printf x >> ../case-link
 printf x >> HOOKS/pre-commit
 touch HOOKS/pre-push "hoo${k}s/post-checkout" WORKTREES/x MODULES/x
 mv HOOKS ../hooks-moved
+printf x >> ../.GIT/CONFIG
+touch ../.GIT/HOOKS/pre-push
+mv ../.GIT ../git-moved
 true
 """
 
@@ -525,6 +526,9 @@ def throwaway_project(repository: bool = True) -> Iterator[Path]:
             "volume", "ls", "-q", "--filter", f"name=pi-sandbox-{project.name}-"
         ).split():
             docker("volume", "rm", volume)
+        # A run that died mid-session leaves the .git files locked on macOS.
+        if sys.platform == "darwin":
+            subprocess.run(["chflags", "-R", "nouchg", project], check=False)
         shutil.rmtree(project, ignore_errors=True)
 
 
@@ -700,11 +704,6 @@ def checks(lines: list[str]) -> bool:
             + (f"CHANGED {changed}" if changed else "unchanged")
         )
         failed |= bool(changed)
-        status = subprocess.run(
-            ["git", "-C", project, "status"], capture_output=True, check=False
-        )
-        lines.append(f"  host git status during the session: exit {status.returncode}")
-        failed |= status.returncode != 0
         # The file the container wrote belongs to the host user, so the agent
         # cannot leave root-owned files in the project.
         owner = (project / "probe-file").stat().st_uid

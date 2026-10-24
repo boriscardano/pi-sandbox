@@ -476,6 +476,7 @@ set -- "$image" "$@"
 # volumes of projects that are gone. Docker sets it only when it creates the
 # volume.
 set -- --mount "type=volume,source=$state_volume,target=/home/agent,volume-label=pi-sandbox.project=$project" "$@"
+lock_git=''
 if [ -d "$project/.git" ]; then
     # Remembered for the exit check: a root `.git` this launch protected is the
     # one the container could not have replaced, and is the only one to prune.
@@ -535,20 +536,25 @@ if [ -d "$project/.git" ]; then
     # On a macOS disk, which ignores case, Docker Desktop resolved
     # `.git/CONFIG` to the host's `.git/config` past the read-only file
     # mounts, so the three files are also locked with the user-immutable flag
-    # for the session. docs/design.md has the details.
-    [ "$(uname -s)" != Darwin ] || lock_git=1
+    # for the session. docs/design.md has the details. The container carries
+    # the file's identity, which no other path to the same repository changes.
+    if [ "$(uname -s)" = Darwin ]; then
+        lock_git=1
+        git_id=$(stat -f %d-%i "$project/.git/config")
+        set -- --label "pi-sandbox.git=$git_id" "$@"
+    fi
 fi
 
 flag_git_files() {
     [ -n "${lock_git:-}" ] || return 0
     chflags "$1" "$project/.git/config" "$project/.git/config.worktree" "$project/.git/commondir"
 }
-# Only once no container of this project is left, so a session ending while
+# Only once no container using these files is left, so a session ending while
 # another one runs does not unlock the files under it.
 release_git_files() {
     [ -n "${lock_git:-}" ] || return 0
     # A failed listing cannot rule one out, so the files stay locked.
-    left=$(docker ps -aq --filter "name=pi-sandbox-$project_tag-" 2>/dev/null) || return 0
+    left=$(docker ps -aq --filter "label=pi-sandbox.git=$git_id" 2>/dev/null) || return 0
     [ -n "$left" ] || flag_git_files nouchg
 }
 
@@ -619,10 +625,15 @@ docker run \
 docker rm -f "$name" >/dev/null 2>&1 || true
 # The wrapper got here, so the watcher has nothing left to do, and it would
 # lock the files again. It ignores TERM. Reaping it keeps bash, which is macOS
-# /bin/sh, from printing `Killed: 9` and the watcher's source on every exit.
-kill -KILL "$watcher" 2>/dev/null || true
-wait "$watcher" 2>/dev/null || true
-release_git_files || true
+# /bin/sh, from printing `Killed: 9` and the watcher's source on every exit. A
+# killed client, though, can still be creating the container, which the
+# watcher's second removal catches, so the watcher is left to release the
+# files then.
+if [ "$docker_status" -lt 128 ]; then
+    kill -KILL "$watcher" 2>/dev/null || true
+    wait "$watcher" 2>/dev/null || true
+    release_git_files || true
+fi
 
 # Prune the project's own .git, but only when this launch protected it with a
 # mount, and look for nested git metadata the container created. Warn only,

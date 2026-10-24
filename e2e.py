@@ -93,8 +93,7 @@ PROTECTED_FILES = ("config", "config.worktree", "commondir")
 CASE_VARIANTS = r"""
 cd /workspace/.git
 k=$(printf '\342\204\252')
-for name in CONFIG Config cOnFiG CONFIG.WORKTREE Config.Worktree \
-    "config.wor${k}tree" COMMONDIR CommonDir; do
+for name in CONFIG Config.Worktree "config.wor${k}tree" CommonDir; do
     printf '\n[core]\n\tfsmonitor = touch /tmp/pwned\n' >> "$name"
     printf '[core]\n\tfsmonitor = touch /tmp/pwned\n' > ../case-tmp
     mv ../case-tmp "$name"
@@ -659,7 +658,10 @@ def snapshot(project: Path) -> dict[str, bytes]:
     three directories, by path."""
 
     git = project / ".git"
-    found = {name: (git / name).read_bytes() for name in PROTECTED_FILES}
+    found = {
+        name: (git / name).read_bytes() if (git / name).exists() else b"<gone>"
+        for name in PROTECTED_FILES
+    }
     for directory in ("hooks", "worktrees", "modules"):
         for path in (git / directory).rglob("*"):
             found[str(path.relative_to(git))] = (

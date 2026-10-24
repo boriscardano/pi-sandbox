@@ -197,17 +197,25 @@ So on macOS the wrapper sets the user-immutable flag on the three files right
 before `docker run`. It refuses every change to the file itself, whatever name
 the write arrives under, while host Git still reads it, and nothing in the
 container can clear it: the container has no capabilities, and a `chattr`
-there left the flag in place. The flag comes off when no container of the
-project is left, after the wrapper's own `docker rm`, or from its watcher when
-the wrapper was killed. A failed container listing keeps them locked. A
-session that ends while another of the project starts, before the new one's
-container exists, still releases them, so the watcher of every live session
-sets the flag again each second, while the new agent is not running yet. A
-launch that cannot set the flag stops. The release also clears a flag you set
-on those files yourself. A comparison of the files at exit was the alternative, but host
-Git can run during the session and would act on a planted config before any
-exit check. A native Linux host on a case-sensitive filesystem is not
-affected. A casefolded ext4 directory was not tested.
+there left the flag in place.
+
+The flag comes off when no container labelled with the file's device and
+inode is left, so a session of the same repository reached by a symlink or a
+path in another case keeps it too. The wrapper releases it after its own
+`docker rm`, and its watcher does when the wrapper was killed, or when the
+docker client was, since that client can still be creating the container
+after the wrapper's removal. A failed container listing keeps it on. A
+session that ends while another starts, before the new container exists,
+still releases it, so the watcher of every live session sets it again each
+second, before the new agent can be running. A launch that cannot set the
+flag stops. The release also clears a flag you set on those files yourself,
+and sessions on two Docker daemons do not see each other's containers.
+
+A comparison of the files at exit was the alternative, but host Git can run
+during the session and would act on a planted config before any exit check.
+A native Linux host on a case-sensitive filesystem is not affected. A
+casefolded ext4 directory was not tested, and neither was Docker Desktop on
+Windows, where a project on a case-insensitive NTFS drive is not locked.
 
 ### Symlinks and FIFOs
 

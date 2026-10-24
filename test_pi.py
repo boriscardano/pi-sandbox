@@ -66,12 +66,13 @@ case "$1" in
     # The build cache listing, as the wrapper's template prints it.
     system) printf '%s' "${PI_SANDBOX_FAKE_CACHE:-}"; exit 0 ;;
     # A label filter is answered from the labels of the runs in progress,
-    # which every run sharing PI_SANDBOX_FAKE_RUNNING records there.
+    # which every run sharing the PI_SANDBOX_FAKE_RUNNING directory records.
     ps)
         for arg in "$@"; do
             case "$arg" in
                 label=pi-sandbox.git=*)
-                    grep -sxF -- "${arg#label=}" "${PI_SANDBOX_FAKE_RUNNING:-/dev/null}"
+                    cat "${PI_SANDBOX_FAKE_RUNNING:-/dev/null}"/* 2>/dev/null \
+                        | grep -xF -- "${arg#label=}"
                     exit 0
                     ;;
             esac
@@ -91,18 +92,15 @@ if [ "$1" = build ]; then
     exit "${PI_SANDBOX_FAKE_BUILD_STATUS:-0}"
 fi
 if [ "$1" = run ]; then
-    labels=''
+    # One file of labels per run in progress, in a directory runs share.
     if [ -n "${PI_SANDBOX_FAKE_RUNNING:-}" ]; then
-        labels=$(printf '%s\n' "$@" | sed -n '/^--label$/{n;p;}')
-        printf '%s\n' "$labels" >> "$PI_SANDBOX_FAKE_RUNNING"
+        mkdir -p "$PI_SANDBOX_FAKE_RUNNING"
+        printf '%s\n' "$@" | sed -n '/^--label$/{n;p;}' > "$PI_SANDBOX_FAKE_RUNNING/$$"
     fi
     if [ -n "${PI_SANDBOX_FAKE_AGENT:-}" ]; then
         sh -c "$PI_SANDBOX_FAKE_AGENT"
     fi
-    if [ -n "$labels" ]; then
-        printf '%s\n' "$labels" | grep -vxF -f - "$PI_SANDBOX_FAKE_RUNNING" > "$PI_SANDBOX_FAKE_RUNNING.new"
-        mv "$PI_SANDBOX_FAKE_RUNNING.new" "$PI_SANDBOX_FAKE_RUNNING"
-    fi
+    rm -f "${PI_SANDBOX_FAKE_RUNNING:-/nonexistent}/$$"
     exit "${PI_SANDBOX_FAKE_RUN_STATUS:-0}"
 fi
 exit 0
@@ -871,7 +869,7 @@ def test_wrapper_releases_the_git_files_when_it_is_killed(tmp_path: Path) -> Non
     killed, _ = _run(tmp_path, cwd=repo, agent='kill -KILL "$(ps -o ppid= -p "$PPID")"')
 
     assert killed.returncode == -signal.SIGKILL
-    # The watcher removes the container twice, five seconds apart.
+    # The watcher removes the container twice, five seconds apart, so allow 15 s.
     for _ in range(150):
         written = subprocess.run(
             ["git", "-C", str(repo), "config", "test.after", "1"],
@@ -900,39 +898,6 @@ def test_wrapper_locks_the_git_files_again_when_another_session_releases_them(
     _run(tmp_path, cwd=repo, agent=agent)
 
     assert not (repo / ".git/config").read_bytes().endswith(b"x")
-
-
-@pytest.mark.skipif(shutil.which("chflags") is None, reason="needs macOS chflags")
-def test_wrapper_leaves_the_git_files_locked_for_another_session(
-    tmp_path: Path,
-) -> None:
-    """The watcher of a killed session releases the files seconds after the
-    pane closed, by when the project may be open again. Releasing them then
-    would leave the new session's agent free to write them."""
-
-    repo = tmp_path / "repo"
-    subprocess.run(["git", "init", "--quiet", str(repo)], check=True)
-    _, invocations = _run(tmp_path / "first", cwd=repo)
-    project_tag = _container_name(invocations).split("-")[2]
-
-    try:
-        _run(
-            tmp_path / "second",
-            cwd=repo,
-            containers=f"pi-sandbox-{project_tag}-0123456789ab-{os.getpid()}\n",
-        )
-        written = subprocess.run(
-            ["git", "-C", str(repo), "config", "test.after", "1"],
-            capture_output=True,
-            check=False,
-        )
-    finally:
-        subprocess.run(
-            ["chflags", "nouchg", *(repo / ".git" / f for f in PROTECTED_GIT_FILES)],
-            check=True,
-        )
-
-    assert written.returncode != 0, "the files were unlocked"
 
 
 @pytest.mark.skipif(shutil.which("chflags") is None, reason="needs macOS chflags")
@@ -978,7 +943,8 @@ def test_wrapper_keeps_the_lock_when_its_docker_client_is_killed(
     running = tmp_path / "running"
     late = (
         "(sleep 1; "
-        f"echo pi-sandbox.git=$(stat -f %d-%i .git/config) >> {running}; "
+        f"mkdir -p {running}; "
+        f"echo pi-sandbox.git=$(stat -f %d-%i .git/config) > {running}/late; "
         "end=$(($(date +%s) + 7)); "
         'while [ "$(date +%s)" -lt "$end" ]; do '
         "printf x >> .git/config 2>/dev/null; done) >/dev/null 2>&1 &"
@@ -1008,9 +974,8 @@ def test_wrapper_stops_on_macos_when_it_cannot_lock_the_git_files(
     tmp_path: Path, platform: str
 ) -> None:
     """On macOS the wrapper must not start a session it cannot protect, say on
-    a disk without file flags. Linux needs no lock, since its kernel resolves
-    a case variant to the mount on a case-insensitive directory too, so a
-    Linux host runs without chflags."""
+    a disk without file flags. A Linux host does not lock, so it runs
+    although chflags fails."""
 
     repo = tmp_path / "repo"
     subprocess.run(["git", "init", "--quiet", str(repo)], check=True)

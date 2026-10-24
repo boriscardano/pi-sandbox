@@ -419,7 +419,7 @@ def checks(lines: list[str]) -> bool:
         )
         lines.append(f"  memory limit {memory} bytes")
         failed |= memory != str(8 * 1024**3)
-        # Pi's footer reached the session through attach, which needs no log.
+        # Attach works without a log driver: Pi's footer was read through it above.
         log_driver = docker(
             "inspect", "--format", "{{.HostConfig.LogConfig.Type}}", session.container
         )

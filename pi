@@ -546,13 +546,13 @@ if [ -d "$project/.git" ]; then
 fi
 
 flag_git_files() {
-    [ -n "${lock_git:-}" ] || return 0
+    [ -n "$lock_git" ] || return 0
     chflags "$1" "$project/.git/config" "$project/.git/config.worktree" "$project/.git/commondir"
 }
 # Only once no container using these files is left, so a session ending while
 # another one runs does not unlock the files under it.
 release_git_files() {
-    [ -n "${lock_git:-}" ] || return 0
+    [ -n "$lock_git" ] || return 0
     # A failed listing cannot rule one out, so the files stay locked.
     left=$(docker ps -aq --filter "label=pi-sandbox.git=$git_id" 2>/dev/null) || return 0
     [ -n "$left" ] || flag_git_files nouchg
@@ -626,9 +626,14 @@ docker rm -f "$name" >/dev/null 2>&1 || true
 # The wrapper got here, so the watcher has nothing left to do, and it would
 # lock the files again. It ignores TERM. Reaping it keeps bash, which is macOS
 # /bin/sh, from printing `Killed: 9` and the watcher's source on every exit. A
-# killed client, though, can still be creating the container, which the
-# watcher's second removal catches, so the watcher is left to release the
-# files then.
+# status of 128 or more may be a killed client, which can still be creating
+# the container, so the watcher, whose second removal catches that, releases
+# the files then instead.
+if [ "$docker_status" -lt 128 ]; then
+    kill -KILL "$watcher" 2>/dev/null || true
+    wait "$watcher" 2>/dev/null || true
+    release_git_files || true
+fi
 if [ "$docker_status" -lt 128 ]; then
     kill -KILL "$watcher" 2>/dev/null || true
     wait "$watcher" 2>/dev/null || true

@@ -100,7 +100,7 @@ if [ "$1" = run ]; then
     if [ -n "${PI_SANDBOX_FAKE_AGENT:-}" ]; then
         sh -c "$PI_SANDBOX_FAKE_AGENT"
     fi
-    rm -f "${PI_SANDBOX_FAKE_RUNNING:-/nonexistent}/$$"
+    [ -z "${PI_SANDBOX_FAKE_RUNNING:-}" ] || rm -f "$PI_SANDBOX_FAKE_RUNNING/$$"
     exit "${PI_SANDBOX_FAKE_RUN_STATUS:-0}"
 fi
 exit 0
@@ -826,13 +826,12 @@ def _git_files(repo: Path) -> dict[str, bytes | None]:
 
 
 @pytest.mark.skipif(shutil.which("chflags") is None, reason="needs macOS chflags")
-def test_wrapper_keeps_the_git_files_unwritable_under_any_name(
-    tmp_path: Path,
-) -> None:
+def test_wrapper_locks_the_git_files_for_the_session(tmp_path: Path) -> None:
     """Docker Desktop on macOS resolved `.git/CONFIG` to the host's
-    `.git/config` past the read-only mount. The agent here writes the host
-    files as that file sharing does, by every route that worked: append,
-    rename over and unlink. Host git must write its config again afterwards."""
+    `.git/config` past the read-only mount, so the files themselves are
+    locked. The agent here writes them on the host by every route that worked
+    there: append, rename over and unlink. e2e.py tries the case variants.
+    Host git must write its config again afterwards."""
 
     repo = tmp_path / "repo"
     subprocess.run(["git", "init", "--quiet", str(repo)], check=True)
@@ -969,7 +968,19 @@ def test_wrapper_keeps_the_lock_when_its_docker_client_is_killed(
     assert not config.endswith(b"x")
 
 
-@pytest.mark.parametrize("platform", ["Darwin", "Linux"])
+# The Darwin case runs macOS's `stat -f`, which GNU stat reads differently.
+@pytest.mark.parametrize(
+    "platform",
+    [
+        pytest.param(
+            "Darwin",
+            marks=pytest.mark.skipif(
+                shutil.which("chflags") is None, reason="needs macOS stat"
+            ),
+        ),
+        "Linux",
+    ],
+)
 def test_wrapper_stops_on_macos_when_it_cannot_lock_the_git_files(
     tmp_path: Path, platform: str
 ) -> None:

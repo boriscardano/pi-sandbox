@@ -126,6 +126,7 @@ class Answer(http.server.BaseHTTPRequestHandler):
     def log_message(self, *args: object) -> None:
         pass
 
+
 # The extensions the volume holds, from Pi's settings and the version npm
 # installed, sorted, and changes to them by hand, run as the user would, which
 # must work in the volume, leave no npm cache in it, and be undone by the next
@@ -545,7 +546,6 @@ def checks(lines: list[str]) -> bool:
         lines.append(
             f"  host service on 127.0.0.1, from the container: {reach or 'probe failed'}"
         )
-
         pinned = pinned_extensions()
         installed = docker("exec", session.container, "sh", "-c", INSTALLED)
         lines.append("  extensions a fresh volume got:")

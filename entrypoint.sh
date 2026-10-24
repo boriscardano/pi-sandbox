@@ -67,15 +67,18 @@ fi
 # The four are listed here and nowhere else, each at an exact version that is
 # bumped by hand in a reviewed change, and docs/design.md says why. `pi install`
 # with a version moves an installed one up or down to it and pins Pi's entry
-# for it, and nothing runs `pi update`, so no new release of the four reaches
+# for it, and nothing runs `pi update --extensions`, so no new release of the
+# four reaches
 # the sandbox unreviewed, though their dependencies still resolve from ranges.
 # One is installed unless npm holds the pinned version and Pi's settings name
-# it pinned, since `pi update` moves an entry without a version. That repairs
-# drift, not tampering: the agent owns these files. An install costs about a
+# it pinned anywhere in the file, since `pi update --extensions` moves an entry
+# without a version. That repairs drift, not tampering: the agent owns these
+# files. It also heals what starts that overlap on a new volume or a new pin
+# lose by installing at once, so there is no lock. An install costs about a
 # second and every Herdr pane is a start, so a volume at the pins makes no call.
-# Only regular files are read, so a FIFO the agent left does not cost every
-# start the wait, but it is `timeout` that bounds the step, against that and a
-# hung registry alike. Lifecycle scripts stay off, so a release cannot run one
+# Only regular files are read, so a FIFO at a package.json does not cost every
+# start the wait, but it is `timeout` that bounds the step, against any FIFO
+# and a hung registry alike. Lifecycle scripts stay off, so a release cannot run one
 # in a sandbox that holds the API key. Pi's own subcommands are passed through
 # to it untouched, so they must not trigger an install of their own.
 # Keep this list in step with the same list in pi.

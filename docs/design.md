@@ -74,8 +74,8 @@ start installs any of them unless npm holds the pinned version, judged by the
 `package.json` under Pi's npm directory, and Pi's settings name it pinned. So
 an existing volume follows a bumped pin even though an image rebuild does not
 reach it, and an entry without a version, from a volume older than the pins or
-a bare `pi install` of one of the four, is pinned again before `pi update` can
-move it. A volume already at the pins makes no call, since each install costs
+a bare `pi install` of one of the four, is pinned again at the next start,
+since `pi update --extensions` moves exactly those. A volume already at the pins makes no call, since each install costs
 about a second of a warm start and every Herdr pane is a start. An install
 that names a version moves an installed release down as well as up and
 replaces the entry in Pi's settings (measured with `pi-background-tasks`,

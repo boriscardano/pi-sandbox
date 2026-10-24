@@ -210,13 +210,13 @@ also drops the sessions of projects you still have.
 Whether a tool survives the container exiting depends only on where it writes.
 
 Kept, because it lands in the volume under `/home/agent`: `rustup` and
-`cargo install`, `uv tool install`, `pip install --user`, npm's cache, and Pi's
-own sessions. `~/.local/bin` and `~/.cargo/bin` are on `PATH`, so these are
+`cargo install`, `uv tool install`, `pip install --user`, and Pi's own
+sessions. `~/.local/bin` and `~/.cargo/bin` are on `PATH`, so these are
 found again on the next run rather than reinstalled.
 
 Lost, because `--rm` deletes the container's writable layer: anything in
-`/usr/local`, `/usr/bin` or `/opt`, and anything in `/tmp`, uv's cache among
-it. A venv already synced needs no cache, so only a changed lock downloads
+`/usr/local`, `/usr/bin` or `/opt`, and anything in `/tmp`, uv's and npm's
+caches among it. A venv already synced needs no cache, so only a changed lock downloads
 again. The agent cannot
 install system packages at all, since it is not root and there is no `sudo`, so
 `apt-get install` fails. Put anything system-level in `Dockerfile.pi` instead.
@@ -259,8 +259,8 @@ with the container.
 They live in the agent's home, so they reach a project through its state
 volume. A new project's first start downloads them. Offline, that start
 proceeds without them, and the next start with a network installs them. A
-start installs any of the four that is missing or not at its pinned version,
-so a new pin reaches existing volumes too, and makes no call otherwise. Nothing
+start installs any of the four that is missing, not at its pinned version or
+listed by Pi without it, so a new pin reaches existing volumes too, and makes no call otherwise. Nothing
 updates them on its own. An extension you added yourself stays at the version
 it was installed at, and another version of one of the four is put back to
 the pin at the next start. That repairs drift, not tampering, since the agent
@@ -430,7 +430,10 @@ writable while `.git/config`, `config.worktree`, `commondir`, `hooks`,
 `worktrees` and `modules` are not and `.git` cannot be moved, that a file the
 agent writes is owned by you, that the memory and CPU limits are set, that
 the terminal output is not logged and that a copy of the wrapper launched on
-the project holding it refuses to start, then ends a session each way one can
+the project holding it refuses to start. It checks that a new volume holds the
+four extensions at their pins, that installing and removing one by hand works
+with no npm cache in the volume, and that the next start restores the pins
+without a call to Pi once they are. Then it ends a session each way one can
 end and checks that no container is left. Last it puts an image of an older Pi
 under the tag, starts a session, which rebuilds it, and checks that no Pi
 install build cache is left unused. It writes its findings to

@@ -129,7 +129,9 @@ class Answer(http.server.BaseHTTPRequestHandler):
 # The extensions the volume holds, from Pi's settings and the version npm
 # installed, sorted, and changes to them by hand, run as the user would, which
 # must work in the volume, leave no npm cache in it, and be undone by the next
-# start.
+# start. Then the real entrypoint, run again on the volume at the pins with a
+# stub `pi` that records its calls, must make none but the final exec, which
+# shows its checks match the files real Pi and npm write.
 INSTALLED = r"""python3 -I -c 'import json, pathlib, re
 agent = pathlib.Path.home() / ".pi/agent"
 for spec in json.loads((agent / "settings.json").read_text())["packages"]:
@@ -139,8 +141,18 @@ for spec in json.loads((agent / "settings.json").read_text())["packages"]:
 ' | sort"""
 BY_HAND = (
     "pi install npm:pi-background-tasks@2.6.9 && pi remove npm:pi-extension-manager"
-    " && test ! -e ~/.npm/_cacache"
+    " && test ! -e ~/.npm"
 )
+AT_PINS = r"""
+mkdir -p /tmp/stub
+cat >/tmp/stub/pi <<'EOF'
+#!/bin/sh
+echo "$*" >>/tmp/stub/calls
+EOF
+chmod +x /tmp/stub/pi
+PATH=/tmp/stub:$PATH pi-sandbox-entrypoint --version
+cat /tmp/stub/calls
+"""
 
 
 def pinned_extensions() -> list[str]:
@@ -588,6 +600,11 @@ def checks(lines: list[str]) -> bool:
             f"{installed.splitlines() == pinned}"
         )
         failed |= installed.splitlines() != pinned
+        calls = docker("exec", session.container, "sh", "-c", AT_PINS)
+        lines.append(
+            f"  a start at the pins calls pi only to exec it: {calls == '--version'}"
+        )
+        failed |= calls != "--version"
         quit_pi(session)
 
         lines.append("")

@@ -1922,6 +1922,14 @@ def test_wrapper_refuses_a_project_that_contains_it(tmp_path: Path) -> None:
             also={"PWD": str(tmp_path / "link")},
         ),
     }
+    other_case = tmp_path / "CHECKOUT"
+    if other_case.exists():  # a case-insensitive disk, such as APFS by default
+        launches["project in another case"] = _run(
+            tmp_path / "f",
+            cwd=other_case,
+            wrapper=wrapper,
+            also={"PWD": str(other_case)},
+        )
 
     for name, (completed, invocations) in launches.items():
         assert completed.returncode == 2, name

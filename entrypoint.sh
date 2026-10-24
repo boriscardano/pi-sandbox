@@ -59,57 +59,44 @@ os.replace(pending, path)
 fi
 
 # Extensions live in /home/agent, which is the project's state volume, so an
-# image rebuild does not reach a project whose volume already exists. Bring
-# them up to date, best effort: a registry that is down or slow, or a home the
-# agent has ruined, must cost the update rather than the session.
+# image rebuild does not reach a project whose volume already exists. Install
+# any of the four that is missing or not at its pinned version, best effort: a
+# registry that is down or slow, or a home the agent has ruined, must cost the
+# install rather than the session.
 #
-# The four packages are listed here and nowhere else. `pi install` without a
-# version adds a missing one and unpins a pinned one, but leaves an installed
-# one at its version, so `pi update --extensions` is what moves an existing
-# volume to the newest releases (measured: 0.69.0 stayed 0.69.0 until it ran).
-# Lifecycle scripts stay off, so a new release cannot run one in a sandbox that
-# holds the API key. npm's cache goes to /tmp, which goes with the container,
-# since in the volume it kept every release it downloaded. `timeout` bounds the
-# whole step so a hung registry cannot stop Pi from starting. Pi's own
-# subcommands are passed through to it untouched, so they must not trigger an
-# install of their own.
-#
-# The step took about 3 seconds of every warm start, and every Herdr pane is a
-# start, so after one that worked it is skipped for a day, unless one of the
-# four is missing, which Pi keeps under its npm directory.
+# The four are listed here and nowhere else, each at an exact version that is
+# bumped by hand in a reviewed change, and docs/design.md says why. `pi install`
+# with a version moves an installed one up or down to it, and nothing runs
+# `pi update`, so no release reaches the sandbox unreviewed. The installed
+# version is read from the package.json under Pi's npm directory, and only from
+# a regular file, since a FIFO the agent left there would block the read. An
+# install costs about a second and every Herdr pane is a start, so a volume at
+# the pins makes no call. Lifecycle scripts stay off, so a release cannot run
+# one in a sandbox that holds the API key. npm's cache goes to /tmp, which goes
+# with the container, since in the volume it kept every release it downloaded.
+# `timeout` bounds the whole step so a hung registry cannot stop Pi from
+# starting. Pi's own subcommands are passed through to it untouched, so they
+# must not trigger an install of their own.
 # Keep this list in step with the same list in pi.
 case "${1:-}" in
     install | remove | uninstall | update | list | config | auth) ;;
     *)
-        packages='pi-subagents @tintinweb/pi-subagents pi-background-tasks pi-extension-manager'
-        stamp=$HOME/.pi-sandbox-extensions-updated
-        due=''
-        # Only the stamp itself, so a directory the agent left there is not
-        # walked on every start.
-        if [ -z "$(find "$stamp" -maxdepth 0 -type f -mmin -1440 2>/dev/null)" ]; then
-            due=1
-        fi
-        for package in $packages; do
-            if [ ! -d "$HOME/.pi/agent/npm/node_modules/$package" ]; then
-                due=1
-            fi
-        done
-        if [ -n "$due" ]; then
-            # shellcheck disable=SC2016,SC2086  # $package expands in the inner sh, and the list splits into one argument each
-            if timeout 120 sh -c '
-                export npm_config_ignore_scripts=true
-                export npm_config_cache="${TMPDIR:-/tmp}/pi-sandbox-npm-cache"
-                failed=0
-                for package in "$@"; do
-                    pi install "npm:$package" || failed=1
-                done
-                pi update --extensions || failed=1
-                exit "$failed"
-            ' sh $packages </dev/null >/dev/null 2>&1; then
-                touch "$stamp" 2>/dev/null || true
-            else
-                printf '%s\n' "pi-sandbox: could not update the extensions" >&2
-            fi
+        packages='pi-subagents@0.81.0 @tintinweb/pi-subagents@0.22.0 pi-background-tasks@2.6.10 pi-extension-manager@0.8.2'
+        # shellcheck disable=SC2016,SC2086  # $package expands in the inner sh, and the list splits into one argument each
+        if ! timeout 120 sh -c '
+            export npm_config_ignore_scripts=true
+            export npm_config_cache="${TMPDIR:-/tmp}/pi-sandbox-npm-cache"
+            failed=0
+            for package in "$@"; do
+                installed=$HOME/.pi/agent/npm/node_modules/${package%@*}/package.json
+                if [ -f "$installed" ] && grep -Eq "\"version\": *\"${package##*@}\"" "$installed"; then
+                    continue
+                fi
+                pi install "npm:$package" || failed=1
+            done
+            exit "$failed"
+        ' sh $packages </dev/null >/dev/null 2>&1; then
+            printf '%s\n' "pi-sandbox: could not install the extensions" >&2
         fi
         ;;
 esac

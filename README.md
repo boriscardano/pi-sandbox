@@ -239,7 +239,8 @@ docker exec -it "$(docker ps -q --filter label=pi-sandbox=1 | head -1)" bash
 
 ## Extensions
 
-The entrypoint installs four Pi extensions from npm at their newest release:
+The entrypoint installs four Pi extensions from npm, each pinned to an exact
+version in its list:
 
 - `npm:pi-subagents`, delegation to subagents and scripted multi-agent
   workflows, under `/subagents`.
@@ -258,13 +259,11 @@ with the container.
 They live in the agent's home, so they reach a project through its state
 volume. A new project's first start downloads them. Offline, that start
 proceeds without them, and the next start with a network installs them. A
-start installs any of the four that is missing and updates every unpinned
-extension to its newest release. After an update that worked, this is
-skipped for 24 hours unless one of the four is missing. Delete
-`~/.pi-sandbox-extensions-updated` in the volume to force it on the next
-start. An extension you added yourself
-as `npm:<package>@<version>` stays at that version, while a pin on one of the
-four is undone at the next update.
+start installs any of the four that is missing or not at its pinned version,
+so a new pin reaches existing volumes too, and makes no call otherwise. Nothing
+updates them on its own. An extension you added yourself stays at the version
+it was installed at, and another version of one of the four is put back to
+the pin at the next start.
 
 Pi's own subcommands run against the volume rather than your host Pi, so
 `pi list` shows what a project actually has and `pi install npm:<package>` adds
@@ -274,12 +273,14 @@ which lives outside the volume in a root-owned directory the agent cannot
 write. Resetting the volume, as under State and reset, is the other way to pick
 up a change.
 
-Change the set by editing the four names in `entrypoint.sh`, which is where the
-install list lives. To drop one for good, run `pi remove npm:<package>` and
-delete its name from that list, then relaunch, which rebuilds the image.
-pi-sandbox runs the newest releases rather than reviewed pins, so a new
-upstream release reaches the sandbox, and the API key it holds, without review.
-[docs/design.md](docs/design.md#extension-updates) has the details.
+Change the set by editing the list in `entrypoint.sh`, which is where the
+four names and their versions live. To drop one for good, run
+`pi remove npm:<package>` and delete it from that list, then relaunch, which
+rebuilds the image. The pins are bumped by hand in a reviewed pull request, so
+a new upstream release reaches no sandbox until someone has looked at it. To
+bump one, read the release's changes on npm, change its version in that list,
+and open a pull request. The next start of each project installs it.
+[docs/design.md](docs/design.md#extension-pins) has the details.
 
 ## Git
 
@@ -447,7 +448,7 @@ flags present and no privileged or host namespace flags, the home-directory
 refusal, and that a Herdr pane's socket stays on the host. The rest run
 `entrypoint.sh` against stub binaries and a throwaway home, for the default
 model, where the subscription key is written, what happens when the agent has
-ruined the file it is written to, and when the extensions are updated. Two
+ruined the file it is written to, and when the extensions are installed. Two
 check that `Dockerfile.pi` pins its base image and uv by digest, a supply chain
 property no behaviour test can see.
 

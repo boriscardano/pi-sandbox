@@ -2100,7 +2100,7 @@ def test_the_entrypoint_starts_pi_when_the_extension_update_fails(
     started = _run_entrypoint(tmp_path, PI_SANDBOX_FAKE_PI_INSTALL_STATUS="1")
 
     assert started.argv == ["--model", "kimi-k3"]
-    assert "could not update the extensions" in started.stderr
+    assert "could not install the extensions" in started.stderr
 
 
 def test_the_entrypoint_reports_a_partial_extension_update_failure(
@@ -2116,7 +2116,7 @@ def test_the_entrypoint_reports_a_partial_extension_update_failure(
 
     assert started.argv == ["--model", "kimi-k3"]
     assert len(installs) == 4
-    assert "could not update the extensions" in started.stderr
+    assert "could not install the extensions" in started.stderr
 
 
 def _restart(tmp_path: Path, **env: str) -> list[list[str]]:

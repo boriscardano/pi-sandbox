@@ -135,7 +135,7 @@ for spec in json.loads((agent / "settings.json").read_text())["packages"]:
     package = agent / "npm/node_modules" / name / "package.json"
     print(spec, json.loads(package.read_text())["version"])
 '"""
-DOWNGRADE = "pi install npm:pi-background-tasks@2.6.9 >/dev/null 2>&1"
+DOWNGRADE = "npm_config_ignore_scripts=true pi install npm:pi-background-tasks@2.6.9"
 
 
 def pinned_extensions() -> list[str]:
@@ -536,7 +536,15 @@ def checks(lines: list[str]) -> bool:
         if installed.splitlines() != pinned:
             failed = True
             lines.append(f"    FAIL: expected {pinned}")
-        docker("exec", session.container, "sh", "-c", DOWNGRADE, check=True)
+        downgrade = subprocess.run(
+            ["docker", "exec", session.container, "sh", "-c", DOWNGRADE],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if downgrade.returncode:
+            failed = True
+            lines.append(f"    FAIL: {DOWNGRADE}\n{downgrade.stdout}{downgrade.stderr}")
 
         before, after, *contents = docker(
             "exec", session.container, "sh", "-c", UV_SYNC, check=True

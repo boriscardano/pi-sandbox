@@ -104,12 +104,12 @@ project=$(CDPATH= cd -- "$project" && pwd)
 # directory carrying ~/.ssh, ~/.aws and every other project. Compare physical
 # paths, so a symlink, or another case of the name on a case-insensitive disk,
 # cannot hide it. `project` keeps the spelling the user launched from, because
-# the state volume is named after it. /bin/pwd asks the kernel, while the
-# builtin pwd -P of bash, which is /bin/sh on macOS, keeps the case it was given.
-physical=$(CDPATH= cd -- "$project" && /bin/pwd -P)
+# the state volume is named after it. The pwd program asks the kernel, while
+# the builtin pwd -P of bash, /bin/sh on macOS, keeps the case it was given.
+physical=$(CDPATH= cd -- "$project" && env pwd -P)
 home=${HOME%/}
 if [ -d "$home" ]; then
-    home=$(CDPATH= cd -- "$home" && /bin/pwd -P)
+    home=$(CDPATH= cd -- "$home" && env pwd -P)
 fi
 case "$physical" in
     /) printf '%s\n' "refusing to mount the whole filesystem" >&2; exit 2 ;;
@@ -123,7 +123,7 @@ fi
 # entrypoint.sh build the image every project runs in. Mounting the directory
 # that holds them would let the agent rewrite what the host runs at the next
 # launch anywhere. Compare physical paths, so a symlink cannot hide it.
-case "$(CDPATH= cd -- "$script_dir" && /bin/pwd -P)/" in
+case "$(CDPATH= cd -- "$script_dir" && env pwd -P)/" in
     "$physical"/*)
         printf '%s\n' "refusing to mount $project: it contains this wrapper ($script_dir), which the agent could rewrite to run on your host at the next launch. Run a copy of the wrapper from outside the project" >&2
         exit 2

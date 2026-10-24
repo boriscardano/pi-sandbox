@@ -173,17 +173,17 @@ def pinned_extensions() -> list[str]:
 # escape sequences, a directory find cannot read, and the terminal drawing
 # black on black with the default colours swapped. Then it kills Pi, so Pi's
 # own cleanup never runs.
-HIDE = b"\033[30;40m\033[8m\033]10;#010203\007\033]11;#010203\007"
 PLANT = r"""
 cd /workspace
 mkdir -p src/objects src/refs
-printf 'ref: refs/heads/main\n' > src/HEAD
+printf 'ref: refs/heads/main\n' > src/head
 printf '[core]\n\tfsmonitor = true\n' > src/config
 d=$(printf 'sub\033[1A\033[2K')
 mkdir -p "$d/.git" && touch "$d/.git/config"
-# Docker Desktop leaves its owner able to list it, so it holds a directory
-# for find to fail on.
+# Docker Desktop still lets the host user list a mode 000 directory, though
+# not enter one inside it, so find fails on locked/x.
 mkdir -p locked/x && chmod 000 locked
+# docker exec has no terminal, so pts/0 is the one docker run gave Pi.
 printf '\033[30;40m\033[8m\033]10;#010203\007\033]11;#010203\007' > /dev/pts/0
 kill -KILL -1
 """
@@ -725,7 +725,7 @@ def exit_report(project: Path, lines: list[str]) -> bool:
     session.end()
     (project / "locked").chmod(0o755)
     out = session.output
-    hidden = out.rfind(HIDE)
+    hidden = out.rfind(b"\033]11;#010203\007")
     warning = out.find(b"pi-sandbox: warning:", max(hidden, 0))
     report = out[warning:] if warning >= 0 else b""
     results = {
@@ -737,13 +737,14 @@ def exit_report(project: Path, lines: list[str]) -> bool:
         "escaped nested name named": f"{project}/sub?[1A?[2K/.git".encode() in report,
         "no escape byte in the warnings": b"\033" not in report,
         "unreadable directory noted": b"nested-git check could not run" in report,
+        # Only bash, macOS /bin/sh, prints one, so this means nothing on dash.
         "no job notice": b"Killed" not in out,
     }
     lines.append("")
     lines.append("exit report after a hostile session:")
     lines += [f"  {name}: {ok}" for name, ok in results.items()]
     if not all(results.values()):
-        lines.append(f"  FAIL, output after the agent's write:\n{report!r}")
+        lines.append(f"  FAIL, output after the agent's write:\n{out[hidden:]!r}")
     return not all(results.values())
 
 

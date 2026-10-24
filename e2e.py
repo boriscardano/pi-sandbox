@@ -58,6 +58,7 @@ GONE_TIMEOUT = 30
 OLDER_PI = "1.2.0"
 PI_INSTALL_STEP = "the wrapper must pass --build-arg PI_VERSION"
 KEY_LOST = b"could not write the subscription key"
+PI_TITLE = "\x1b]0;π - ".encode()
 
 # Run in the container by `docker exec`, as the user Pi runs as. Each line
 # prints one result, so a check that fails names itself.
@@ -317,8 +318,9 @@ class Session:
 
 def wait_ready(sessions: list[Session]) -> None:
     """Pi's footer names the working directory and its branch once its
-    interface is up, which the build log does not. Every terminal is read
-    meanwhile, so no session stalls writing to one nobody reads."""
+    interface is up, which the build log does not. Outside a repository there
+    is no branch, but Pi has set the window title by then. Every terminal is
+    read meanwhile, so no session stalls writing to one nobody reads."""
 
     end = time.time() + READY_TIMEOUT
     pending = list(sessions)
@@ -335,7 +337,7 @@ def wait_ready(sessions: list[Session]) -> None:
                     raise RuntimeError(f"the wrapper exited at once:\n{tail}")
             elif not session.alive():
                 raise RuntimeError(f"the wrapper exited before Pi started:\n{tail}")
-            elif b"/workspace (" in session.output:
+            elif b"/workspace (" in session.output or PI_TITLE in session.output:
                 session.container = find_container(session.project, session.pid)
                 if session.container:
                     pending.remove(session)
@@ -912,12 +914,15 @@ def storage(lines: list[str]) -> bool:
         end = time.time() + READY_TIMEOUT
         while time.time() < end and not all(
             b"/workspace (" in s.output
+            or PI_TITLE in s.output
             or (time.time() - s.started > 3 and not children(s.shell))
             for s in launched
         ):
             for session in launched:
                 session.read(0.05)
-        sessions = [s for s in launched if b"/workspace (" in s.output]
+        sessions = [
+            s for s in launched if b"/workspace (" in s.output or PI_TITLE in s.output
+        ]
         refused = [s for s in launched if s not in sessions]
         lines.append(
             f"  10 launches at once: {len(sessions)} started, "

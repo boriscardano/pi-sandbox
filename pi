@@ -588,7 +588,9 @@ found=$(LC_ALL=C find -H "$project" -path "$git_prune" -prune -o \
 # Each name is now the part under the project, which is the user's own path
 # and is added back as it is when printed. A `git init sub` writes sub/.git,
 # its config and a hooks/*.sample for every hook, so one repository printed
-# fifteen lines. Keep the `.git` path once and drop what is under it.
+# fifteen lines. Keep the `.git` path once and drop what is under it. A HEAD
+# at the root collapses to an empty line, which prints as the project path, so
+# the warning below tests `$found`, not `$nested`.
 nested=$(printf '%s\n' "$found" \
     | LC_ALL=C sed -e 's#\(.*/\.[Gg][Ii][Tt]\)/.*#\1#' -e 's#/[Hh][Ee][Aa][Dd]$##' \
     | LC_ALL=C sort -u)
@@ -613,10 +615,10 @@ rm -f "$marker"
 # back on, and OSC 104, 110 and 111 restore the palette and the default
 # colours. Only before a warning, since they also undo colours the user set on
 # purpose.
-if [ -t 2 ] && [ -n "$nested$find_failed$interrupted" ]; then
+if [ -t 2 ] && [ -n "$found$find_failed$interrupted" ]; then
     printf '\033[!p\033[m\033[?1047l\033[?2026l\033[?7h\033]104\007\033]110\007\033]111\007' >&2
 fi
-if [ -n "$nested" ]; then
+if [ -n "$found" ]; then
     printf '%s\n' "pi-sandbox: warning: the container left nested git metadata in the project:" >&2
     printf '%s\n' "$nested" | while IFS= read -r line; do
         printf '%s%s\n' "$project" "$line"

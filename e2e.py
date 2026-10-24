@@ -6,7 +6,8 @@ the project is writable and the parts of `.git` that can name a command are
 not. It checks that a copy of the wrapper refuses the project it sits in,
 that uv still picks Debian's Python for a project that accepts it, syncs a
 Python project and checks that the state volume grows by little more than
-the venv, which the next session imports from offline.
+the venv, which the next session imports from offline, and records whether
+the container reaches a host service on 127.0.0.1.
 Then it ends sessions every way one can end and checks that no container
 is left behind, and rebuilds the image for a new Pi release and checks that
 the build cache the old one left is pruned. No API key and no model call: Pi
@@ -27,6 +28,7 @@ e2e-report.txt or e2e-storage.txt).
 """
 
 import contextlib
+import http.server
 import json
 import os
 import pty
@@ -36,6 +38,7 @@ import signal
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import traceback
 from collections.abc import Callable, Iterator
@@ -103,6 +106,25 @@ VOLUME_GROWTH_KB = 30 * 1024
 # carried 3.14: one with a dependency that has no 3.14 wheel synced on 3.11
 # and fails on 3.14, since there is no compiler.
 UV_FIND = "uv python find '>=3.10'"
+# A documented limit, recorded rather than asserted: Docker Desktop forwards
+# host.docker.internal to the host's own 127.0.0.1. Linux has no such name.
+HOST_PROBE = """
+import sys, urllib.request
+try:
+    urllib.request.urlopen(f"http://host.docker.internal:{sys.argv[1]}/", timeout=5)
+    print("reached")
+except Exception as error:
+    print(f"not reached ({type(error).__name__})")
+"""
+
+
+class Answer(http.server.BaseHTTPRequestHandler):
+    def do_GET(self) -> None:
+        self.send_response(200)
+        self.end_headers()
+
+    def log_message(self, *args: object) -> None:
+        pass
 
 
 def docker(*args: str, check: bool = False) -> str:
@@ -467,6 +489,24 @@ def checks(lines: list[str]) -> bool:
         found = docker("exec", session.container, "sh", "-c", UV_FIND)
         lines.append(f"  uv's Python for a >=3.10 project: {found}")
         failed |= found != "/usr/bin/python3"
+        with http.server.ThreadingHTTPServer(("127.0.0.1", 0), Answer) as server:
+            threading.Thread(target=server.serve_forever, daemon=True).start()
+            try:
+                reach = docker(
+                    "exec",
+                    session.container,
+                    "timeout",
+                    "30",
+                    "python3",
+                    "-c",
+                    HOST_PROBE,
+                    str(server.server_address[1]),
+                )
+            finally:
+                server.shutdown()
+        lines.append(
+            f"  host service on 127.0.0.1, from the container: {reach or 'probe failed'}"
+        )
 
         before, after, *contents = docker(
             "exec", session.container, "sh", "-c", UV_SYNC, check=True

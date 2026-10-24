@@ -1,7 +1,7 @@
 # pi-sandbox
 
 Run the [Pi coding agent](https://pi.dev) in a Docker container that can see one
-project and nothing else on your machine. It is for untrusted or
+project and no other files on your machine. It is for untrusted or
 lightly-trusted models, such as Chinese-hosted ones reached through OpenCode.
 
 https://github.com/user-attachments/assets/af0dbce4-7b3f-4417-9e72-bc65415c8f1d
@@ -12,9 +12,10 @@ configure.
 The container gets the project you launched from, read-write, and a private
 volume for Pi's own state. It does not get your home directory, your SSH or
 cloud credentials, the Docker socket, your Herdr socket, or any other project.
-It does not make the checkout safe to run afterwards, and the API keys are
-readable inside it. [SECURITY.md](SECURITY.md) says what does and does not
-count as a vulnerability.
+It does not make the checkout safe to run afterwards, the API keys are
+readable inside it, and it can reach network services on your host.
+[SECURITY.md](SECURITY.md) says what does and does not count as a
+vulnerability.
 
 ## Quick start
 
@@ -103,7 +104,7 @@ Mounted:
   `.git/modules` and `.git/commondir` are mounted read-only inside it. Git
   below says what that means in practice.
 
-Not mounted, and unreachable: your home directory, `~/.ssh`, `~/.aws`,
+Not mounted: your home directory, `~/.ssh`, `~/.aws`,
 `~/.config`, the system keychain, every other project, the Docker socket, your
 Herdr socket, and `~/.pi` on the host, which holds Pi's provider OAuth tokens.
 The script refuses to start if the directory it would mount is your home
@@ -117,7 +118,8 @@ the CPUs Docker has (at least one), so a spinning agent cannot hold every core.
 Its terminal output is not written to a Docker log file (`--log-driver none`),
 which would otherwise grow without limit. No `--privileged`, and no host PID,
 IPC or network namespace. Outbound networking is on, since the agent has to
-reach the model API. No port is published.
+reach the model API, and it reaches services on your host too (see
+Limitations). No port is published.
 
 ## The API keys
 
@@ -165,7 +167,11 @@ agent genuinely needs and use credentials you are willing to rotate.
 
 Pi's config and sessions live in a Docker volume named
 `pi-sandbox-<project>-<hash>`, one per project, so `pi --continue` and
-`pi --resume` work without exposing your host `~/.pi`. The volume also holds
+`pi --resume` work without exposing your host `~/.pi`. The hash is of the
+project's path, so a repository cloned where another one was gets that one's
+volume, with its sessions, `auth.json` and anything its agent left there. The
+prune one-liner below keeps it, since the path exists again. Remove the volume
+by name before reusing a path for another repository. The volume also holds
 `UV_PROJECT_ENVIRONMENT`, so a Linux `uv sync` in the sandbox cannot overwrite a
 macOS or Windows virtualenv in the mounted checkout. uv's cache stays in the
 container's `/tmp` and goes with it. uv uses Debian's Python 3.11 for a
@@ -319,7 +325,8 @@ The script is named `pi` on purpose. [Herdr](https://herdr.dev) identifies a
 pane's agent from the foreground job's process arguments, so running this
 script in a pane makes it a first-class Pi agent, with the agent list, idle and
 working detection, `herdr agent prompt` and Ctrl-C all behaving as they do for
-a host agent.
+a host agent. That detection reads the pane, which the agent writes to, as
+Limitations says.
 
 ```sh
 herdr pane split --current --direction right --cwd ~/any/project --no-focus
@@ -338,6 +345,19 @@ pane run` through that socket would execute on the host.
   read them and, since outbound network is open, send them elsewhere. This is
   inherent to running the agent in the container rather than proxying its
   traffic. Use keys you are willing to rotate.
+- Code a session leaves in the state volume, such as a Pi extension, a setting,
+  an edited extension or a package in the project's venv, runs in every later
+  session of that project, whatever model and keys you choose then, and so
+  does what it changed in the project, `.pi/` especially. Before forwarding a
+  key you would not give an earlier session's model, review those changes, end
+  the project's sessions and remove its volume, as State and reset shows.
+- The container can reach network services on your host. On Docker Desktop
+  that includes ones bound only to localhost, through `host.docker.internal` or
+  its IP address. On Linux it reaches services bound to any address but
+  loopback, and on a cloud VM usually the instance metadata service. Do not
+  run unauthenticated local services while a session runs
+  (`lsof -iTCP -sTCP:LISTEN -P` lists what is listening), and never enable
+  Docker's TCP socket.
 - The mounted project is fully readable and writable by the agent. Only launch
   it from a project whose contents you are willing to send to the model
   provider, and keep a remote you can restore from.
@@ -345,16 +365,30 @@ pane run` through that socket would execute on the host.
   write `.envrc` for direnv, a `Makefile`, `package.json` scripts, editor task
   files and the code itself, all of which your host may execute later. The
   same goes for what your own coding agents trust in a checkout: hooks in
-  `.claude/settings.json`, MCP servers in `.mcp.json`, and instructions in
-  `CLAUDE.md` or `AGENTS.md`. Review the diff before running anything, or
-  starting another agent, in a checkout the agent has touched.
+  `.claude/settings.json`, MCP servers in `.mcp.json`, instructions in
+  `CLAUDE.md` or `AGENTS.md`, skills in `.agents/skills`, and Pi's own `.pi/`
+  (extensions, settings, `mcp.json`, `SYSTEM.md`). Review the diff before
+  running anything, or starting another agent, in a checkout the agent has
+  touched, and do not let a Pi on your host trust its `.pi/` before you have
+  reviewed it.
+- The agent can fill your disk. It writes the project directly, and the state
+  volume and the container's own files grow Docker's disk, which on Docker
+  Desktop is an image file on your host disk. Its size limit in Docker
+  Desktop's settings helps only if it is below your free space.
 - The agent can write escape sequences to the terminal you launched it from.
   The container's terminal device is owned by the user Pi and its tools run
   as, so any command the agent runs can open it. A sequence can retitle the
   pane, draw text that looks like your shell, add links, and on a terminal
-  that honours OSC 52, replace your clipboard. Turn off OSC 52 clipboard
-  writes in your terminal, and do not paste from a clipboard you did not fill
-  yourself after a session.
+  that honours OSC 52, replace your clipboard or read it. Turn off OSC 52
+  clipboard writes and reads in your terminal (in Ghostty,
+  `clipboard-write = deny` and `clipboard-read = deny`), treat any clipboard
+  prompt during a session as the agent's, and do not paste from a clipboard
+  you did not fill yourself after one.
+- Anything that reads the pane, such as another agent through
+  `herdr pane read` or Herdr's working and idle detection, reads text the agent
+  wrote, some of it invisible to you. Do not let an agent with host tools act
+  on it without you checking.
+- The container can see the project's host path, which includes your username.
 - Nested repositories, and the rebase, merge or cherry-pick state the agent
   can plant in `.git`, are detected at exit, not prevented. The checks run
   after `docker run` returns, so they do not run at all if the wrapper itself
@@ -399,10 +433,12 @@ under the tag, starts a session, which rebuilds it, and checks that no Pi
 install build cache is left unused. It writes its findings to
 `e2e-report.txt`, which CI keeps as an artifact. It also checks
 that uv picks Debian's Python 3.11 for a project that accepts it, syncs a
-Python project and fails if the state volume grows more than 30 MB. No API key
-and no model call. `python3 e2e.py --storage` runs 30 sessions in turn and then 10 at
-once in one project, all writing the key, and checks that
-what pi-sandbox keeps on disk stays flat. It is not run in CI.
+Python project and fails if the state volume grows more than 30 MB, and
+records whether the container reaches a host service bound to 127.0.0.1 (it
+does on Docker Desktop). No API key and no model call.
+`python3 e2e.py --storage` runs 30 sessions in turn and then 10 at once in one
+project, all writing the key, and checks that what pi-sandbox keeps on disk
+stays flat. It is not run in CI.
 
 The tests in `test_pi.py` use a fake `docker` on `PATH`, so they neither build
 an image nor start a container. They assert the isolation properties: the expected mounts

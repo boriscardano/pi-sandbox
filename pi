@@ -395,17 +395,18 @@ done
 # read-only paths, and a second link to a file Git reads a command from: a
 # local clone hard-links the objects, a submodule's too. The names are the
 # agent's, so control bytes in them are replaced before they reach the
-# terminal.
+# terminal. find runs inside `.git`, so `*/hooks/*` never matches the
+# project's own path.
 for path in config config.worktree commondir hooks modules worktrees; do
     [ -e "$project/.git/$path" ] || continue
-    if ! linked=$(find "$project/.git/$path" \( -type l -o \
+    if ! linked=$(cd "$project/.git" && find "./$path" \( -type l -o \
         \( -name config -o -name config.worktree -o -name commondir -o -path '*/hooks/*' \) \
         -type f -links +1 \) -print); then
         printf '%s\n' "refusing to run: could not check $project/.git/$path for links, so make it readable" >&2
         exit 2
     fi
     if [ -n "$linked" ]; then
-        printf '%s\n' "refusing to run: these are a symlink or a hard link to another file, through which the agent could rewrite what your host git runs, so replace each with a copy:" >&2
+        printf '%s\n' "refusing to run: these in $project/.git are a symlink or a hard link to another file, through which the agent could rewrite what your host git runs, so replace each with a copy:" >&2
         printf '%s\n' "$linked" | LC_ALL=C tr -c '[:print:]\n' '?' >&2
         exit 2
     fi

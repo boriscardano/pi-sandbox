@@ -884,7 +884,8 @@ def test_wrapper_refuses_a_second_path_to_the_protected_git_files(
 
             assert completed.returncode == 2, (relative, kind)
             assert "link" in completed.stderr, (relative, kind)
-            assert str(path) in completed.stderr, (relative, kind)
+            shown = (str(path), "./" + relative.removeprefix(".git/"))
+            assert any(name in completed.stderr for name in shown), (relative, kind)
             assert not any(argv[0] == "run" for argv in invocations), (relative, kind)
 
 
@@ -910,7 +911,7 @@ def test_wrapper_refuses_a_symlinked_directory_under_the_git_paths(
         completed, invocations = _run(tmp_path / f"run-{index}", cwd=repo)
 
         assert completed.returncode == 2, relative
-        assert str(path) in completed.stderr, relative
+        assert "./" + relative.removeprefix(".git/") in completed.stderr, relative
         assert not any(argv[0] == "run" for argv in invocations), relative
 
 

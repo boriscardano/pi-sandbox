@@ -1129,6 +1129,47 @@ def test_wrapper_warns_about_git_metadata_named_in_another_case(
     ]
 
 
+def test_wrapper_scans_a_project_reached_through_a_symlink(
+    tmp_path: Path,
+) -> None:
+    """The project path keeps a symlink it was reached through, and find does
+    not follow one named on its command line, so it scanned nothing and the
+    repository the agent planted went unreported."""
+
+    real = tmp_path / "real"
+    real.mkdir()
+    link = tmp_path / "link"
+    link.symlink_to(real)
+
+    # A shell launched in the link keeps it in PWD, which `pwd` then prints.
+    completed, _ = _run(
+        tmp_path / "run", cwd=link, agent=NESTED_GIT, also={"PWD": str(link)}
+    )
+
+    assert f"{link}/sub/.git" in completed.stderr
+
+
+def test_wrapper_reports_a_git_beside_the_root_under_another_case(
+    tmp_path: Path,
+) -> None:
+    """On a case-sensitive file system `.GIT` is not the protected `.git`, so
+    pruning the root in any case hid a repository the agent built under it."""
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "--quiet", str(repo)], check=True)
+    if (repo / ".GIT").exists():
+        pytest.skip("needs a case-sensitive file system")
+
+    completed, _ = _run(
+        tmp_path / "run",
+        cwd=repo,
+        agent="mkdir -p .GIT/sub/.git && touch .GIT/sub/.git/config",
+    )
+
+    assert str(repo / ".GIT/sub/.git") in completed.stderr
+
+
 def test_wrapper_keeps_what_find_found_when_a_directory_is_unreadable(
     tmp_path: Path,
 ) -> None:

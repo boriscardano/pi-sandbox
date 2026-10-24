@@ -565,27 +565,30 @@ fi
 #
 # `-H` follows the project path itself when it is a symlink, which find
 # otherwise does not enter. The agent chose the names, and an escape sequence
-# or a newline in one could erase the warning or add a line to it, so each is
-# printed with every byte that is not printable ASCII as a `?`. A directory
-# the agent made unreadable makes find fail, but what it found elsewhere is
-# still reported, with a note that the check is incomplete. A directory without
-# its search bit fails it too, through `-exec false`, since macOS find skips
-# what is inside one without an error, and Docker Desktop turns the agent's
-# mode 000 into 0600 on the host.
+# or a newline in one could erase the warning or add a line to it, so the part
+# of each under the project is printed with every byte that is not printable
+# ASCII as a `?`. A directory the agent made unreadable makes find fail, but
+# what it found elsewhere is still reported, with a note that the check is
+# incomplete. A directory without its search bit fails it too, through
+# `-exec false`, since macOS find skips what is inside one without an error,
+# and Docker Desktop turns the agent's mode 000 into 0600 on the host.
 find_failed=''
-# `$p` belongs to the `sh -c` script, so it stays single-quoted.
+# `$1` and `$p` belong to the `sh -c` script, so it stays single-quoted.
 # shellcheck disable=SC2016
 found=$(LC_ALL=C find -H "$project" -path "$git_prune" -prune -o \
     -type d ! -perm -0100 -prune -exec false {} + -o \
     \( -iname .git -o \( -iname HEAD ! -type d \) \
-    -o -ipath '*/.git/config' -o -ipath '*/.git/hooks/*' \) \
+    -o -ipath '*/.git/config' -o -ipath '*/.git/config.worktree' \
+    -o -ipath '*/.git/commondir' -o -ipath '*/.git/hooks/*' \) \
     -cnewer "$marker" \
-    -exec sh -c 'for p do printf %s "$p" | tr -c "[:print:]" "?"; echo; done' sh {} + \
+    -exec sh -c 'root=$1; shift; for p do
+        printf %s "${p#"$root"}" | tr -c "[:print:]" "?"; echo
+    done' sh "$project" {} + \
     2>/dev/null) || find_failed=1
-# A `git init sub` writes sub/.git, its config and a hooks/*.sample for every
-# hook, so one repository printed fifteen lines. Keep the `.git` path once and
-# drop what is under it, matching the last `/.git` so a project path that
-# itself contains one still names the right repository.
+# Each name is now the part under the project, which is the user's own path
+# and is added back as it is when printed. A `git init sub` writes sub/.git,
+# its config and a hooks/*.sample for every hook, so one repository printed
+# fifteen lines. Keep the `.git` path once and drop what is under it.
 nested=$(printf '%s\n' "$found" \
     | LC_ALL=C sed -e 's#\(.*/\.[Gg][Ii][Tt]\)/.*#\1#' -e 's#/[Hh][Ee][Aa][Dd]$##' \
     | LC_ALL=C sort -u)
@@ -615,7 +618,9 @@ if [ -t 2 ] && [ -n "$nested$find_failed$interrupted" ]; then
 fi
 if [ -n "$nested" ]; then
     printf '%s\n' "pi-sandbox: warning: the container left nested git metadata in the project:" >&2
-    printf '%s\n' "$nested" >&2
+    printf '%s\n' "$nested" | while IFS= read -r line; do
+        printf '%s%s\n' "$project" "$line"
+    done >&2
     printf '%s\n' "your host git trusts it and would run the commands it names, so inspect it before running git there" >&2
 fi
 if [ -n "$find_failed" ]; then

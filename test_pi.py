@@ -139,6 +139,7 @@ def _run(
     build_status: str = "0",
     cache: str = "",
     containers: str = "",
+    terminal: bool = False,
 ) -> tuple[subprocess.CompletedProcess[str], list[list[str]]]:
     bin_dir = tmp_path / "fakebin"
     # A test can put a fake of its own here first.
@@ -207,6 +208,33 @@ def _run(
     # with. The wrapper itself stays POSIX.
     if interpreter is not None:
         command = [interpreter, *command]
+    if terminal:
+        # A pane: stdin, stdout and stderr are one terminal, whose bytes come
+        # back as stdout, escape sequences included.
+        leader, follower = os.openpty()
+        process = subprocess.Popen(
+            command,
+            stdin=follower,
+            stdout=follower,
+            stderr=follower,
+            cwd=project,
+            env=env,
+        )
+        os.close(follower)
+        output = b""
+        while True:
+            try:
+                chunk = os.read(leader, 65536)
+            except OSError:  # Linux: every writer closed
+                break
+            if not chunk:
+                break
+            output += chunk
+        os.close(leader)
+        returncode = process.wait()
+        return subprocess.CompletedProcess(
+            command, returncode, output.decode(errors="replace"), ""
+        ), _invocations(log)
     completed = subprocess.run(
         command,
         capture_output=True,
@@ -1034,6 +1062,116 @@ def test_wrapper_reports_when_find_cannot_check_for_nested_git(
     assert "unrecognized" not in completed.stderr
     # The check is warn only, so docker's status still reaches the caller.
     assert completed.returncode == 7
+
+
+def test_wrapper_warns_about_a_bare_repository_the_container_left(
+    tmp_path: Path,
+) -> None:
+    """Host git takes any directory holding HEAD, objects, refs and a config
+    for a repository, with no `.git` in sight, and trusts that config. A new
+    HEAD outside the protected root `.git` is never legitimate, so it is
+    reported by the directory it is in."""
+
+    completed, _ = _run(
+        tmp_path,
+        agent=(
+            "mkdir -p src/objects src/refs && "
+            "printf 'ref: refs/heads/main\\n' > src/HEAD && "
+            "printf '[core]\\n\\tfsmonitor = true\\n' > src/config"
+        ),
+    )
+
+    lines = completed.stderr.splitlines()
+    start = lines.index(
+        "pi-sandbox: warning: the container left nested git metadata in the project:"
+    )
+    assert lines[start + 1] == str(tmp_path / "project/src")
+    assert lines[start + 2].startswith("your host git trusts it")
+
+
+def test_wrapper_keeps_what_find_found_when_a_directory_is_unreadable(
+    tmp_path: Path,
+) -> None:
+    """One directory the agent made unreadable makes find fail. The scan of
+    everything else still ran, and dropping its result hid the repository
+    planted next to it behind a warning that read as noise."""
+
+    if os.geteuid() == 0:
+        pytest.skip("root reads a mode 000 directory")
+
+    completed, _ = _run(
+        tmp_path, agent=NESTED_GIT + " && mkdir locked && chmod 000 locked"
+    )
+    (tmp_path / "project/locked").chmod(0o755)
+
+    lines = completed.stderr.splitlines()
+    start = lines.index(
+        "pi-sandbox: warning: the container left nested git metadata in the project:"
+    )
+    assert lines[start + 1] == str(tmp_path / "project/sub/.git")
+    assert "nested-git check could not run" in completed.stderr
+    assert completed.returncode == 0
+
+
+def test_wrapper_prints_no_control_bytes_from_a_name_the_agent_chose(
+    tmp_path: Path,
+) -> None:
+    """The agent names the paths the exit warning prints, and an escape
+    sequence in a name could erase the warning or rewrite it once it reaches
+    the terminal. The wrapper prints a `?` for each control byte instead."""
+
+    completed, _ = _run(
+        tmp_path,
+        agent=(
+            "d=$(printf 'sub\\033[1A\\033[2K') && mkdir -p \"$d/.git\" && "
+            'touch "$d/.git/config"'
+        ),
+    )
+
+    assert "\x1b" not in completed.stderr
+    assert str(tmp_path / "project/sub?[1A?[2K/.git") in completed.stderr
+    assert "nested git metadata" in completed.stderr
+
+
+def test_wrapper_resets_the_terminal_before_its_exit_warnings(
+    tmp_path: Path,
+) -> None:
+    """The agent can leave the terminal drawing black on black, concealed, or
+    with the default colours swapped, and kill Pi so nothing undoes it. The
+    exit warnings would then be invisible, so the wrapper resets the terminal
+    (DECSTR, and the palette and default colours) once docker returns and
+    before it prints anything."""
+
+    hide = "\\033[30;40m\\033[8m\\033]10;#010203\\007\\033]11;#010203\\007"
+    completed, _ = _run(
+        tmp_path,
+        agent=f"{NESTED_GIT} && printf '{hide}'",
+        terminal=True,
+    )
+
+    output = completed.stdout
+    hidden = output.index("\x1b]11;#010203\x07")
+    warning = output.index("pi-sandbox: warning: the container left", hidden)
+    between = output[hidden:warning]
+    for reset in ("\x1b[!p", "\x1b]104\x07", "\x1b]110\x07", "\x1b]111\x07"):
+        assert reset in between, reset
+
+
+def test_wrapper_ends_without_a_job_notice_for_its_watcher(tmp_path: Path) -> None:
+    """The wrapper SIGKILLs its watcher once docker returns, and bash, which
+    is macOS /bin/sh, then printed `Killed: 9` and the watcher's source on
+    every exit, which teaches the reader to skip what the wrapper prints
+    there."""
+
+    bash = shutil.which("bash")
+    if bash is None:
+        pytest.skip("needs bash, which prints the notice")
+
+    completed, _ = _run(tmp_path, interpreter=bash)
+
+    assert completed.returncode == 0
+    assert "Killed" not in completed.stderr
+    assert "trap" not in completed.stderr
 
 
 def test_wrapper_keeps_docker_status_through_the_nested_git_check(

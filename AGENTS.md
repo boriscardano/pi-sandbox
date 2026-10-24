@@ -40,6 +40,12 @@ Notes for agents and contributors changing this repo, from the security work on
   project or of a directory above it, could swap `.git` for a symlink between
   the checks and `docker run`. So the stale sweep runs before the checks and
   such a live session refuses the launch: one session per project.
+- A read-only FILE bind mount over a writable directory mount does not hold on
+  a case-insensitive host disk: on Docker Desktop for macOS `.git/CONFIG`
+  went through the writable `.git` mount to the host's `.git/config`, by
+  append, rename over and unlink (2026-10-24). Directory mounts held. The
+  three file mounts are therefore also locked with `chflags uchg` for the
+  session. Test any new file mount with case-variant names on Docker Desktop.
 - Never follow a project path the agent could have planted. Symlinks at the
   mounted `.git` paths are refused, because a planted `.git` symlink made a
   later launch mount a host directory read-write (round 3).

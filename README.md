@@ -101,8 +101,9 @@ Mounted:
 - a per-project Docker volume at `/home/agent` for Pi's own state.
 - inside a Git repository, `.git` itself is bind-mounted over the project, and
   `.git/config`, `.git/config.worktree`, `.git/hooks`, `.git/worktrees`,
-  `.git/modules` and `.git/commondir` are mounted read-only inside it. Git
-  below says what that means in practice.
+  `.git/modules` and `.git/commondir` are mounted read-only inside it. On
+  macOS the three files are also locked with `chflags uchg` for the session.
+  Git below says what that means in practice.
 
 Not mounted: your home directory, `~/.ssh`, `~/.aws`,
 `~/.config`, the system keychain, every other project, the Docker socket, your
@@ -304,6 +305,19 @@ anyway. No credentials are mounted,
 so `git push` fails inside the sandbox by design. Push from the host after
 reviewing the diff.
 
+On macOS, `.git/config`, `.git/config.worktree` and `.git/commondir` are
+locked with the user-immutable flag (`chflags uchg`) while a session runs,
+because Docker Desktop resolves a name like `.git/CONFIG` in the container to
+the host's `.git/config` past the read-only mount. Host Git still reads them,
+but a host command that changes the config, such as `git config`, `git remote
+add` or `git push -u`, fails until the session ends and the wrapper releases
+them. A session of the same project still running keeps them locked. If the
+wrapper and its watcher are killed together, with a SIGKILL to the whole
+process group, the lock stays until the next session of the project ends, or
+until you run `chflags nouchg .git/config .git/config.worktree
+.git/commondir`. The wrapper stops if it cannot set the flag, for example on a
+disk that has no file flags.
+
 The wrapper refuses to start on a symlink at `.git` or at any of the
 read-only paths, any symlink under them, a config or hook there with a second
 hard link, a `.git/config.worktree` or `.git/commondir` that is not an ordinary
@@ -459,7 +473,8 @@ count as a vulnerability here and how to report it privately.
 with `python3 e2e.py` on Docker Desktop. It starts Pi in a pseudo-terminal in a
 throwaway repository, checks from inside the container that `/workspace` is
 writable while `.git/config`, `config.worktree`, `commondir`, `hooks`,
-`worktrees` and `modules` are not and `.git` cannot be moved, that a file the
+`worktrees` and `modules` are not, under case-variant names too, and `.git`
+cannot be moved, that host `git config` works again after a session, that a file the
 agent writes is owned by you, that the memory and CPU limits are set, that
 the terminal output is not logged and that a copy of the wrapper launched on
 the project holding it refuses to start. It checks that a new volume holds the

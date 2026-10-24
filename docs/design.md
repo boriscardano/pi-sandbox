@@ -182,6 +182,30 @@ from the directory it names, so the wrapper creates it holding `.`, which names
 the same directory and leaves Git behaving as before, and refuses to run when
 one names anything else.
 
+### Case variants on macOS
+
+Docker Desktop shares the project into its Linux VM, and a macOS disk ignores
+case by default. Linux sees `.git/CONFIG` as a name the read-only mount over
+`.git/config` does not cover, so the write goes through the writable `.git`
+mount, and the host resolves it to the protected file. Appending to it,
+renaming another file over it and deleting it all worked, for all three file
+mounts (reproduced 2026-10-24). The directory mounts held for every variant
+tried, since Linux gives a directory one name and a lookup of `HOOKS` lands on
+the mounted `hooks`.
+
+So on macOS the wrapper sets the user-immutable flag on the three files right
+before `docker run`. It refuses every change to the file itself, whatever name
+the write arrives under, while host Git still reads it, and nothing in the
+container can clear it: the container has no capabilities, and a `chattr`
+there left the flag in place. The flag comes off when no container of the
+project is left, after the wrapper's own `docker rm`, or from its watcher when
+the wrapper was killed. Checking for a container first keeps a session that
+ended from unlocking one opened right after it. A launch that cannot set the
+flag stops. A comparison of the files at exit was the alternative, but host
+Git can run during the session and would act on a planted config before any
+exit check. A native Linux host needs none of this: its kernel resolves a case
+variant on a case-insensitive directory to the mounted file.
+
 ### Symlinks and FIFOs
 
 A symlink at `.git` or at any of the six read-only paths is refused before the

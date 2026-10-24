@@ -190,6 +190,57 @@ would all follow it outside the project. A `.git/config.worktree` or
 `.git/commondir` that is not an ordinary file, such as a FIFO, is refused for
 the same reason, since creating or mounting it as a file would block or fail.
 
+### Hard links and symlinks inside
+
+A read-only mount protects a path, not the file behind it. In a session where
+`.git` was not protected, because the project was not a repository yet,
+`.git` was a file, or the session was of a directory above it, the agent can make `.git/hooks/post-checkout` or
+`.git/config` a hard link or a symlink to an ordinary project file, and in
+every later session rewrite the hook through that file while the read-only
+mounts are in place. `e2e.py` shows this for a hard link on real Docker. Inside
+a protected session it cannot make a new one, because the mounts are read-only
+and a link across mounts fails with `Invalid cross-device link`. So the wrapper
+refuses to start when anything under the six read-only paths is a symlink,
+which covers a submodule's git directory linked into the project, or when a
+config, `config.worktree`, `commondir` or hook there has a second link, and
+prints the names with control bytes replaced, since the agent chose them.
+Other files' links are not checked: a clone of a local path hard-links the
+objects, a submodule's under `.git/modules` too, and they name no command. A
+locally cloned submodule whose path is `hooks` matches the hook pattern and is
+refused, which fails safe.
+
+This does not look at what a config says. A `core.hooksPath`, an `include.path`
+or a `core.fsmonitor` that names a file in the work tree gives the agent the
+same reach, and the wrapper does not read config values.
+
+### One session per project
+
+Every check above looks at the project once, before `docker run`, and another
+session's container can still change it after that look. Where nothing is
+mounted over this project's `.git`, in a session of the same project that
+started before it was a repository or in a session of any directory above it,
+that container's agent can turn `.git` into a symlink to a host directory a
+moment after the checks passed, and the `mkdir` and the mounts then follow it.
+So the wrapper first removes the containers whose wrapper is gone, and refuses
+to start while a container from the same place still runs for this project or
+for a directory above it, found by the project hash in its name. A second
+session in one project is therefore refused, and so is a session of a
+repository inside a project whose session runs. A session of a directory below
+does not count, since it cannot reach this `.git`. When `ps` cannot see
+processes, or a dead session's container will not go, the container counts as
+live, and when the container listing fails the launch is refused. A wrapper's
+process id that another process has since taken also looks live, so the
+message names the container to remove.
+
+Launches of one project in the same instant can all pass, since no container
+exists yet: `e2e.py --storage` launched ten at once and all ten started
+(Docker Desktop, 2026-10-25). Each window lasts until the daemon has set up
+that launch's mounts, a fraction of a second, while Pi, and any extension an
+earlier session left in the shared state volume, takes seconds to start in
+the others. That the agents cannot act in time is reasoned, not measured. Projects are told apart by path, so the
+same directory reached through a symlink or another letter case on a
+case-insensitive disk counts as another project.
+
 ### Linked worktrees and submodules
 
 A linked worktree keeps its git directory at `.git/worktrees/<name>`, and

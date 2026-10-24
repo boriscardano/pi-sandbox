@@ -27,9 +27,19 @@ Notes for agents and contributors changing this repo, from the security work on
   `.\n\0`, since the shell drops NUL bytes and Git does not). The two-byte
   limit was then checked against every file of one or two bytes: only four
   pass, and host Git resolves all four to the repository's own `.git`.
-  A hard link cannot get around these read-only file mounts: `ln` from one to
-  the writable project fails with `Invalid cross-device link` (checked on
-  Docker Desktop, 2026-09-23).
+  A read-only mount protects a path, not the inode. A link cannot be made
+  from inside one: `ln` to the writable project fails with `Invalid
+  cross-device link` (Docker Desktop, 2026-09-23). But one made while `.git`
+  was unprotected writes straight through: a project file hard-linked to
+  `.git/hooks/post-checkout` changed the host hook under the read-only mount
+  (Docker Desktop, 2026-10-24). So any symlink there, and a second link to a
+  config or hook, is refused. A name filter applied before the type let a
+  symlinked submodule git directory through (round 2 review).
+- A check of the project is only good while no container can write it.
+  Another session's container, live or left by a SIGKILLed wrapper, of this
+  project or of a directory above it, could swap `.git` for a symlink between
+  the checks and `docker run`. So the stale sweep runs before the checks and
+  such a live session refuses the launch: one session per project.
 - Never follow a project path the agent could have planted. Symlinks at the
   mounted `.git` paths are refused, because a planted `.git` symlink made a
   later launch mount a host directory read-write (round 3).

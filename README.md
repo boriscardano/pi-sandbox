@@ -305,8 +305,16 @@ so `git push` fails inside the sandbox by design. Push from the host after
 reviewing the diff.
 
 The wrapper refuses to start on a symlink at `.git` or at any of the
-read-only paths, a `.git/config.worktree` or `.git/commondir` that is not an
-ordinary file, and a `.git/commondir` that holds anything but `.`.
+read-only paths, any symlink under them, a config or hook there with a second
+hard link, a `.git/config.worktree` or `.git/commondir` that is not an ordinary
+file, and a `.git/commondir` that holds anything but `.`. Replace a symlinked
+or hard-linked hook with a copy, including one you linked to a script in the
+repository yourself, and one a deduplicating backup or `cp -al` linked.
+
+It also refuses to start while another session of the same project, or of a
+directory above it, is still running, since that session's agent could change
+the project while the new launch checks it. Run a second session in another
+worktree outside the project, which is a project of its own.
 
 Warned at exit, not prevented, when created or changed during the session:
 
@@ -387,6 +395,12 @@ pane run` through that socket would execute on the host.
   running anything, or starting another agent, in a checkout the agent has
   touched, and do not let a Pi on your host trust its `.pi/` before you have
   reviewed it.
+- When the repository's own config points Git at files in the work tree, such
+  as `core.hooksPath`, `include.path` or `core.fsmonitor` naming a project
+  file, the agent can edit those files and host Git runs what they say. Husky's
+  `core.hooksPath=.husky/_` is the common case. The wrapper protects `.git`,
+  not the files its config names, so review them like any other file your
+  host tools execute.
 - The agent can fill your disk. It writes the project directly, and the state
   volume and the container's own files grow Docker's disk, which on Docker
   Desktop is an image file on your host disk. Its size limit in Docker
@@ -463,10 +477,17 @@ does on Docker Desktop). It plays a hostile session that leaves a bare
 repository, a nested one whose name holds escape sequences, an unreadable
 directory, and a terminal left drawing black on black, kills Pi, and checks
 the exit warning names both repositories, notes the incomplete check and is
-readable. No API key and no model call.
-`python3 e2e.py --storage` runs 30 sessions in turn and then 10 at once in one
-project, all writing the key, and checks that what pi-sandbox keeps on disk
-stays flat. It is not run in CI.
+readable. It shows that a read-only mount does not stop a write through a
+second hard link, and checks that the wrapper refuses a hook hard-linked to a
+project file, and a second launch in a project whose session is still running
+while that session's agent swaps `.git` for a symlink to a host directory. No
+API key and no model call. `python3 e2e.py --storage` runs 30 sessions in turn
+and then launches 10 at once in one project, where launches in the same
+instant can all start, checks that any launch that did not start was refused
+as a second session, and checks that what pi-sandbox keeps on disk stays flat.
+It is not run in CI.
+not start was refused as a second session, and checks that what pi-sandbox
+keeps on disk stays flat. It is not run in CI.
 
 The tests in `test_pi.py` use a fake `docker` on `PATH`, so they neither build
 an image nor start a container. They assert the isolation properties: the expected mounts

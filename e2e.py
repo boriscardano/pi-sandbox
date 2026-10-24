@@ -12,14 +12,18 @@ that tries to keep its git metadata out of the exit warnings or make them
 unreadable, and checks they still name it.
 Then it ends sessions every way one can end and checks that no container
 is left behind, and rebuilds the image for a new Pi release and checks that
-the build cache the old one left is pruned. No API key and no model call: Pi
+the build cache the old one left is pruned. Last it checks that a launch is
+refused for a hard link under the read-only `.git` paths, and while another
+session of the project runs. No API key and no model call: Pi
 starts its interface and waits for input.
 
     python3 e2e.py [report-file]
     python3 e2e.py --storage [report-file]
 
-`--storage` runs 30 sessions in turn and then 10 at once in one project and
-checks that pi-sandbox keeps its image and no new unused build cache. It also
+`--storage` runs 30 sessions in turn and then launches 10 at once in one
+project, checks that each launch that did not start was refused as a second
+session, and checks that pi-sandbox keeps its image and no new unused build
+cache. It also
 reports the state volume's size. This script itself deletes only the
 project, volume and containers it created, but the wrapper it runs removes
 every other pi-sandbox image and unused Pi install build cache when a session
@@ -54,6 +58,7 @@ GONE_TIMEOUT = 30
 OLDER_PI = "1.2.0"
 PI_INSTALL_STEP = "the wrapper must pass --build-arg PI_VERSION"
 KEY_LOST = b"could not write the subscription key"
+PI_TITLE = "\x1b]0;π - ".encode()
 
 # Run in the container by `docker exec`, as the user Pi runs as. Each line
 # prints one result, so a check that fails names itself.
@@ -283,6 +288,18 @@ class Session:
             return False
         return True
 
+    def up(self) -> bool:
+        """Pi's footer names the working directory and its branch once its
+        interface is up, which the build log does not. Outside a repository
+        there is no branch, but Pi has set the window title by then."""
+
+        return b"/workspace (" in self.output or PI_TITLE in self.output
+
+    def exited(self) -> bool:
+        """The wrapper has gone, and with it the pane's foreground job."""
+
+        return time.time() - self.started > 3 and not children(self.shell)
+
     def type(self, keys: bytes) -> None:
         os.write(self.fd, keys)
 
@@ -312,8 +329,7 @@ class Session:
 
 
 def wait_ready(sessions: list[Session]) -> None:
-    """Pi's footer names the working directory and its branch once its
-    interface is up, which the build log does not. Every terminal is read
+    """Wait until Pi is up in every session. Every terminal is read
     meanwhile, so no session stalls writing to one nobody reads."""
 
     end = time.time() + READY_TIMEOUT
@@ -331,7 +347,7 @@ def wait_ready(sessions: list[Session]) -> None:
                     raise RuntimeError(f"the wrapper exited at once:\n{tail}")
             elif not session.alive():
                 raise RuntimeError(f"the wrapper exited before Pi started:\n{tail}")
-            elif b"/workspace (" in session.output:
+            elif session.up():
                 session.container = find_container(session.project, session.pid)
                 if session.container:
                     pending.remove(session)
@@ -455,12 +471,14 @@ def quit_pi(session: Session) -> None:
 
 
 @contextlib.contextmanager
-def throwaway_project() -> Iterator[Path]:
-    """A fresh repository, and afterwards, however the run went, no session,
-    container, docker client, state volume or directory left of it."""
+def throwaway_project(repository: bool = True) -> Iterator[Path]:
+    """A fresh repository, or a plain directory, and afterwards, however the
+    run went, no session, container, docker client, state volume or directory
+    left of it."""
 
     project = Path(tempfile.mkdtemp(prefix="pi-e2e-")).resolve()
-    subprocess.run(["git", "init", "-q", str(project)], check=True)
+    if repository:
+        subprocess.run(["git", "init", "-q", str(project)], check=True)
     try:
         yield project
     finally:
@@ -495,7 +513,7 @@ def self_mount(lines: list[str]) -> bool:
         # The refusal comes before anything slow, so a run still going after
         # a minute has got past it and is building or starting a session.
         try:
-            refused = subprocess.run(
+            attempt = subprocess.run(
                 [str(project / "pi"), "--provider", "opencode", "--model", "x"],
                 cwd=project,
                 stdin=subprocess.DEVNULL,
@@ -504,7 +522,7 @@ def self_mount(lines: list[str]) -> bool:
                 timeout=60,
                 check=False,
             )
-            status, stderr = str(refused.returncode), refused.stderr
+            status, stderr = str(attempt.returncode), attempt.stderr
         except subprocess.TimeoutExpired:
             status, stderr = "none, still running after 60 s", ""
         container = find_container(project)
@@ -514,6 +532,97 @@ def self_mount(lines: list[str]) -> bool:
     )
     lines += [f"  {line}" for line in stderr.splitlines()]
     return status != "2" or "it contains this wrapper" not in stderr or bool(container)
+
+
+def refused(project: Path) -> str:
+    """What a launch printed, once its wrapper exited or a minute went by
+    without that. A launch that started Pi instead is closed here."""
+
+    session = Session(project)
+    end = time.time() + 60
+    while time.time() < end:
+        session.read(0.5)
+        if session.exited():
+            break
+    session.end()
+    return session.output.decode(errors="replace")
+
+
+# Run by `docker run` as the image's user, with the mounts the wrapper gives
+# a hook. The hook is a hard link to x. Prints the hook as the container
+# sees it after writing x, then whether the read-only path itself took a
+# write.
+HARD_LINK_PROBE = r"""
+cd /workspace
+printf 'changed\n' > x
+cat .git/hooks/post-checkout
+if printf x >> .git/hooks/post-checkout 2>/dev/null; then echo WRITABLE; else echo readonly; fi
+"""
+
+# Run in a session's container: what a hostile agent does to win the race
+# against a second launch, swapping `.git` between a directory and a symlink
+# to a host directory, until the container goes.
+SWAP_GIT = "cd /workspace; while :; do rm -rf .git; mkdir .git; rm -rf .git; ln -s {} .git; done"
+
+
+def refusals(lines: list[str], image: str) -> bool:
+    """A hook hard-linked to a project file, and a second launch while a
+    session runs, are refused."""
+
+    failed = False
+    lines.append("")
+    with throwaway_project() as project:
+        hook = project / ".git/hooks/post-checkout"
+        hook.parent.mkdir(exist_ok=True)
+        hook.write_text("original\n")
+        os.link(hook, project / "x")
+        seen = docker(
+            "run",
+            "--rm",
+            "--entrypoint",
+            "sh",
+            "--mount",
+            f"type=bind,source={project},target=/workspace",
+            "--mount",
+            f"type=bind,source={project}/.git/hooks,"
+            "target=/workspace/.git/hooks,readonly",
+            image,
+            "-c",
+            HARD_LINK_PROBE,
+        ).splitlines()
+        lines.append(
+            "a hook hard-linked to a project file, behind a read-only mount: "
+            f"container sees {seen}, host hook now {hook.read_text()!r}"
+        )
+        # The reason the wrapper refuses such a link: should Docker stop
+        # writing through it, this fails rather than leave the reason stale.
+        failed |= seen != ["changed", "readonly"] or hook.read_text() != "changed\n"
+        output = refused(project)
+        lines.append(f"  launch refused it: {'hard link' in output}")
+        failed |= "hard link" not in output
+
+    canary = Path(tempfile.mkdtemp(prefix="pi-e2e-canary-")).resolve()
+    (canary / "keep").write_text("unchanged")
+    try:
+        with throwaway_project(repository=False) as project:
+            session = start(project)
+            subprocess.run(
+                ["docker", "exec", "-d", session.container, "sh", "-c"]
+                + [SWAP_GIT.format(canary)],
+                check=True,
+            )
+            output = refused(project)
+            left = sorted(path.name for path in canary.iterdir())
+            refusal = "still running" in output
+            lines.append(
+                "a second launch while a session swaps .git for a symlink: "
+                f"refused {refusal}, host directory holds {left}"
+            )
+            failed |= not refusal or left != ["keep"]
+            quit_pi(session)
+    finally:
+        shutil.rmtree(canary, ignore_errors=True)
+    return failed
 
 
 def checks(lines: list[str]) -> bool:
@@ -708,6 +817,7 @@ def checks(lines: list[str]) -> bool:
             f"old image kept {kept}, Pi install build cache left unused {len(left)}"
         )
         failed |= version in ("", OLDER_PI) or kept or bool(left)
+    failed |= refusals(lines, image)
     return failed
 
 
@@ -802,13 +912,32 @@ def storage(lines: list[str]) -> bool:
                 lines.append(f"  session {index + 1} left a container")
         figures.append(("after 30 sessions in turn", storage_figures(volume, image)))
 
-        # Ten sessions starting at once, all writing the key. The image is
-        # kept, since this run deletes only what it created, so they do not
-        # race a build.
-        sessions = [Session(project) for _ in range(10)]
+        # Ten launches at once. A second session of one project is refused,
+        # but launches in the same instant can all pass before any container
+        # exists (all ten did on Docker Desktop, 2026-10-25), and those that
+        # start all write the key. The refusal itself is proven by refusals(). The image is kept,
+        # since this run deletes only what it created, so they do not race a
+        # build.
+        launched = [Session(project) for _ in range(10)]
+        end = time.time() + READY_TIMEOUT
+        while time.time() < end and not all(s.up() or s.exited() for s in launched):
+            for session in launched:
+                session.read(0.05)
+        sessions = [s for s in launched if s.up()]
+        turned_away = [s for s in launched if s not in sessions]
+        lines.append(
+            f"  10 launches at once: {len(sessions)} started, "
+            f"{sum(b'still running' in s.output for s in turned_away)} refused "
+            "as a second session"
+        )
+        failed |= not sessions or any(
+            b"still running" not in s.output for s in turned_away
+        )
+        for session in turned_away:
+            session.end()
         wait_ready(sessions)
         lost = sum(KEY_LOST in s.output for s in sessions)
-        lines.append(f"  starts that lost the key among 10 concurrent: {lost}")
+        lines.append(f"  starts that lost the key: {lost}")
         failed |= lost > 0
         for index, session in enumerate(sessions):
             exits[index % len(exits)](session)

@@ -29,6 +29,15 @@ FAKE_DOCKER = """#!/bin/sh
         printf '%s\\n' "$arg"
     done
 } >>"$PI_SANDBOX_FAKE_LOG"
+# A container that runs on, a live session's or one whose wrapper is gone,
+# can change the project at any moment until it is removed.
+if [ -n "${PI_SANDBOX_FAKE_LIVE:-}" ] && [ ! -e "$PI_SANDBOX_FAKE_LOG.removed" ]; then
+    if [ "$*" = "rm -f $PI_SANDBOX_FAKE_LIVE" ]; then
+        : >"$PI_SANDBOX_FAKE_LOG.removed"
+    else
+        sh -c "$PI_SANDBOX_FAKE_LIVE_AGENT" sh "$@"
+    fi
+fi
 case "$1" in
     image)
         case "$2" in
@@ -53,9 +62,13 @@ case "$1" in
         exit 0
         ;;
     rmi) exit "${PI_SANDBOX_FAKE_RMI_STATUS:-0}" ;;
+    rm) exit "${PI_SANDBOX_FAKE_RM_STATUS:-0}" ;;
     # The build cache listing, as the wrapper's template prints it.
     system) printf '%s' "${PI_SANDBOX_FAKE_CACHE:-}"; exit 0 ;;
-    ps) printf '%s' "${PI_SANDBOX_FAKE_CONTAINERS:-}"; exit 0 ;;
+    ps)
+        printf '%s' "${PI_SANDBOX_FAKE_CONTAINERS:-}"
+        exit "${PI_SANDBOX_FAKE_PS_STATUS:-0}"
+        ;;
     # The daemon's CPU count, as `docker info --format '{{.NCPU}}'` prints it,
     # and an unreachable daemon when there is none.
     info)
@@ -720,7 +733,7 @@ def test_wrapper_refuses_a_non_regular_config_worktree(tmp_path: Path) -> None:
 
         assert completed.returncode == 2, index
         assert "not a regular file" in completed.stderr, index
-        assert invocations == [], index
+        assert not any(argv[0] == "run" for argv in invocations), index
 
 
 def test_wrapper_creates_commondir_as_dot_and_git_still_works(tmp_path: Path) -> None:
@@ -777,7 +790,7 @@ def test_wrapper_refuses_a_planted_commondir(tmp_path: Path) -> None:
 
         assert completed.returncode == 2, content
         assert "commondir" in completed.stderr, content
-        assert invocations == [], content
+        assert not any(argv[0] == "run" for argv in invocations), content
         assert (repo / ".git/commondir").read_text() == content
 
 
@@ -795,7 +808,7 @@ def test_wrapper_refuses_a_non_regular_commondir(tmp_path: Path) -> None:
 
         assert completed.returncode == 2, index
         assert "not a regular file" in completed.stderr, index
-        assert invocations == [], index
+        assert not any(argv[0] == "run" for argv in invocations), index
 
 
 def test_wrapper_refuses_a_symlinked_git_path(tmp_path: Path) -> None:
@@ -830,9 +843,156 @@ def test_wrapper_refuses_a_symlinked_git_path(tmp_path: Path) -> None:
         assert completed.returncode == 2, relative
         assert "symlink" in completed.stderr, relative
         assert str(project / relative) in completed.stderr, relative
-        assert invocations == [], relative
+        assert not any(argv[0] == "run" for argv in invocations), relative
         # Nothing was created through the link.
         assert sorted(path.name for path in target.iterdir()) == ["keep"], relative
+
+
+def test_wrapper_refuses_a_second_path_to_the_protected_git_files(
+    tmp_path: Path,
+) -> None:
+    """A read-only mount protects a path, not the file behind it. In a
+    session where `.git` was not protected, the agent can make a hook or
+    config a hard link or a symlink to a project file, and later rewrite the
+    hook through that file while every read-only mount is in place."""
+
+    for index, relative in enumerate(
+        (
+            ".git/config",
+            ".git/config.worktree",
+            ".git/commondir",
+            ".git/hooks/post-checkout",
+            ".git/modules/sub/config",
+            ".git/modules/sub/hooks/pre-commit",
+            ".git/worktrees/wt/commondir",
+        )
+    ):
+        for kind in ("hard", "symbolic"):
+            repo = tmp_path / f"repo-{index}-{kind}"
+            repo.mkdir()
+            subprocess.run(["git", "init", "--quiet", str(repo)], check=True)
+            path = repo / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.unlink(missing_ok=True)
+            (repo / "x").write_text(".\n")
+            if kind == "hard":
+                os.link(repo / "x", path)
+            else:
+                path.symlink_to(repo / "x")
+
+            completed, invocations = _run(tmp_path / f"run-{index}-{kind}", cwd=repo)
+
+            assert completed.returncode == 2, (relative, kind)
+            assert "link" in completed.stderr, (relative, kind)
+            shown = (str(path), "./" + relative.removeprefix(".git/"))
+            assert any(name in completed.stderr for name in shown), (relative, kind)
+            assert not any(argv[0] == "run" for argv in invocations), (relative, kind)
+
+
+def test_wrapper_refuses_a_symlinked_directory_under_the_git_paths(
+    tmp_path: Path,
+) -> None:
+    """A submodule's git directory, or its hooks, linked to a project
+    directory gives the agent a config and hooks the host's Git reads through
+    the submodule, writable in every later session. Its name is not one Git
+    reads a command from, so every symlink counts, not only those names."""
+
+    for index, relative in enumerate(
+        (".git/modules/x", ".git/modules/y/hooks", ".git/worktrees/wt")
+    ):
+        repo = tmp_path / f"repo-{index}"
+        repo.mkdir()
+        subprocess.run(["git", "init", "--quiet", str(repo)], check=True)
+        (repo / "evil").mkdir()
+        path = repo / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.symlink_to(repo / "evil")
+
+        completed, invocations = _run(tmp_path / f"run-{index}", cwd=repo)
+
+        assert completed.returncode == 2, relative
+        assert "./" + relative.removeprefix(".git/") in completed.stderr, relative
+        assert not any(argv[0] == "run" for argv in invocations), relative
+
+
+def test_wrapper_prints_no_control_bytes_from_a_refused_name(
+    tmp_path: Path,
+) -> None:
+    """The agent names the file, so an escape sequence in its name would
+    reach the terminal from the wrapper itself and could hide the refusal."""
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "--quiet", str(repo)], check=True)
+    (repo / "x").write_text("#!/bin/sh\n")
+    os.link(repo / "x", repo / ".git/hooks/a\x1b]0;title\x07\x1b[2Kb")
+
+    completed, _ = _run(tmp_path / "run", cwd=repo)
+
+    assert completed.returncode == 2
+    assert "hard link" in completed.stderr
+    assert "\x1b" not in completed.stderr
+    assert "\x07" not in completed.stderr
+
+
+def test_wrapper_says_when_it_could_not_check_for_links(tmp_path: Path) -> None:
+    """A directory the check cannot read is refused, and said to be
+    unreadable rather than reported as a link that is not there."""
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "--quiet", str(repo)], check=True)
+    locked = repo / ".git/modules/sub"
+    locked.mkdir(parents=True)
+    locked.chmod(0)
+    try:
+        completed, invocations = _run(tmp_path / "run", cwd=repo)
+    finally:
+        locked.chmod(0o755)
+
+    assert completed.returncode == 2
+    assert "could not check" in completed.stderr
+    assert "hard link" not in completed.stderr
+    assert not any(argv[0] == "run" for argv in invocations)
+
+
+def test_wrapper_runs_a_repository_whose_objects_are_hard_links(
+    tmp_path: Path,
+) -> None:
+    """`git clone` of a local path hard-links the objects, a submodule's under
+    .git/modules too. They name no command, so they do not count, also where
+    a directory above the project is called `hooks`."""
+
+    git = ["git", "-c", "user.name=t", "-c", "user.email=t@t"]
+    git += ["-c", "protocol.file.allow=always"]
+    sub = tmp_path / "sub"
+    sub.mkdir()
+    subprocess.run(["git", "init", "--quiet", str(sub)], check=True)
+    (sub / "file").write_text("x")
+    subprocess.run([*git, "-C", str(sub), "add", "file"], check=True)
+    subprocess.run([*git, "-C", str(sub), "commit", "-qm", "x"], check=True)
+    source = tmp_path / "source"
+    source.mkdir()
+    subprocess.run(["git", "init", "--quiet", str(source)], check=True)
+    subprocess.run(
+        [*git, "-C", str(source), "submodule", "add", "-q", str(sub), "sub"],
+        check=True,
+    )
+    subprocess.run([*git, "-C", str(source), "commit", "-qm", "x"], check=True)
+    clone = tmp_path / "hooks" / "clone"
+    subprocess.run(
+        [*git, "clone", "-q", "--recurse-submodules", str(source), str(clone)],
+        check=True,
+    )
+    for objects in (clone / ".git/objects", clone / ".git/modules/sub/objects"):
+        assert any(
+            path.stat().st_nlink > 1 for path in objects.rglob("*") if path.is_file()
+        ), objects
+
+    completed, invocations = _run(tmp_path / "run", cwd=clone)
+
+    assert completed.returncode == 0, completed.stderr
+    assert _docker_run(invocations)
 
 
 def test_wrapper_still_runs_a_repository_without_symlinked_git_paths(
@@ -1745,9 +1905,185 @@ def test_wrapper_does_not_sweep_when_ps_cannot_see_processes(
     assert stale not in _removals(invocations)
 
 
+def _prefix(tmp_path: Path, project: Path) -> str:
+    """The start of every container name this project gets from here:
+    pi-sandbox-<project>-<origin>-."""
+
+    _, invocations = _run(tmp_path / "prefix", cwd=project)
+    return _container_name(invocations).rsplit("-", 1)[0] + "-"
+
+
+def test_wrapper_checks_the_project_after_a_dead_sessions_container_is_gone(
+    tmp_path: Path,
+) -> None:
+    """A container whose wrapper was SIGKILLed with its watcher still runs,
+    and its agent can turn `.git` into a symlink at any moment. Checked before
+    that container was removed, a plain project passed, then the symlink made
+    the wrapper create directories through it and mount a host directory. The
+    checks must see a project no container can still change."""
+
+    project = tmp_path / "project"
+    project.mkdir()
+    target = tmp_path / "target"
+    target.mkdir()
+    (target / "keep").write_text("unchanged")
+    stale = _prefix(tmp_path, project) + str(GONE_PID)
+
+    completed, invocations = _run(
+        tmp_path / "run",
+        cwd=project,
+        containers=f"{stale}\n",
+        also={
+            "PI_SANDBOX_FAKE_LIVE": stale,
+            # As late as it can: while the wrapper lists the containers.
+            "PI_SANDBOX_FAKE_LIVE_AGENT": f'[ "$1" = ps ] || exit 0; '
+            f"rm -rf '{project}/.git'; ln -s '{target}' '{project}/.git'",
+        },
+    )
+
+    assert completed.returncode == 2, completed.stderr
+    assert "symlink" in completed.stderr
+    assert not any(argv[0] == "run" for argv in invocations)
+    assert sorted(path.name for path in target.iterdir()) == ["keep"]
+
+
+def test_wrapper_refuses_while_another_session_of_the_project_runs(
+    tmp_path: Path,
+) -> None:
+    """A live session's agent can change the project while this launch checks
+    it, so a second session of one project is refused. The running one is
+    left alone, and a live session of another project does not count."""
+
+    project = tmp_path / "project"
+    project.mkdir()
+    live = _prefix(tmp_path, project) + str(os.getpid())
+    other = f"pi-sandbox-0a1b2c3d-{live.split('-')[3]}-{os.getpid()}"
+
+    completed, invocations = _run(
+        tmp_path / "run", cwd=project, containers=f"{other}\n{live}\n"
+    )
+
+    assert completed.returncode == 2
+    assert "still running" in completed.stderr
+    # A wrapper pid reused by another process looks live too.
+    assert f"docker rm -f {live}" in completed.stderr
+    assert not any(argv[0] == "run" for argv in invocations)
+    assert live not in _removals(invocations)
+
+    started, invocations = _run(
+        tmp_path / "other", cwd=project, containers=f"{other}\n"
+    )
+    assert started.returncode == 0
+    assert _docker_run(invocations)
+
+
+def test_wrapper_refuses_when_it_cannot_tell_a_session_is_gone(
+    tmp_path: Path,
+) -> None:
+    """With a `ps` that sees nothing, or a container listing that failed, a
+    container of this project may be a live session's, so the launch is
+    refused rather than assumed safe."""
+
+    project = tmp_path / "project"
+    project.mkdir()
+    stale = _prefix(tmp_path, project) + str(GONE_PID)
+    fake = tmp_path / "blind" / "fakebin"
+    fake.mkdir(parents=True)
+    (fake / "ps").write_text("#!/bin/sh\nexit 1\n")
+    (fake / "ps").chmod(0o755)
+
+    blind = _run(tmp_path / "blind", cwd=project, containers=f"{stale}\n")
+    failed = _run(
+        tmp_path / "failed", cwd=project, also={"PI_SANDBOX_FAKE_PS_STATUS": "1"}
+    )
+
+    for (completed, invocations), says in (
+        (blind, "still running"),
+        (failed, "could not list"),
+    ):
+        assert completed.returncode == 2, completed.stderr
+        assert says in completed.stderr
+        assert not any(argv[0] == "run" for argv in invocations)
+
+
+def test_wrapper_refuses_while_a_session_of_an_enclosing_directory_runs(
+    tmp_path: Path,
+) -> None:
+    """A session of a directory above this project mounts it whole, `.git`
+    unprotected, so its agent can swap this project's `.git` for a symlink
+    during the whole session. A session of a directory below cannot reach this
+    project's `.git`, so it does not count."""
+
+    outer = tmp_path / "outer"
+    project = outer / "project"
+    inner = project / "inner"
+    inner.mkdir(parents=True)
+    above = _prefix(tmp_path / "above", outer) + str(os.getpid())
+    below = _prefix(tmp_path / "below", inner) + str(os.getpid())
+
+    refused, invocations = _run(tmp_path / "run", cwd=project, containers=f"{above}\n")
+    started, _ = _run(tmp_path / "other", cwd=project, containers=f"{below}\n")
+
+    assert refused.returncode == 2
+    assert above in refused.stderr
+    assert not any(argv[0] == "run" for argv in invocations)
+    assert started.returncode == 0, started.stderr
+
+
+def test_wrapper_refuses_when_a_dead_sessions_container_will_not_go(
+    tmp_path: Path,
+) -> None:
+    """A container the daemon would not remove may still be running and
+    writing the project, so it counts as live."""
+
+    project = tmp_path / "project"
+    project.mkdir()
+    stale = _prefix(tmp_path, project) + str(GONE_PID)
+
+    completed, invocations = _run(
+        tmp_path / "run",
+        cwd=project,
+        containers=f"{stale}\n",
+        also={"PI_SANDBOX_FAKE_RM_STATUS": "1"},
+    )
+
+    assert completed.returncode == 2
+    assert stale in completed.stderr
+    assert not any(argv[0] == "run" for argv in invocations)
+
+
+def test_wrapper_checks_the_project_after_the_image_build(tmp_path: Path) -> None:
+    """A build can take minutes, during which another launch of the project
+    can start a container whose agent swaps `.git` for a symlink. The checks
+    must come after it, so they see that container."""
+
+    project = tmp_path / "project"
+    project.mkdir()
+    target = tmp_path / "target"
+    target.mkdir()
+    (target / "keep").write_text("unchanged")
+
+    completed, invocations = _run(
+        tmp_path / "run",
+        cwd=project,
+        inspect_status="1",
+        also={
+            "PI_SANDBOX_FAKE_LIVE": "never-removed",
+            "PI_SANDBOX_FAKE_LIVE_AGENT": f'[ "$1" = build ] || exit 0; '
+            f"ln -s '{target}' '{project}/.git'",
+        },
+    )
+
+    assert any(argv[0] == "build" for argv in invocations)
+    assert completed.returncode == 2, completed.stderr
+    assert "symlink" in completed.stderr
+    assert sorted(path.name for path in target.iterdir()) == ["keep"]
+
+
 def test_wrapper_names_each_container_apart(tmp_path: Path) -> None:
-    """Two sessions in one project run at once, so a name shared between them
-    would make one session's exit remove the other's container."""
+    """A session's watcher removes its container by name for seconds after
+    the session ends, so a name shared between sessions of one project would
+    let it remove the next session's container."""
 
     _, first = _run(tmp_path / "a", cwd=tmp_path / "project")
     _, second = _run(tmp_path / "b", cwd=tmp_path / "project")

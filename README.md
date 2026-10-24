@@ -112,9 +112,12 @@ directory, contains it, is `/`, or has a comma in its path, which Docker's
 
 The container runs as non-root (`agent`, your own uid and gid on Linux and
 1001 on Docker Desktop) with `--cap-drop ALL`,
-`--security-opt no-new-privileges` and `--pids-limit 512`. No `--privileged`,
-and no host PID, IPC or network namespace. Outbound networking is on, since the
-agent has to reach the model API. No port is published.
+`--security-opt no-new-privileges` and `--pids-limit 512`, and may use half
+the CPUs Docker has (at least one), so a spinning agent cannot hold every core.
+Its terminal output is not written to a Docker log file (`--log-driver none`),
+which would otherwise grow without limit. No `--privileged`, and no host PID,
+IPC or network namespace. Outbound networking is on, since the agent has to
+reach the model API. No port is published.
 
 ## The API keys
 
@@ -242,9 +245,9 @@ The entrypoint installs four Pi extensions from npm at their newest release:
   `/extensions`.
 
 The subagent and background-task extensions let the agent start work that
-keeps running while you are not watching, with the same key, open network and
-`--pids-limit` as the foreground session. Everything still dies with the
-container.
+keeps running while you are not watching, with the same key, open network,
+`--pids-limit` and CPU share as the foreground session. Everything still dies
+with the container.
 
 They live in the agent's home, so they reach a project through its state
 volume. A new project's first start downloads them. Offline, that start
@@ -382,11 +385,12 @@ with `python3 e2e.py` on Docker Desktop. It starts Pi in a pseudo-terminal in a
 throwaway repository, checks from inside the container that `/workspace` is
 writable while `.git/config`, `config.worktree`, `commondir`, `hooks`,
 `worktrees` and `modules` are not and `.git` cannot be moved, that a file the
-agent writes is owned by you and that the memory limit is set, then ends a
-session each way one can end and checks that no container is left. Last it
-puts an image of an older Pi under the tag, starts a session, which rebuilds
-it, and checks that no Pi install build cache is left unused. It writes its
-findings to `e2e-report.txt`, which CI keeps as an artifact. It also checks
+agent writes is owned by you, that the memory and CPU limits are set and that
+the terminal output is not logged, then ends a session each way one can end and
+checks that no container is left. Last it puts an image of an older Pi under
+the tag, starts a session, which rebuilds it, and checks that no Pi install
+build cache is left unused. It writes its findings to `e2e-report.txt`, which
+CI keeps as an artifact. It also checks
 that uv picks Debian's Python 3.11 for a project that accepts it, syncs a
 Python project and fails if the state volume grows more than 30 MB. No API key
 and no model call. `python3 e2e.py --storage` runs 30 sessions in turn and then 10 at

@@ -419,6 +419,18 @@ def checks(lines: list[str]) -> bool:
         )
         lines.append(f"  memory limit {memory} bytes")
         failed |= memory != str(8 * 1024**3)
+        # Attach works without a log driver: Pi's footer was read through it above.
+        log_driver = docker(
+            "inspect", "--format", "{{.HostConfig.LogConfig.Type}}", session.container
+        )
+        lines.append(f"  log driver {log_driver}")
+        failed |= log_driver != "none"
+        nano_cpus = docker(
+            "inspect", "--format", "{{.HostConfig.NanoCpus}}", session.container
+        )
+        ncpu = int(docker("info", "--format", "{{.NCPU}}", check=True))
+        lines.append(f"  cpu limit {nano_cpus} nanocpus of the daemon's {ncpu} cpus")
+        failed |= nano_cpus != str(max(1, ncpu // 2) * 10**9)
         found = docker("exec", session.container, "sh", "-c", UV_FIND)
         lines.append(f"  uv's Python for a >=3.10 project: {found}")
         failed |= found != "/usr/bin/python3"

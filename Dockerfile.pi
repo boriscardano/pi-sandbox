@@ -124,6 +124,13 @@ RUN : "${PI_VERSION:?the wrapper must pass --build-arg PI_VERSION}" \
 # marker `docker image prune` filters on.
 LABEL pi-sandbox.version="$PI_VERSION"
 
+# npm caches in the container's /tmp, which goes with it, for every npm call at
+# run time, including a `pi install` the user runs. The install above ran as
+# root with HOME already set, so the image holds a root-owned ~/.npm that every
+# new volume copies and the agent cannot write, and that made such an install
+# fail with EACCES. Set after that install, so its cache stays out of /tmp.
+ENV npm_config_cache=/tmp/npm-cache
+
 USER agent
 
 ENTRYPOINT ["pi-sandbox-entrypoint"]

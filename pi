@@ -581,9 +581,8 @@ found=$(LC_ALL=C find -H "$project" -path "$git_prune" -prune -o \
     -o -ipath '*/.git/config' -o -ipath '*/.git/config.worktree' \
     -o -ipath '*/.git/commondir' -o -ipath '*/.git/hooks/*' \) \
     -cnewer "$marker" \
-    -exec sh -c 'root=$1; shift; for p do
-        printf %s "${p#"$root"}" | tr -c "[:print:]" "?"; echo
-    done' sh "$project" {} + \
+    -exec sh -c 'root=$1; shift; for p do printf "%s\000" "${p#"$root"}"; done |
+        tr -c "[:print:]\000" "?" | tr "\000" "\n"' sh "$project" {} + \
     2>/dev/null) || find_failed=1
 # Each name is now the part under the project, which is the user's own path
 # and is added back as it is when printed. A `git init sub` writes sub/.git,

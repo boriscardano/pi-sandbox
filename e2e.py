@@ -419,6 +419,22 @@ def checks(lines: list[str]) -> bool:
         )
         lines.append(f"  memory limit {memory} bytes")
         failed |= memory != str(8 * 1024**3)
+        # Pi's footer came through the attached terminal above, so attach does
+        # not need the log. Nothing may keep a copy either: Docker's dual
+        # logging cache would make `docker logs` print Pi's screen.
+        log_driver = docker(
+            "inspect", "--format", "{{.HostConfig.LogConfig.Type}}", session.container
+        )
+        logged = docker("logs", session.container)
+        lines.append(f"  log driver {log_driver}, docker logs kept {len(logged)} bytes")
+        failed |= log_driver != "none" or logged != ""
+        nano_cpus = int(
+            docker("inspect", "--format", "{{.HostConfig.NanoCpus}}", session.container)
+            or 0
+        )
+        ncpu = int(docker("info", "--format", "{{.NCPU}}", check=True))
+        lines.append(f"  cpu limit {nano_cpus / 1e9:g} of the daemon's {ncpu}")
+        failed |= not 0 < nano_cpus <= max(1, ncpu // 2) * 10**9
         found = docker("exec", session.container, "sh", "-c", UV_FIND)
         lines.append(f"  uv's Python for a >=3.10 project: {found}")
         failed |= found != "/usr/bin/python3"

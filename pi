@@ -102,10 +102,9 @@ project=$(CDPATH= cd -- "$project" && pwd)
 
 # Refuse the mounts that would defeat the point: the whole disk, or a home
 # directory carrying ~/.ssh, ~/.aws and every other project. Compare physical
-# paths, so a symlink, or another case of the name on a case-insensitive disk,
-# cannot hide it. `project` keeps the spelling the user launched from, because
-# the state volume is named after it. The pwd program asks the kernel, while
-# the builtin pwd -P of bash, /bin/sh on macOS, keeps the case it was given.
+# paths, so a symlink or another case of the name cannot hide them, with
+# `env pwd -P`: bash, /bin/sh on macOS, keeps the case in its builtin.
+# `project` keeps the launch spelling, which names the state volume.
 physical=$(CDPATH= cd -- "$project" && env pwd -P)
 home=${HOME%/}
 if [ -d "$home" ]; then
@@ -114,15 +113,17 @@ fi
 case "$physical" in
     /) printf '%s\n' "refusing to mount the whole filesystem" >&2; exit 2 ;;
 esac
-if [ "$physical" = "$home" ] || case "$home/" in "$physical"/*) true ;; *) false ;; esac; then
-    printf '%s\n' "refusing to mount $project: it contains your home directory" >&2
-    exit 2
-fi
+case "$home/" in
+    "$physical"/*)
+        printf '%s\n' "refusing to mount $project: it contains your home directory" >&2
+        exit 2
+        ;;
+esac
 
 # This script runs on the host for every project, and Dockerfile.pi and
 # entrypoint.sh build the image every project runs in. Mounting the directory
 # that holds them would let the agent rewrite what the host runs at the next
-# launch anywhere. Compare physical paths, so a symlink cannot hide it.
+# launch anywhere.
 case "$(CDPATH= cd -- "$script_dir" && env pwd -P)/" in
     "$physical"/*)
         printf '%s\n' "refusing to mount $project: it contains this wrapper ($script_dir), which the agent could rewrite to run on your host at the next launch. Run a copy of the wrapper from outside the project" >&2

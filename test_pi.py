@@ -1856,26 +1856,25 @@ def test_wrapper_refuses_to_mount_the_home_directory(tmp_path: Path) -> None:
 
 def test_wrapper_refuses_home_and_root_under_another_spelling(tmp_path: Path) -> None:
     """A shell keeps the path it was given in $PWD, so launching from a
-    symlink to the home directory, to one of its ancestors or to /, or on a
-    case-insensitive disk from another case of the home path, passed the
-    refusals and mounted it. They compare physical paths. The mount keeps the
-    spelling the user launched from, so state volumes keep their names."""
+    symlink to the home directory, to one of its ancestors or to /, with HOME
+    itself a symlink, or on a case-insensitive disk from another case of the
+    home path, passed the refusals and mounted it. They compare physical
+    paths. The mount keeps the spelling the user launched from."""
 
     home = tmp_path / "users" / "me"
     (home / "work" / "repo").mkdir(parents=True)
     links = {"home": home, "ancestor": tmp_path / "users", "root": Path("/")}
     for name, target in links.items():
         (tmp_path / name).symlink_to(target)
-    # Only the refusal stops a walk of the whole disk when it is missing.
-    no_find = "#!/bin/sh\nexit 0\n"
 
     def launch(run: str, cwd: Path, home: Path = home):
+        # A launch wrongly let through must not run the real find over /.
         return _run(
             tmp_path / run,
             cwd=cwd,
             home=home,
             also={"PWD": str(cwd)},
-            fake_find=no_find,
+            fake_find="#!/bin/sh\nexit 0\n",
         )
 
     launches = {name: launch(name + "-run", tmp_path / name) for name in links}
@@ -1886,6 +1885,8 @@ def test_wrapper_refuses_home_and_root_under_another_spelling(tmp_path: Path) ->
 
     for name, (completed, calls) in launches.items():
         assert completed.returncode == 2, name
+        reason = "whole filesystem" if name == "root" else "home directory"
+        assert reason in completed.stderr, name
         assert calls == [], name
 
     repo = tmp_path / "home" / "work" / "repo"

@@ -1313,6 +1313,21 @@ def test_wrapper_prints_a_newline_in_a_name_as_a_question_mark(
     )
 
 
+def test_wrapper_reports_many_planted_files_quickly(tmp_path: Path) -> None:
+    """Escaping each name in a process of its own let the agent stall the exit
+    for as long as it liked with empty files, and a user who closed the pane
+    thinking it hung lost the warning."""
+
+    started = time.monotonic()
+    completed, _ = _run(
+        tmp_path,
+        agent="mkdir -p s/.git/hooks && cd s/.git/hooks && seq 20000 | xargs touch",
+    )
+
+    assert str(tmp_path / "project/s/.git") in completed.stderr
+    assert time.monotonic() - started < 10
+
+
 def test_wrapper_resets_the_terminal_before_its_exit_warnings(
     tmp_path: Path,
 ) -> None:

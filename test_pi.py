@@ -65,7 +65,17 @@ case "$1" in
     rm) exit "${PI_SANDBOX_FAKE_RM_STATUS:-0}" ;;
     # The build cache listing, as the wrapper's template prints it.
     system) printf '%s' "${PI_SANDBOX_FAKE_CACHE:-}"; exit 0 ;;
+    # A label filter is answered from the labels of the runs in progress,
+    # which every run sharing PI_SANDBOX_FAKE_RUNNING records there.
     ps)
+        for arg in "$@"; do
+            case "$arg" in
+                label=pi-sandbox.git=*)
+                    grep -sxF -- "${arg#label=}" "${PI_SANDBOX_FAKE_RUNNING:-/dev/null}"
+                    exit 0
+                    ;;
+            esac
+        done
         printf '%s' "${PI_SANDBOX_FAKE_CONTAINERS:-}"
         exit "${PI_SANDBOX_FAKE_PS_STATUS:-0}"
         ;;
@@ -81,8 +91,17 @@ if [ "$1" = build ]; then
     exit "${PI_SANDBOX_FAKE_BUILD_STATUS:-0}"
 fi
 if [ "$1" = run ]; then
+    labels=''
+    if [ -n "${PI_SANDBOX_FAKE_RUNNING:-}" ]; then
+        labels=$(printf '%s\n' "$@" | sed -n '/^--label$/{n;p;}')
+        printf '%s\n' "$labels" >> "$PI_SANDBOX_FAKE_RUNNING"
+    fi
     if [ -n "${PI_SANDBOX_FAKE_AGENT:-}" ]; then
         sh -c "$PI_SANDBOX_FAKE_AGENT"
+    fi
+    if [ -n "$labels" ]; then
+        printf '%s\n' "$labels" | grep -vxF -f - "$PI_SANDBOX_FAKE_RUNNING" > "$PI_SANDBOX_FAKE_RUNNING.new"
+        mv "$PI_SANDBOX_FAKE_RUNNING.new" "$PI_SANDBOX_FAKE_RUNNING"
     fi
     exit "${PI_SANDBOX_FAKE_RUN_STATUS:-0}"
 fi
@@ -913,7 +932,36 @@ def test_wrapper_leaves_the_git_files_locked_for_another_session(
             check=True,
         )
 
-    assert written.returncode != 0
+    assert written.returncode != 0, "the files were unlocked"
+
+
+@pytest.mark.skipif(shutil.which("chflags") is None, reason="needs macOS chflags")
+def test_wrapper_keeps_the_lock_for_a_session_reached_by_another_path(
+    tmp_path: Path,
+) -> None:
+    """The flag is on the files, not on a path. A session of the same
+    repository launched through a symlink, or a path in another case, which
+    macOS accepts, ends while the first one runs. It must not unlock the
+    first one's files, whose agent keeps trying to write them."""
+
+    repo = tmp_path / "repo"
+    subprocess.run(["git", "init", "--quiet", str(repo)], check=True)
+    link = tmp_path / "link"
+    link.symlink_to(repo)
+    running = {"PI_SANDBOX_FAKE_RUNNING": str(tmp_path / "running")}
+    agent = (
+        "end=$(($(date +%s) + 4)); "
+        'while [ "$(date +%s)" -lt "$end" ]; do '
+        "printf x >> .git/config 2>/dev/null; done"
+    )
+
+    with ThreadPoolExecutor() as pool:
+        first = pool.submit(_run, tmp_path / "a", cwd=repo, agent=agent, also=running)
+        time.sleep(1.5)
+        _run(tmp_path / "b", cwd=link, also=running)
+        first.result()
+
+    assert not (repo / ".git/config").read_bytes().endswith(b"x")
 
 
 @pytest.mark.parametrize("platform", ["Darwin", "Linux"])

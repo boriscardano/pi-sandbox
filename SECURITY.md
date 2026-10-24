@@ -29,6 +29,9 @@ The known limitations in the README are not vulnerabilities. In particular:
 - the agent can leave files your host may later execute, such as a `Makefile`
   or an `.envrc`, or that your other coding agents trust, such as
   `.claude/settings.json` or Pi's `.pi/` extensions
+- the agent can edit work-tree files that the repository's own Git config
+  names, such as hooks under a `core.hooksPath` like Husky's `.husky/_` or a
+  file an `include.path` reads, and host Git runs what they say
 - the agent can fill the host disk, and can see the project's host path
 - the agent can write escape sequences to the terminal it was launched from,
   including OSC 52 sequences that read the clipboard where the terminal allows

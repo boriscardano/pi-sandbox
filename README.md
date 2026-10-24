@@ -395,6 +395,12 @@ pane run` through that socket would execute on the host.
   running anything, or starting another agent, in a checkout the agent has
   touched, and do not let a Pi on your host trust its `.pi/` before you have
   reviewed it.
+- When the repository's own config points Git at files in the work tree, such
+  as `core.hooksPath`, `include.path` or `core.fsmonitor` naming a project
+  file, the agent can edit those files and host Git runs what they say. Husky's
+  `core.hooksPath=.husky/_` is the common case. The wrapper protects `.git`,
+  not the files its config names, so review them like any other file your
+  host tools execute.
 - The agent can fill your disk. It writes the project directly, and the state
   volume and the container's own files grow Docker's disk, which on Docker
   Desktop is an image file on your host disk. Its size limit in Docker

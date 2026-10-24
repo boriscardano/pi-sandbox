@@ -964,6 +964,45 @@ def test_wrapper_keeps_the_lock_for_a_session_reached_by_another_path(
     assert not (repo / ".git/config").read_bytes().endswith(b"x")
 
 
+@pytest.mark.skipif(shutil.which("chflags") is None, reason="needs macOS chflags")
+def test_wrapper_keeps_the_lock_when_its_docker_client_is_killed(
+    tmp_path: Path,
+) -> None:
+    """A docker client killed in its first second can still be creating the
+    container after the wrapper's `docker rm`, so a release then would leave
+    that container running on unlocked files. Here the container shows up a
+    second after `docker run` returned 137, and its agent writes."""
+
+    repo = tmp_path / "repo"
+    subprocess.run(["git", "init", "--quiet", str(repo)], check=True)
+    running = tmp_path / "running"
+    late = (
+        "(sleep 1; "
+        f"echo pi-sandbox.git=$(stat -f %d-%i .git/config) >> {running}; "
+        "end=$(($(date +%s) + 7)); "
+        'while [ "$(date +%s)" -lt "$end" ]; do '
+        "printf x >> .git/config 2>/dev/null; done) >/dev/null 2>&1 &"
+    )
+
+    try:
+        _run(
+            tmp_path,
+            cwd=repo,
+            agent=late,
+            run_status="137",
+            also={"PI_SANDBOX_FAKE_RUNNING": str(running)},
+        )
+        time.sleep(9)
+        config = (repo / ".git/config").read_bytes()
+    finally:
+        subprocess.run(
+            ["chflags", "nouchg", *(repo / ".git" / f for f in PROTECTED_GIT_FILES)],
+            check=True,
+        )
+
+    assert not config.endswith(b"x")
+
+
 @pytest.mark.parametrize("platform", ["Darwin", "Linux"])
 def test_wrapper_stops_on_macos_when_it_cannot_lock_the_git_files(
     tmp_path: Path, platform: str

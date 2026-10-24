@@ -240,7 +240,7 @@ docker exec -it "$(docker ps -q --filter label=pi-sandbox=1 | head -1)" bash
 ## Extensions
 
 The entrypoint installs four Pi extensions from npm, each pinned to an exact
-version in its list:
+version in the list in `entrypoint.sh`:
 
 - `npm:pi-subagents`, delegation to subagents and scripted multi-agent
   workflows, under `/subagents`.
@@ -263,21 +263,23 @@ start installs any of the four that is missing or not at its pinned version,
 so a new pin reaches existing volumes too, and makes no call otherwise. Nothing
 updates them on its own. An extension you added yourself stays at the version
 it was installed at, and another version of one of the four is put back to
-the pin at the next start.
+the pin at the next start. That repairs drift, not tampering, since the agent
+owns these files, and resetting the volume is the only real reset.
 
 Pi's own subcommands run against the volume rather than your host Pi, so
 `pi list` shows what a project actually has and `pi install npm:<package>` adds
 one. `install`, `remove`, `uninstall`, `list`, `config` and `auth` all work this
 way. So does `pi update --extensions`, but bare `pi update` targets Pi itself,
 which lives outside the volume in a root-owned directory the agent cannot
-write. Resetting the volume, as under State and reset, is the other way to pick
-up a change.
+write. Resetting the volume, as under State and reset, also drops any extension
+no longer in the list.
 
 Change the set by editing the list in `entrypoint.sh`, which is where the
 four names and their versions live. To drop one for good, run
 `pi remove npm:<package>` and delete it from that list, then relaunch, which
 rebuilds the image. The pins are bumped by hand in a reviewed pull request, so
-a new upstream release reaches no sandbox until someone has looked at it. To
+a new release of the four reaches no sandbox until someone has looked at it,
+though their own dependencies still resolve from version ranges. To
 bump one, read the release's changes on npm, change its version in that list,
 and open a pull request. The next start of each project installs it.
 [docs/design.md](docs/design.md#extension-pins) has the details.

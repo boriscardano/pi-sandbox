@@ -117,7 +117,8 @@ ARG PI_VERSION
 RUN : "${PI_VERSION:?the wrapper must pass --build-arg PI_VERSION}" \
     && npm install --global --ignore-scripts \
         @earendil-works/pi-coding-agent@$PI_VERSION \
-    && npm cache clean --force
+    && npm cache clean --force \
+    && rm -rf "$HOME/.npm"
 
 # The label holds the version the wrapper compares against the one it looked
 # up, so a newer Pi rebuilds the image. `pi-sandbox.image=1` above stays the
@@ -125,10 +126,12 @@ RUN : "${PI_VERSION:?the wrapper must pass --build-arg PI_VERSION}" \
 LABEL pi-sandbox.version="$PI_VERSION"
 
 # npm caches in the container's /tmp, which goes with it, for every npm call at
-# run time, including a `pi install` the user runs. The install above ran as
-# root with HOME already set, so the image holds a root-owned ~/.npm that every
-# new volume copies and the agent cannot write, and that made such an install
-# fail with EACCES. Set after that install, so its cache stays out of /tmp.
+# run time, including a `pi install` the user runs, so releases do not pile up
+# in the volume. The install above runs as root with HOME already set, and the
+# root-owned ~/.npm it left used to be copied into every new volume, where the
+# agent could not write it and such an install failed with EACCES. It is
+# removed now, but older volumes still hold it. Set after that install, so its
+# cache stays out of /tmp.
 ENV npm_config_cache=/tmp/npm-cache
 
 USER agent

@@ -66,8 +66,11 @@ Notes for agents and contributors changing this repo, from the security work on
   anything a root step writes under `$HOME` lands root-owned in the image and
   is copied into every new state volume, where the agent cannot write it. The
   Pi install left a root-owned `~/.npm` that made `pi install` inside the
-  sandbox fail with EACCES (found 2026-10-24). Keep root steps out of `$HOME`.
+  sandbox fail with EACCES (found 2026-10-24). That step now removes it, and
+  `ENV npm_config_cache` keeps npm out of it in older volumes. Remove what a
+  root step leaves under `$HOME`.
 - The four extensions are pinned in `entrypoint.sh`. `pi install
   npm:<package>@<version>` moves an installed one down as well as up and
   replaces its entry in Pi's settings, and an install without a version
-  unpins it (measured 2026-10-24), so never install one of the four bare.
+  unpins it (measured 2026-10-24), which is why the entrypoint also checks
+  Pi's settings for the pinned entry.

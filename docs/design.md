@@ -70,32 +70,38 @@ the state volume, so unlike the environment the key outlives the container.
 ## Extension pins
 
 The four extensions are pinned to exact versions in the entrypoint's list. A
-start installs any of them that is missing or not at its pin, judged by the
-version in its `package.json` under Pi's npm directory, so an existing volume
-follows a bumped pin even though an image rebuild does not reach it. A volume
-already at the pins makes no call, since each install costs about a second of
-a warm start and every Herdr pane is a start. An install that names a version
-moves an installed release down as well as up and replaces the entry in Pi's
-settings (measured with `pi-background-tasks`, 2.6.9 to 2.6.10 and back).
-npm's download cache for it goes to `/tmp`, which is removed with the
-container, so releases do not pile up in the volume.
+start installs any of them unless npm holds the pinned version, judged by the
+`package.json` under Pi's npm directory, and Pi's settings name it pinned. So
+an existing volume follows a bumped pin even though an image rebuild does not
+reach it, and an entry without a version, from a volume older than the pins or
+a bare `pi install` of one of the four, is pinned again before `pi update` can
+move it. A volume already at the pins makes no call, since each install costs
+about a second of a warm start and every Herdr pane is a start. An install
+that names a version moves an installed release down as well as up and
+replaces the entry in Pi's settings (measured with `pi-background-tasks`,
+2.6.9 to 2.6.10 and back). npm's download cache goes to `/tmp`, which is
+removed with the container, so releases do not pile up in the volume.
 
 Nothing runs `pi update --extensions`. An extension you added stays at the
 version it was installed at, and a `pi remove npm:<package>` of one of the four
-lasts only until the next start, which installs it again.
+lasts only until the next start, which installs it again. The check repairs
+drift, not tampering: the agent owns these files and can edit an extension's
+code while leaving its version alone, and only resetting the volume undoes
+that.
 
 The pins are bumped by hand in a reviewed pull request, as the base image and
 uv are pinned by digest in `Dockerfile.pi`. Each of the four is maintained by
 one person on npm, and the extensions run with every key a project forwards,
 in every project. Following the newest release would let a compromised
 account or a bad release reach every project's sandbox, which is more than a
-hostile model gets, since the model is confined to one project. To bump one, read the release's changes against the pinned
-version, change the version in the list in `entrypoint.sh`, and open a pull
-request. The pins do not cover the extensions' own dependencies, which npm
-resolves from version ranges when it installs, so a new volume can still get a
-newer dependency than the last one did. Lifecycle scripts stay off, which
-limits what a release can run at install time but not what the extension code
-does once it is loaded.
+hostile model gets, since the model is confined to one project. To bump one,
+read the release's changes against the pinned version, change the version in
+the list in `entrypoint.sh`, and open a pull request. The pins do not cover
+the extensions' own dependencies, which npm resolves from version ranges when
+it installs, so a new volume can still get a newer dependency than the last
+one did. Pi itself still runs its newest release, as above. Lifecycle scripts
+stay off, which limits what a release can run at install time but not what
+the extension code does once it is loaded.
 
 ## What the state volume holds
 

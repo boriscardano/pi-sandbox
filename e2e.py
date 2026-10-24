@@ -127,16 +127,20 @@ class Answer(http.server.BaseHTTPRequestHandler):
         pass
 
 # The extensions the volume holds, from Pi's settings and the version npm
-# installed, and a downgrade of one by hand, which the next start must undo.
+# installed, sorted, and changes to them by hand, run as the user would, which
+# must work in the volume, leave no npm cache in it, and be undone by the next
+# start.
 INSTALLED = r"""python3 -I -c 'import json, pathlib, re
 agent = pathlib.Path.home() / ".pi/agent"
 for spec in json.loads((agent / "settings.json").read_text())["packages"]:
     name = re.sub(r"^npm:|@[0-9][^/]*$", "", spec)
     package = agent / "npm/node_modules" / name / "package.json"
     print(spec, json.loads(package.read_text())["version"])
-'"""
-# As the user would run it, which must also work in the volume.
-DOWNGRADE = "pi install npm:pi-background-tasks@2.6.9"
+' | sort"""
+BY_HAND = (
+    "pi install npm:pi-background-tasks@2.6.9 && pi remove npm:pi-extension-manager"
+    " && test ! -e ~/.npm/_cacache"
+)
 
 
 def pinned_extensions() -> list[str]:
@@ -145,7 +149,7 @@ def pinned_extensions() -> list[str]:
     for line in (WRAPPER.parent / "entrypoint.sh").read_text().splitlines():
         if line.strip().startswith("packages="):
             specs = line.split("=", 1)[1].strip("'").split()
-            return [f"npm:{spec} {spec.rpartition('@')[2]}" for spec in specs]
+            return sorted(f"npm:{spec} {spec.rpartition('@')[2]}" for spec in specs)
     raise SystemExit("no packages= line in entrypoint.sh")
 
 
@@ -537,19 +541,20 @@ def checks(lines: list[str]) -> bool:
         if installed.splitlines() != pinned:
             failed = True
             lines.append(f"    FAIL: expected {pinned}")
-        downgrade = subprocess.run(
-            ["docker", "exec", session.container, "sh", "-c", DOWNGRADE],
+        by_hand = subprocess.run(
+            ["docker", "exec", session.container, "sh", "-c", BY_HAND],
             capture_output=True,
             text=True,
             check=False,
         )
-        if downgrade.returncode:
+        if by_hand.returncode:
             failed = True
-            lines.append(f"    FAIL: {DOWNGRADE}\n{downgrade.stdout}{downgrade.stderr}")
+            lines.append(f"    FAIL: {BY_HAND}\n{by_hand.stdout}{by_hand.stderr}")
         installed = docker("exec", session.container, "sh", "-c", INSTALLED)
-        downgraded = "npm:pi-background-tasks@2.6.9 2.6.9" in installed.splitlines()
-        lines.append(f"  {DOWNGRADE} took: {downgraded}")
-        failed |= not downgraded
+        took = "npm:pi-background-tasks@2.6.9 2.6.9" in installed.splitlines()
+        took &= "pi-extension-manager" not in installed
+        lines.append(f"  {BY_HAND}: took {took}")
+        failed |= not took
 
         before, after, *contents = docker(
             "exec", session.container, "sh", "-c", UV_SYNC, check=True
@@ -579,7 +584,7 @@ def checks(lines: list[str]) -> bool:
         failed |= reuse.returncode != 0
         installed = docker("exec", session.container, "sh", "-c", INSTALLED)
         lines.append(
-            "  next start moved a hand downgrade back to the pins: "
+            "  next start undid them, back at the pins: "
             f"{installed.splitlines() == pinned}"
         )
         failed |= installed.splitlines() != pinned

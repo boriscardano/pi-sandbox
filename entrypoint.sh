@@ -66,17 +66,18 @@ fi
 #
 # The four are listed here and nowhere else, each at an exact version that is
 # bumped by hand in a reviewed change, and docs/design.md says why. `pi install`
-# with a version moves an installed one up or down to it, and nothing runs
-# `pi update`, so no release reaches the sandbox unreviewed. The installed
-# version is read from the package.json under Pi's npm directory, and only from
-# a regular file, since a FIFO the agent left there would block the read. An
-# install costs about a second and every Herdr pane is a start, so a volume at
-# the pins makes no call. Lifecycle scripts stay off, so a release cannot run
-# one in a sandbox that holds the API key. npm's cache goes to /tmp, which goes
-# with the container, since in the volume it kept every release it downloaded.
-# `timeout` bounds the whole step so a hung registry cannot stop Pi from
-# starting. Pi's own subcommands are passed through to it untouched, so they
-# must not trigger an install of their own.
+# with a version moves an installed one up or down to it and pins Pi's entry
+# for it, and nothing runs `pi update`, so no new release of the four reaches
+# the sandbox unreviewed, though their dependencies still resolve from ranges.
+# One is installed unless npm holds the pinned version and Pi's settings name
+# it pinned, since `pi update` moves an entry without a version. That repairs
+# drift, not tampering: the agent owns these files. An install costs about a
+# second and every Herdr pane is a start, so a volume at the pins makes no call.
+# Only regular files are read, so a FIFO the agent left does not cost every
+# start the wait, but it is `timeout` that bounds the step, against that and a
+# hung registry alike. Lifecycle scripts stay off, so a release cannot run one
+# in a sandbox that holds the API key. Pi's own subcommands are passed through
+# to it untouched, so they must not trigger an install of their own.
 # Keep this list in step with the same list in pi.
 case "${1:-}" in
     install | remove | uninstall | update | list | config | auth) ;;
@@ -85,11 +86,12 @@ case "${1:-}" in
         # shellcheck disable=SC2016,SC2086  # $package expands in the inner sh, and the list splits into one argument each
         if ! timeout 120 sh -c '
             export npm_config_ignore_scripts=true
-            export npm_config_cache="${TMPDIR:-/tmp}/pi-sandbox-npm-cache"
+            settings=$HOME/.pi/agent/settings.json
             failed=0
             for package in "$@"; do
                 installed=$HOME/.pi/agent/npm/node_modules/${package%@*}/package.json
-                if [ -f "$installed" ] && grep -Eq "\"version\": *\"${package##*@}\"" "$installed"; then
+                if [ -f "$installed" ] && grep -Eq "\"version\": *\"${package##*@}\"" "$installed" \
+                    && [ -f "$settings" ] && grep -Fq "\"npm:$package\"" "$settings"; then
                     continue
                 fi
                 pi install "npm:$package" || failed=1

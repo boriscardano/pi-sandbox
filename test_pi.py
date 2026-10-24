@@ -794,6 +794,106 @@ def test_wrapper_refuses_a_planted_commondir(tmp_path: Path) -> None:
         assert (repo / ".git/commondir").read_text() == content
 
 
+# The files the wrapper mounts read-only one by one, as opposed to whole
+# directories.
+PROTECTED_GIT_FILES = ("config", "config.worktree", "commondir")
+
+
+def _git_files(repo: Path) -> dict[str, bytes | None]:
+    return {
+        name: (repo / ".git" / name).read_bytes()
+        if (repo / ".git" / name).exists()
+        else None
+        for name in PROTECTED_GIT_FILES
+    }
+
+
+@pytest.mark.skipif(shutil.which("chflags") is None, reason="needs macOS chflags")
+def test_wrapper_keeps_the_git_files_unwritable_under_any_name(
+    tmp_path: Path,
+) -> None:
+    """Docker Desktop shares the project into its VM, and a macOS disk ignores
+    case, so `.git/CONFIG` in the container reached the host's `.git/config`
+    through the writable `.git` mount, past the read-only file mount
+    (reproduced 2026-10-24). The agent here does what that file sharing does,
+    writing the host files themselves, by every route that worked: append,
+    rename over and unlink. Host git must write its config again afterwards."""
+
+    repo = tmp_path / "repo"
+    subprocess.run(["git", "init", "--quiet", str(repo)], check=True)
+    (repo / ".git/commondir").write_text(".\n")
+    (repo / ".git/config.worktree").write_text("")
+    before = _git_files(repo)
+    agent = (
+        "for f in " + " ".join(PROTECTED_GIT_FILES) + "; do "
+        "printf x >> .git/$f; "
+        "printf x > tmp-$f && mv tmp-$f .git/$f; "
+        "rm -f .git/$f; "
+        "done"
+    )
+
+    completed, _ = _run(tmp_path, cwd=repo, agent=agent)
+
+    assert completed.returncode == 0, completed.stderr
+    assert _git_files(repo) == before
+    written = subprocess.run(
+        ["git", "-C", str(repo), "config", "test.after", "1"], check=False
+    )
+    assert written.returncode == 0
+
+
+@pytest.mark.skipif(shutil.which("chflags") is None, reason="needs macOS chflags")
+def test_wrapper_releases_the_git_files_when_it_is_killed(tmp_path: Path) -> None:
+    """A SIGKILL skips the wrapper's own release after `docker run`, which
+    would leave host git unable to write its config until the next launch.
+    The watcher releases them once the container is gone."""
+
+    repo = tmp_path / "repo"
+    subprocess.run(["git", "init", "--quiet", str(repo)], check=True)
+
+    killed, _ = _run(tmp_path, cwd=repo, agent='kill -KILL "$(ps -o ppid= -p "$PPID")"')
+
+    assert killed.returncode == -signal.SIGKILL
+    # The watcher removes the container twice, five seconds apart.
+    for _ in range(150):
+        written = subprocess.run(
+            ["git", "-C", str(repo), "config", "test.after", "1"],
+            capture_output=True,
+            check=False,
+        )
+        if written.returncode == 0:
+            break
+        time.sleep(0.1)
+    assert written.returncode == 0, written.stderr
+
+
+@pytest.mark.parametrize("platform", ["Darwin", "Linux"])
+def test_wrapper_stops_on_macos_when_it_cannot_lock_the_git_files(
+    tmp_path: Path, platform: str
+) -> None:
+    """On macOS the wrapper must not start a session it cannot protect, say on
+    a disk without file flags. Linux needs no lock, since its kernel resolves
+    a case variant to the mount on a case-insensitive directory too, so a
+    Linux host runs without chflags."""
+
+    repo = tmp_path / "repo"
+    subprocess.run(["git", "init", "--quiet", str(repo)], check=True)
+    fakebin = tmp_path / "fakebin"
+    fakebin.mkdir()
+    (fakebin / "chflags").write_text("#!/bin/sh\nexit 1\n")
+    (fakebin / "chflags").chmod(0o755)
+
+    completed, invocations = _run(tmp_path, cwd=repo, uname=platform)
+
+    if platform == "Darwin":
+        assert completed.returncode == 2
+        assert "could not lock" in completed.stderr
+        assert "run" not in [argv[0] for argv in invocations]
+    else:
+        assert completed.returncode == 0, completed.stderr
+        _docker_run(invocations)
+
+
 def test_wrapper_refuses_a_non_regular_commondir(tmp_path: Path) -> None:
     """Writing the file would block on a FIFO and Docker cannot mount a
     directory as a file, so either is refused before the write."""

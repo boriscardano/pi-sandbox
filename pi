@@ -101,11 +101,20 @@ fi
 project=$(CDPATH= cd -- "$project" && pwd)
 
 # Refuse the mounts that would defeat the point: the whole disk, or a home
-# directory carrying ~/.ssh, ~/.aws and every other project.
-case "$project" in
+# directory carrying ~/.ssh, ~/.aws and every other project. Compare physical
+# paths, so a symlink, or another case of the name on a case-insensitive disk,
+# cannot hide it. `project` keeps the spelling the user launched from, because
+# the state volume is named after it. /bin/pwd asks the kernel, while the
+# builtin pwd -P of bash, which is /bin/sh on macOS, keeps the case it was given.
+physical=$(CDPATH= cd -- "$project" && /bin/pwd -P)
+home=${HOME%/}
+if [ -d "$home" ]; then
+    home=$(CDPATH= cd -- "$home" && /bin/pwd -P)
+fi
+case "$physical" in
     /) printf '%s\n' "refusing to mount the whole filesystem" >&2; exit 2 ;;
 esac
-if [ "$project" = "${HOME%/}" ] || case "${HOME%/}/" in "$project"/*) true ;; *) false ;; esac; then
+if [ "$physical" = "$home" ] || case "$home/" in "$physical"/*) true ;; *) false ;; esac; then
     printf '%s\n' "refusing to mount $project: it contains your home directory" >&2
     exit 2
 fi
@@ -114,8 +123,8 @@ fi
 # entrypoint.sh build the image every project runs in. Mounting the directory
 # that holds them would let the agent rewrite what the host runs at the next
 # launch anywhere. Compare physical paths, so a symlink cannot hide it.
-case "$(CDPATH= cd -- "$script_dir" && pwd -P)/" in
-    "$(CDPATH= cd -- "$project" && pwd -P)"/*)
+case "$(CDPATH= cd -- "$script_dir" && /bin/pwd -P)/" in
+    "$physical"/*)
         printf '%s\n' "refusing to mount $project: it contains this wrapper ($script_dir), which the agent could rewrite to run on your host at the next launch. Run a copy of the wrapper from outside the project" >&2
         exit 2
         ;;

@@ -888,6 +888,32 @@ def test_wrapper_refuses_a_second_path_to_the_protected_git_files(
             assert not any(argv[0] == "run" for argv in invocations), (relative, kind)
 
 
+def test_wrapper_refuses_a_symlinked_directory_under_the_git_paths(
+    tmp_path: Path,
+) -> None:
+    """A submodule's git directory, or its hooks, linked to a project
+    directory gives the agent a config and hooks the host's Git reads through
+    the submodule, writable in every later session. Its name is not one Git
+    reads a command from, so every symlink counts, not only those names."""
+
+    for index, relative in enumerate(
+        (".git/modules/x", ".git/modules/y/hooks", ".git/worktrees/wt")
+    ):
+        repo = tmp_path / f"repo-{index}"
+        repo.mkdir()
+        subprocess.run(["git", "init", "--quiet", str(repo)], check=True)
+        (repo / "evil").mkdir()
+        path = repo / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.symlink_to(repo / "evil")
+
+        completed, invocations = _run(tmp_path / f"run-{index}", cwd=repo)
+
+        assert completed.returncode == 2, relative
+        assert str(path) in completed.stderr, relative
+        assert not any(argv[0] == "run" for argv in invocations), relative
+
+
 def test_wrapper_prints_no_control_bytes_from_a_refused_name(
     tmp_path: Path,
 ) -> None:

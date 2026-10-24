@@ -310,15 +310,27 @@ ordinary file, and a `.git/commondir` that holds anything but `.`.
 
 Warned at exit, not prevented, when created or changed during the session:
 
-- a repository the agent made inside the project, such as `git init sub`, or a
-  root `.git` in a project that was not a repository at launch.
+- a repository the agent made inside the project, such as `git init sub`, a
+  bare one it created (a directory holding `HEAD`, `objects` and `refs`, so any
+  new file named `HEAD` is reported, though one already there is not), or a
+  root `.git` in a project that was not a repository at launch. Names match in
+  any case, since host Git on macOS opens `.GIT` and `head` too.
 - a planted rebase, merge or cherry-pick: `.git/rebase-merge`,
   `.git/rebase-apply`, `.git/sequencer`, `.git/MERGE_HEAD` or
   `.git/CHERRY_PICK_HEAD`.
 
 Host Git would run a command named in either. The wrapper only warns, and
 deletes nothing. Inspect a nested repository before running Git in it, and
-abort a planted operation rather than continuing it.
+abort a planted operation rather than continuing it. Setting
+`git config --global safe.bareRepository explicit` on the host also stops Git
+from using a bare repository it finds on its own, though Git then needs
+`--git-dir` inside a bare clone you made yourself.
+
+The wrapper resets the terminal before a warning, prints a `?` for every byte
+that is not printable ASCII in the part of a path under the project, and still
+reports what it found when part of the project is unreadable, so a name the
+agent chose cannot change or add to the warning, and the terminal is readable
+again when it prints.
 
 [docs/design.md](docs/design.md#protecting-git) explains why each of these is
 needed.
@@ -393,11 +405,16 @@ pane run` through that socket would execute on the host.
   wrote, some of it invisible to you. Do not let an agent with host tools act
   on it without you checking.
 - The container can see the project's host path, which includes your username.
-- Nested repositories, and the rebase, merge or cherry-pick state the agent
-  can plant in `.git`, are detected at exit, not prevented. The checks run
-  after `docker run` returns, so they do not run at all if the wrapper itself
-  is killed, and anything they find has already been written to your checkout.
-  They warn rather than fixing.
+- Nested repositories, and the rebase, merge or cherry-pick state the agent can
+  plant in `.git`, are warned about at exit, not prevented, and only in the
+  forms listed under [Git](#git). A repository already in the project at
+  launch, including one the agent moves or renames, is reported only when the
+  agent changes a `.git` entry, a `HEAD` file, or a `.git` config,
+  `config.worktree`, `commondir` or hook in it, so an edit in place to a bare
+  repository's `config` or a nested repository's `.git/modules/*/config` is
+  not. The checks run after `docker run` returns, so they do not run at all if
+  the wrapper itself is killed, and anything they find has already been written
+  to your checkout. They warn rather than fixing.
 - The script runs on your host for every project, and `Dockerfile.pi` and
   `entrypoint.sh` build the image every project runs in, so it refuses to
   mount a directory that holds them, even through a symlink. To work on
@@ -442,7 +459,11 @@ install build cache is left unused. It writes its findings to
 that uv picks Debian's Python 3.11 for a project that accepts it, syncs a
 Python project and fails if the state volume grows more than 30 MB, and
 records whether the container reaches a host service bound to 127.0.0.1 (it
-does on Docker Desktop). No API key and no model call.
+does on Docker Desktop). It plays a hostile session that leaves a bare
+repository, a nested one whose name holds escape sequences, an unreadable
+directory, and a terminal left drawing black on black, kills Pi, and checks
+the exit warning names both repositories, notes the incomplete check and is
+readable. No API key and no model call.
 `python3 e2e.py --storage` runs 30 sessions in turn and then 10 at once in one
 project, all writing the key, and checks that what pi-sandbox keeps on disk
 stays flat. It is not run in CI.

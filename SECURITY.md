@@ -33,7 +33,8 @@ The known limitations in the README are not vulnerabilities. In particular:
 - the agent can write escape sequences to the terminal it was launched from,
   including OSC 52 sequences that read the clipboard where the terminal allows
   it, and anything that reads the pane reads what it wrote
-- nested git metadata the agent creates is detected at exit, not prevented
+- nested git metadata the agent creates is only warned about at exit, in the
+  forms the README lists
 - a container escape defeats the boundary, and a container is not a virtual
   machine
 

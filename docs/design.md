@@ -207,10 +207,34 @@ A repository the agent creates inside the project is not covered by any mount.
 it, as it trusts every file the agent writes, and would run a command named
 there. The same holds for a root `.git` the agent creates in a project that was
 not a repository at launch, since nothing was mounted over it. The wrapper
-cannot prevent that, so it warns instead: when the container exits it looks
-for `.git` entries, `.git/config` files and `.git/hooks` entries under the
-project whose ctime is newer than a marker made before the container started,
-and prints what it found. It only warns, and deletes nothing.
+cannot prevent that, so it warns instead: when the container exits it looks for
+`.git` entries, `.git/config`, `config.worktree` and `commondir` files,
+`.git/hooks` entries and `HEAD` files under the project whose ctime is newer
+than a marker made before the container started, and prints what it found. It
+only warns, and deletes nothing. `HEAD` is there because host Git takes any
+directory holding `HEAD`, `objects` and `refs` for a bare repository, even
+without `.git` in its name. A `HEAD` file the agent writes is always reported,
+and one it made for a good reason costs only a warning. A repository it only
+moves or renames keeps its old `HEAD` and is not. The names match in any case,
+because macOS file systems ignore case by default and host Git there opens
+`.GIT` and `head` as well.
+
+The agent can also try to keep its metadata out of the warning, or make the
+warning unreadable. A directory it made unreadable makes find fail, but what
+find did print is still reported, followed by a note that the check is
+incomplete. Docker Desktop turns its mode 000 into 0600 on the host, which
+macOS find lists but silently does not descend into, so a directory without its
+search bit gets the same note. The names the agent chose reach the terminal
+through the warning, so the part of each under the project is printed with
+every byte that is not printable ASCII, a newline among them, as a `?`, and a
+name can neither erase the lines around it nor add one. The agent can also
+leave the terminal drawing black on black, concealed, in the alternate screen
+or with the default colours swapped, then kill Pi so its cleanup never runs.
+Before a warning on a terminal, the wrapper therefore sends DECSTR and SGR 0,
+leaves the alternate screen and synchronized output, turns wrapping back on,
+and restores the palette and default colours with OSC 104, 110 and 111. It
+sends them only before a warning, since they also undo colours the user set on
+purpose.
 
 A planted rebase, merge or cherry-pick is not prevented either. The agent can
 write `.git/rebase-merge/git-rebase-todo` with `exec` lines in it, or the files

@@ -52,6 +52,16 @@ Notes for agents and contributors changing this repo, from the security work on
   its IP 192.168.65.254 (2026-10-24). Docker has no flag that keeps the model
   API and blocks the host, so this is a documented limit, and SECURITY.md
   counts only reach through what pi-sandbox itself mounts, forwards or exposes.
+- macOS file systems ignore case, and host Git opens `.GIT` for `.git` and
+  `head` for `HEAD`, so any check of a Git name the agent can choose must
+  ignore case. Docker Desktop also resolves a case variant through a writable
+  parent mount: `/workspace/.git/CONFIG` reached the read-only-mounted
+  `.git/config` on the host (2026-10-24, file mounts only, `hooks` held).
+- Docker Desktop turns a mode 000 directory the agent makes into 0600 on the
+  host, and macOS find lists it but silently skips what is inside with status
+  0 (2026-10-24). A host-side scan must treat a directory without its search
+  bit as a failure. An agent tool shell can alias `find` to bfs,
+  which behaves differently, so test with `/usr/bin/find`.
 - Test security fixes end to end on real Docker, not only with the fake docker
   in `test_pi.py`, because the fake cannot show what a mount does. Keep its
   style: every behaviour gets a test proven to fail when the fix is reverted.

@@ -532,7 +532,10 @@ docker run \
 # write the project, so remove it before the checks below look at it.
 docker rm -f "$name" >/dev/null 2>&1 || true
 # The wrapper got here, so the watcher has nothing left to do. It ignores TERM.
+# Reaping it keeps bash, which is macOS /bin/sh, from printing `Killed: 9` and
+# the watcher's source on every exit.
 kill -KILL "$watcher" 2>/dev/null || true
+wait "$watcher" 2>/dev/null || true
 
 # Prune the project's own .git, but only when this launch protected it with a
 # mount, and look for nested git metadata the container created. Warn only,
@@ -553,18 +556,43 @@ git_prune=''
 if [ -n "${protected_git:-}" ]; then
     git_prune=$git_path/.git
 fi
-nested=''
-if ! found=$(find "$project" -path "$git_prune" -prune -o \
-    \( -name .git -o -path '*/.git/config' -o -path '*/.git/hooks/*' \) \
-    -cnewer "$marker" -print 2>/dev/null); then
-    printf '%s\n' "pi-sandbox: warning: the nested-git check could not run because find failed, so the project was not scanned for nested git metadata" >&2
-else
-    # A `git init sub` writes sub/.git, its config and a hooks/*.sample for
-    # every hook, so one repository printed fifteen lines. Keep the `.git`
-    # path once and drop what is under it, matching the last `/.git` so a
-    # project path that itself contains one still names the right repository.
-    nested=$(printf '%s\n' "$found" | sed 's#\(.*\)/\.git/.*#\1/.git#' | sort -u)
-fi
+# Host git also takes a directory holding a HEAD, objects and refs for a bare
+# repository, with no `.git` in its name, so a new HEAD file is reported too,
+# by the directory it is in. Git only takes a file or a symlink for HEAD.
+# macOS file systems ignore case by default, and host git there opens `.GIT`
+# and `head` as well, so the names match in any case. The prune stays exact,
+# since on a case-sensitive file system `.GIT` is not the protected root.
+#
+# `-H` follows the project path itself when it is a symlink, which find
+# otherwise does not enter. The agent chose the names, and an escape sequence
+# or a newline in one could erase the warning or add a line to it, so the part
+# of each under the project is printed with every byte that is not printable
+# ASCII as a `?`. A directory the agent made unreadable makes find fail, but
+# what it found elsewhere is still reported, with a note that the check is
+# incomplete. A directory without its search bit fails it too, through
+# `-exec false`, since macOS find skips what is inside one without an error,
+# and Docker Desktop turns the agent's mode 000 into 0600 on the host.
+find_failed=''
+# `$1` and `$p` belong to the `sh -c` script, so it stays single-quoted.
+# shellcheck disable=SC2016
+found=$(LC_ALL=C find -H "$project" -path "$git_prune" -prune -o \
+    -type d ! -perm -0100 -prune -exec false {} + -o \
+    \( -iname .git -o \( -iname HEAD ! -type d \) \
+    -o -ipath '*/.git/config' -o -ipath '*/.git/config.worktree' \
+    -o -ipath '*/.git/commondir' -o -ipath '*/.git/hooks/*' \) \
+    -cnewer "$marker" \
+    -exec sh -c 'root=$1; shift; for p do printf "%s\000" "${p#"$root"}"; done |
+        tr -c "[:print:]\000" "?" | tr "\000" "\n"' sh "$project" {} + \
+    2>/dev/null) || find_failed=1
+# Each name is now the part under the project, which is the user's own path
+# and is added back as it is when printed. A `git init sub` writes sub/.git,
+# its config and a hooks/*.sample for every hook, so one repository printed
+# fifteen lines. Keep the `.git` path once and drop what is under it. A HEAD
+# at the root collapses to an empty line, which prints as the project path, so
+# the warning below tests `$found`, not `$nested`.
+nested=$(printf '%s\n' "$found" \
+    | LC_ALL=C sed -e 's#\(.*/\.[Gg][Ii][Tt]\)/.*#\1#' -e 's#/[Hh][Ee][Aa][Dd]$##' \
+    | LC_ALL=C sort -u)
 # A rebase, merge or cherry-pick the container planted makes the host's Git
 # report an operation in progress, and `git rebase --continue` then runs the
 # `exec` lines the todo holds. The paths cannot be blocked, since an empty
@@ -579,10 +607,25 @@ for state in rebase-merge rebase-apply sequencer MERGE_HEAD CHERRY_PICK_HEAD; do
     fi
 done
 rm -f "$marker"
-if [ -n "$nested" ]; then
+# The agent can leave the terminal drawing black on black, concealed, in the
+# alternate screen or with the default colours swapped, and kill Pi so that
+# nothing undoes it. DECSTR and SGR 0 reset how text is drawn, the private
+# modes leave the alternate screen and synchronized output and turn wrapping
+# back on, and OSC 104, 110 and 111 restore the palette and the default
+# colours. Only before a warning, since they also undo colours the user set on
+# purpose.
+if [ -t 2 ] && [ -n "$found$find_failed$interrupted" ]; then
+    printf '\033[!p\033[m\033[?1047l\033[?2026l\033[?7h\033]104\007\033]110\007\033]111\007' >&2
+fi
+if [ -n "$found" ]; then
     printf '%s\n' "pi-sandbox: warning: the container left nested git metadata in the project:" >&2
-    printf '%s\n' "$nested" >&2
+    printf '%s\n' "$nested" | while IFS= read -r line; do
+        printf '%s%s\n' "$project" "$line"
+    done >&2
     printf '%s\n' "your host git trusts it and would run the commands it names, so inspect it before running git there" >&2
+fi
+if [ -n "$find_failed" ]; then
+    printf '%s\n' "pi-sandbox: warning: the nested-git check could not run in full because find failed or could not read part of the project, so it may hold nested git metadata not listed here" >&2
 fi
 if [ -n "$interrupted" ]; then
     printf '%s\n' "pi-sandbox: warning: the container left a git operation in progress:" >&2

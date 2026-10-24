@@ -7,7 +7,9 @@ not. It checks that a copy of the wrapper refuses the project it sits in,
 that uv still picks Debian's Python for a project that accepts it, syncs a
 Python project and checks that the state volume grows by little more than
 the venv, which the next session imports from offline, and records whether
-the container reaches a host service on 127.0.0.1.
+the container reaches a host service on 127.0.0.1. It plays a hostile session
+that tries to keep its git metadata out of the exit warnings or make them
+unreadable, and checks they still name it.
 Then it ends sessions every way one can end and checks that no container
 is left behind, and rebuilds the image for a new Pi release and checks that
 the build cache the old one left is pruned. No API key and no model call: Pi
@@ -164,6 +166,29 @@ def pinned_extensions() -> list[str]:
             specs = line.split("=", 1)[1].strip("'").split()
             return sorted(f"npm:{spec} {spec.rpartition('@')[2]}" for spec in specs)
     raise SystemExit("no packages= line in entrypoint.sh")
+
+
+# What a hostile agent leaves at exit to slip past the wrapper's report: a bare
+# repository with no `.git` in its name, a nested one under a name holding
+# escape sequences, a directory find cannot read, and the terminal drawing
+# black on black with the default colours swapped. Then it kills Pi, so Pi's
+# own cleanup never runs.
+PLANT = r"""
+cd /workspace
+mkdir -p src/objects src/refs
+printf 'ref: refs/heads/main\n' > src/head
+printf '[core]\n\tfsmonitor = true\n' > src/config
+d=$(printf 'sub\033[1A\033[2K')
+mkdir -p "$d/.git" && touch "$d/.git/config"
+# Host find cannot read locked/x: on Linux it cannot read locked at all, and
+# Docker Desktop lists locked but not what is inside it.
+mkdir -p locked/x && chmod 000 locked
+# docker exec has no terminal, so pts/0 is the one docker run gave Pi.
+printf '\033[30;40m\033[8m\033]10;#010203\007\033]11;#010203\007' > /dev/pts/0
+sleep 1
+kill -KILL -1
+"""
+RESETS = [b"\033[!p\033[m", b"\033]104\007", b"\033]110\007", b"\033]111\007"]
 
 
 def docker(*args: str, check: bool = False) -> str:
@@ -607,6 +632,8 @@ def checks(lines: list[str]) -> bool:
         failed |= calls != "--version"
         quit_pi(session)
 
+        failed |= exit_report(project, lines)
+
         lines.append("")
         lines.append("exit path -> container left behind")
         for name, end_session in [
@@ -682,6 +709,49 @@ def checks(lines: list[str]) -> bool:
         )
         failed |= version in ("", OLDER_PI) or kept or bool(left)
     return failed
+
+
+def exit_report(project: Path, lines: list[str]) -> bool:
+    """The exit warnings are the only control on nested git metadata, so the
+    agent must not be able to keep one out of them or make them unreadable."""
+
+    session = start(project)
+    subprocess.run(
+        ["docker", "exec", session.container, "sh", "-c", PLANT],
+        capture_output=True,
+        check=False,
+    )
+    try:
+        finished = wrapper_finished(session)
+        session.read(1)
+        session.end()
+    finally:
+        with contextlib.suppress(FileNotFoundError):
+            (project / "locked").chmod(0o755)
+    out = session.output
+    hidden = out.rfind(b"\033]11;#010203\007")
+    warning = out.find(b"pi-sandbox: warning:", max(hidden, 0))
+    report = out[warning:] if warning >= 0 else b""
+    results = {
+        "wrapper finished": finished,
+        "terminal reset after the agent's last write": hidden >= 0
+        and warning > hidden
+        and all(reset in out[hidden:warning] for reset in RESETS),
+        "bare repository src named": f"{project}/src\r\n".encode() in report,
+        "escaped nested name named": f"{project}/sub?[1A?[2K/.git".encode() in report,
+        "no escape byte in the warnings": b"\033" not in report,
+        "unreadable directory noted": b"nested-git check could not run" in report,
+        # Only bash, macOS /bin/sh, prints one, so this means nothing on dash.
+        "no job notice": b"Killed" not in out,
+    }
+    lines.append("")
+    lines.append("exit report after a hostile session:")
+    lines += [f"  {name}: {ok}" for name, ok in results.items()]
+    if not all(results.values()):
+        lines.append(
+            f"  FAIL, output after the agent's write:\n{out[max(hidden, 0) :]!r}"
+        )
+    return not all(results.values())
 
 
 def storage_figures(volume: str, image: str) -> dict[str, str]:

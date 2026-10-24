@@ -546,6 +546,10 @@ def checks(lines: list[str]) -> bool:
         if downgrade.returncode:
             failed = True
             lines.append(f"    FAIL: {DOWNGRADE}\n{downgrade.stdout}{downgrade.stderr}")
+        installed = docker("exec", session.container, "sh", "-c", INSTALLED)
+        downgraded = "npm:pi-background-tasks@2.6.9 2.6.9" in installed.splitlines()
+        lines.append(f"  {DOWNGRADE} took: {downgraded}")
+        failed |= not downgraded
 
         before, after, *contents = docker(
             "exec", session.container, "sh", "-c", UV_SYNC, check=True

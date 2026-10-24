@@ -288,6 +288,18 @@ class Session:
             return False
         return True
 
+    def up(self) -> bool:
+        """Pi's footer names the working directory and its branch once its
+        interface is up, which the build log does not. Outside a repository
+        there is no branch, but Pi has set the window title by then."""
+
+        return b"/workspace (" in self.output or PI_TITLE in self.output
+
+    def exited(self) -> bool:
+        """The wrapper has gone, and with it the pane's foreground job."""
+
+        return time.time() - self.started > 3 and not children(self.shell)
+
     def type(self, keys: bytes) -> None:
         os.write(self.fd, keys)
 
@@ -317,10 +329,8 @@ class Session:
 
 
 def wait_ready(sessions: list[Session]) -> None:
-    """Pi's footer names the working directory and its branch once its
-    interface is up, which the build log does not. Outside a repository there
-    is no branch, but Pi has set the window title by then. Every terminal is
-    read meanwhile, so no session stalls writing to one nobody reads."""
+    """Wait until Pi is up in every session. Every terminal is read
+    meanwhile, so no session stalls writing to one nobody reads."""
 
     end = time.time() + READY_TIMEOUT
     pending = list(sessions)
@@ -337,7 +347,7 @@ def wait_ready(sessions: list[Session]) -> None:
                     raise RuntimeError(f"the wrapper exited at once:\n{tail}")
             elif not session.alive():
                 raise RuntimeError(f"the wrapper exited before Pi started:\n{tail}")
-            elif b"/workspace (" in session.output or PI_TITLE in session.output:
+            elif session.up():
                 session.container = find_container(session.project, session.pid)
                 if session.container:
                     pending.remove(session)
@@ -532,19 +542,19 @@ def refused(project: Path) -> str:
     end = time.time() + 60
     while time.time() < end:
         session.read(0.5)
-        if time.time() - session.started > 3 and not children(session.shell):
+        if session.exited():
             break
     session.end()
     return session.output.decode(errors="replace")
 
 
 # Run by `docker run` as the image's user, with the mounts the wrapper gives
-# a hook. The hook is a hard link to tools/x. Prints the hook as the
-# container sees it after writing tools/x, then whether the read-only path
-# itself took a write.
+# a hook. The hook is a hard link to x. Prints the hook as the container
+# sees it after writing x, then whether the read-only path itself took a
+# write.
 HARD_LINK_PROBE = r"""
 cd /workspace
-printf 'changed\n' > tools/x
+printf 'changed\n' > x
 cat .git/hooks/post-checkout
 if printf x >> .git/hooks/post-checkout 2>/dev/null; then echo WRITABLE; else echo readonly; fi
 """
@@ -555,23 +565,17 @@ if printf x >> .git/hooks/post-checkout 2>/dev/null; then echo WRITABLE; else ec
 SWAP_GIT = "cd /workspace; while :; do rm -rf .git; mkdir .git; rm -rf .git; ln -s {} .git; done"
 
 
-def refusals(lines: list[str]) -> bool:
-    """A file under the read-only `.git` paths with a second hard link is
-    refused, after showing on this Docker that the read-only mount does not
-    stop a write through the other link. A second launch in a project whose
-    session is still running is refused, while that session's agent swaps
-    `.git` for a symlink to a host directory."""
+def refusals(lines: list[str], image: str) -> bool:
+    """A hook hard-linked to a project file, and a second launch while a
+    session runs, are refused."""
 
     failed = False
     lines.append("")
     with throwaway_project() as project:
-        session = start(project)
-        image = docker("inspect", "--format", "{{.Config.Image}}", session.container)
-        quit_pi(session)
-        (project / "tools").mkdir()
         hook = project / ".git/hooks/post-checkout"
+        hook.parent.mkdir(exist_ok=True)
         hook.write_text("original\n")
-        os.link(hook, project / "tools/x")
+        os.link(hook, project / "x")
         seen = docker(
             "run",
             "--rm",
@@ -590,6 +594,9 @@ def refusals(lines: list[str]) -> bool:
             "a hook hard-linked to a project file, behind a read-only mount: "
             f"container sees {seen}, host hook now {hook.read_text()!r}"
         )
+        # The reason the wrapper refuses such a link: should Docker stop
+        # writing through it, this fails rather than leave the reason stale.
+        failed |= seen != ["changed", "readonly"] or hook.read_text() != "changed\n"
         output = refused(project)
         lines.append(f"  launch refused it: {'hard link' in output}")
         failed |= "hard link" not in output
@@ -810,7 +817,7 @@ def checks(lines: list[str]) -> bool:
             f"old image kept {kept}, Pi install build cache left unused {len(left)}"
         )
         failed |= version in ("", OLDER_PI) or kept or bool(left)
-    failed |= refusals(lines)
+    failed |= refusals(lines, image)
     return failed
 
 
@@ -912,17 +919,10 @@ def storage(lines: list[str]) -> bool:
         # build.
         launched = [Session(project) for _ in range(10)]
         end = time.time() + READY_TIMEOUT
-        while time.time() < end and not all(
-            b"/workspace (" in s.output
-            or PI_TITLE in s.output
-            or (time.time() - s.started > 3 and not children(s.shell))
-            for s in launched
-        ):
+        while time.time() < end and not all(s.up() or s.exited() for s in launched):
             for session in launched:
                 session.read(0.05)
-        sessions = [
-            s for s in launched if b"/workspace (" in s.output or PI_TITLE in s.output
-        ]
+        sessions = [s for s in launched if s.up()]
         refused = [s for s in launched if s not in sessions]
         lines.append(
             f"  10 launches at once: {len(sessions)} started, "

@@ -303,16 +303,13 @@ if [ "$image_exists" -eq 1 ] && [ -z "$want_version" ]; then
     printf '%s\n' "pi-sandbox: could not check the newest Pi, using the existing image" >&2
 fi
 
-# Another session's container can change the project while this launch
-# checks it, so the checks below must come after every such container is
-# gone. In a project that was not a repository when that session started,
-# nothing is mounted over `.git`, and its agent can turn `.git` into a
-# symlink to a host directory a moment after the checks passed, which the
-# mkdir and the mounts below then follow. That container can be a live
-# session's, or one whose wrapper was SIGKILLed with its watcher. So the
-# dead sessions' containers are removed and a live one of this project
-# refuses the launch, here, after the lookup and the build, so the checks and
-# `docker run` follow at once.
+# The checks below are only good while no other container can write the
+# project: one where `.git` is not protected can turn it into a symlink to a
+# host directory a moment after they passed, and the mkdir and the mounts
+# would follow it. So first remove the containers dead sessions left, and
+# refuse while a session of this project, or of a directory above it, which
+# mounts this one whole, still runs. Here, after the lookup and the build, so
+# the checks and `docker run` follow at once. docs/design.md has the details.
 #
 # The name is the project's tag, where this wrapper runs and its pid. A pid
 # means something only where it was read, so where it runs, the machine, the
@@ -336,8 +333,9 @@ docker rm -f "$name" >/dev/null 2>&1 || true
 # Remove every container from here whose wrapper, the pid at the end of its
 # name, no longer runs. A reused pid can only keep a dead session's container,
 # never remove a live one. A `ps` that cannot see this wrapper either would
-# call every session gone, so then nothing is removed and a container of this
-# project counts as live. A listing that failed could have hidden one.
+# call every session gone, so then nothing is removed and every container
+# counts as live, as does one that would not go. A listing that failed could
+# have hidden one.
 if ! containers=$(docker ps -a --filter label=pi-sandbox=1 --format '{{.Names}}' 2>/dev/null); then
     printf '%s\n' "refusing to run: could not list the pi-sandbox containers, so another session of $project may still be running" >&2
     exit 2
@@ -346,6 +344,15 @@ ps_works=''
 if ps -p $$ >/dev/null 2>&1; then
     ps_works=1
 fi
+# The tags of this project and of every directory above it, as a session
+# there would have named its container.
+tags=' '
+dir=$project
+while :; do
+    tags="$tags$(printf '%s' "$dir" | "$hash_cmd" | cut -c1-8) "
+    [ "$dir" != / ] || break
+    dir=$(dirname -- "$dir")
+done
 for stale in $containers; do
     case "$stale" in
         pi-sandbox-*-"$origin"-*) ;;
@@ -354,13 +361,14 @@ for stale in $containers; do
     case "${stale##*-}" in
         '' | *[!0-9]*) continue ;;
     esac
-    if [ -n "$ps_works" ] && ! ps -p "${stale##*-}" >/dev/null 2>&1; then
-        docker rm -f "$stale" >/dev/null 2>&1 || true
+    if [ -n "$ps_works" ] && ! ps -p "${stale##*-}" >/dev/null 2>&1 \
+        && docker rm -f "$stale" >/dev/null 2>&1; then
         continue
     fi
-    case "$stale" in
-        pi-sandbox-"$project_tag"-"$origin"-*)
-            printf '%s\n' "refusing to run: another session of $project is still running in container $stale, and its agent could change the project while this launch checks it, so end that session first" >&2
+    tag=${stale#pi-sandbox-}
+    case "$tags" in
+        *" ${tag%%-*} "*)
+            printf '%s\n' "refusing to run: a session of $project or a directory above it is still running in container $stale, and its agent could change the project while this launch checks it, so end that session first, or if none is open, remove the container with: docker rm -f $stale" >&2
             exit 2
             ;;
     esac
@@ -379,18 +387,24 @@ for link in .git .git/config .git/hooks .git/modules .git/worktrees .git/config.
     fi
 done
 
-# A read-only mount protects a path, not the file behind it. In a session
-# where `.git` was not protected, because the project was not a repository
-# yet or `.git` was a file, the agent can hard-link a hook or config to a
-# project file and rewrite it through that file in every later session, with
-# the read-only mounts below in place (shown on Docker by e2e.py). Inside the
-# mounts it cannot make a new link, since they are read-only and a link
-# across mounts fails, so refuse a file with a second link there. The objects
-# are left alone: a local clone hard-links them, and they name no command.
+# A read-only mount protects a path, not the file behind it. A hook or config
+# that is a hard link or a symlink to a project file, which the agent can
+# make while `.git` is not protected, stays writable through that file in
+# every later session (shown on Docker by e2e.py). So refuse one under the
+# read-only paths. Only the files Git reads a command from count: a local
+# clone hard-links the objects, a submodule's too. The names are the agent's,
+# so control bytes in them are replaced before they reach the terminal.
 for path in config config.worktree commondir hooks modules worktrees; do
     [ -e "$project/.git/$path" ] || continue
-    if ! linked=$(find "$project/.git/$path" -type f -links +1 -print) || [ -n "$linked" ]; then
-        printf '%s\n' "refusing to run: a file under $project/.git/$path has another hard link, through which the agent could rewrite what your host git runs, so replace it with a copy: $linked" >&2
+    if ! linked=$(find "$project/.git/$path" \
+        \( -name config -o -name config.worktree -o -name commondir -o -path '*/hooks/*' \) \
+        \( -type l -o -type f -links +1 \) -print); then
+        printf '%s\n' "refusing to run: could not check $project/.git/$path for links, so make it readable" >&2
+        exit 2
+    fi
+    if [ -n "$linked" ]; then
+        printf '%s\n' "refusing to run: these are a symlink or a hard link to another file, through which the agent could rewrite what your host git runs, so replace each with a copy:" >&2
+        printf '%s\n' "$linked" | LC_ALL=C tr -c '[:print:]\n' '?' >&2
         exit 2
     fi
 done
@@ -523,10 +537,10 @@ marker=$(mktemp)
 # watcher removes it once this wrapper is gone. The watcher ignores the
 # signals that end the wrapper, a closed pane's hangup among them. It removes
 # the container twice, because a client orphaned in its first second can
-# still be creating it, and the sweep below catches one that takes longer. It
-# is in the wrapper's process group, so a SIGKILL to the whole group, which
-# cannot be trapped, takes it too and leaves the container running until the
-# next launch, which removes it before its checks.
+# still be creating it, and the next launch's sweep catches one that takes
+# longer. It is in the wrapper's process group, so a SIGKILL to the whole
+# group, which cannot be trapped, takes it too and leaves the container
+# running until the next launch, which removes it before its checks.
 (
     trap '' HUP INT TERM
     while kill -0 $$ 2>/dev/null; do

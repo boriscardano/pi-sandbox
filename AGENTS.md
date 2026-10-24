@@ -10,10 +10,6 @@ Notes for agents and contributors changing this repo, from the security work on
 - For E2E verification, do not pick the simplest scenario that could pass. Pick a medium-to-hard one.
 - Tautological tests (they restate the implementation or only exercise their own mocks) and change-detector tests (they fail on any refactor with no behavior change) are harmful. Do not write them. When adding tests, check that none are tautological or self-testing.
 - Do not add a regression test for a bug fix unless it closes a real gap in behavior testing.
-- `e2e.py` knows Pi is up from its footer, `/workspace (<branch>)`, which only
-  a repository shows. Outside one it waits for Pi's window title instead:
-  without that a session in a plain directory hung to the 15-minute timeout
-  (2026-10-24).
 
 ## Security notes
 
@@ -31,18 +27,18 @@ Notes for agents and contributors changing this repo, from the security work on
   `.\n\0`, since the shell drops NUL bytes and Git does not). The two-byte
   limit was then checked against every file of one or two bytes: only four
   pass, and host Git resolves all four to the repository's own `.git`.
-  A hard link cannot get around these read-only file mounts: `ln` from one to
-  the writable project fails with `Invalid cross-device link` (checked on
-  Docker Desktop, 2026-09-23).
-- A read-only mount protects a path, not the inode. On Docker Desktop
-  (2026-10-24) a write to a project file that is a hard link of
-  `.git/hooks/post-checkout` changed the host hook while the hooks mount was
-  read-only, so the wrapper refuses a second link under the read-only paths.
+  A read-only mount protects a path, not the inode. A link cannot be made
+  from inside one: `ln` to the writable project fails with `Invalid
+  cross-device link` (Docker Desktop, 2026-09-23). But one made while `.git`
+  was unprotected writes straight through: a project file hard-linked to
+  `.git/hooks/post-checkout` changed the host hook under the read-only mount
+  (Docker Desktop, 2026-10-24). So a symlink or second link to a config or
+  hook there is refused.
 - A check of the project is only good while no container can write it.
-  Another session's container, live or left by a SIGKILLed wrapper, could
-  swap `.git` for a symlink between the checks and `docker run`. So the
-  stale sweep runs before the checks and a live session of the same project
-  refuses the launch: one session per project.
+  Another session's container, live or left by a SIGKILLed wrapper, of this
+  project or of a directory above it, could swap `.git` for a symlink between
+  the checks and `docker run`. So the stale sweep runs before the checks and
+  such a live session refuses the launch: one session per project.
 - Never follow a project path the agent could have planted. Symlinks at the
   mounted `.git` paths are refused, because a planted `.git` symlink made a
   later launch mount a host directory read-write (round 3).

@@ -305,15 +305,16 @@ so `git push` fails inside the sandbox by design. Push from the host after
 reviewing the diff.
 
 The wrapper refuses to start on a symlink at `.git` or at any of the
-read-only paths, a file under them with a second hard link, a
-`.git/config.worktree` or `.git/commondir` that is not an ordinary file, and a
-`.git/commondir` that holds anything but `.`. Replace a hard-linked hook with a
-copy.
+read-only paths, a config or hook under them that is a symlink or has a second
+hard link, a `.git/config.worktree` or `.git/commondir` that is not an ordinary
+file, and a `.git/commondir` that holds anything but `.`. Replace a symlinked
+or hard-linked hook with a copy, including one you linked to a script in the
+repository yourself, and one a deduplicating backup or `cp -al` linked.
 
-It also refuses to start while another session of the same project is still
-running, since that session's agent could change the project while the new
-launch checks it. Run a second session in another worktree, which is a project
-of its own.
+It also refuses to start while another session of the same project, or of a
+directory above it, is still running, since that session's agent could change
+the project while the new launch checks it. Run a second session in another
+worktree outside the project, which is a project of its own.
 
 Warned at exit, not prevented, when created or changed during the session:
 

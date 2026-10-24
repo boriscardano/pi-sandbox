@@ -51,9 +51,7 @@ The watcher is in the wrapper's process group, so a SIGKILL to the whole group
 takes it too and leaves the container running until the next launch, in any
 project: where `ps` works, every launch removes the pi-sandbox containers whose
 wrapper, named by the process id at the end of the container's name, no longer
-runs. It does so before it checks the project, and a container of its own
-project whose wrapper still runs makes it refuse to start, as
-[one session per project](#one-session-per-project) explains. The name also carries a hash of where the wrapper runs: the machine's id
+runs. The name also carries a hash of where the wrapper runs: the machine's id
 (Linux's machine-id, macOS's kern.uuid), the user and the process namespace.
 Only containers from the same place are removed by name. So a session
 started by another user, from a container with its own process namespace, or
@@ -192,38 +190,51 @@ would all follow it outside the project. A `.git/config.worktree` or
 `.git/commondir` that is not an ordinary file, such as a FIFO, is refused for
 the same reason, since creating or mounting it as a file would block or fail.
 
-### Hard links
+### Hard links and symlinks inside
 
 A read-only mount protects a path, not the file behind it. In a session where
 `.git` was not protected, because the project was not a repository yet or
 `.git` was a file, the agent can make `.git/hooks/post-checkout` or
-`.git/config` a hard link to an ordinary project file, and in every later
-session rewrite the hook through that file while the read-only mounts are in
-place. `e2e.py` shows this on real Docker. Inside a protected session it cannot
-make a new link, because the mounts are read-only and a link across mounts
-fails with `Invalid cross-device link`. So the wrapper refuses to start when
-any file under the six read-only paths has a second link. The objects are not
-checked: a clone of a local path hard-links them, and they name no command.
+`.git/config` a hard link or a symlink to an ordinary project file, and in
+every later session rewrite the hook through that file while the read-only
+mounts are in place. `e2e.py` shows this for a hard link on real Docker. Inside
+a protected session it cannot make a new one, because the mounts are read-only
+and a link across mounts fails with `Invalid cross-device link`. So the wrapper
+refuses to start when a config, `config.worktree`, `commondir` or hook under
+the six read-only paths is a symlink or has a second link, and prints the
+names with control bytes replaced, since the agent chose them. Other files are
+not checked: a clone of a local path hard-links the objects, a submodule's
+under `.git/modules` too, and they name no command.
+
+This does not look at what a config says. A `core.hooksPath`, an `include.path`
+or a `core.fsmonitor` that names a file in the work tree gives the agent the
+same reach, and the wrapper does not read config values.
 
 ### One session per project
 
 Every check above looks at the project once, before `docker run`, and another
-session's container can still change it after that look. In a project that was
-not a repository when that session started, nothing is mounted over `.git`, so
-its agent can turn `.git` into a symlink to a host directory a moment after the
-checks passed, and the `mkdir` and the mounts then follow it. So the wrapper
-first removes the containers whose wrapper is gone, as described under
-[removing the container](#removing-the-container), and refuses to start while
-a container of the same project from the same place is still running. It does
-this after the image lookup and build, so the checks and `docker run` follow at
-once. A second session in one project is therefore refused. Use another
-worktree, which is a project of its own. When `ps` cannot see processes, or
-the container listing fails, a container of the project counts as live.
+session's container can still change it after that look. Where nothing is
+mounted over this project's `.git`, in a session of the same project that
+started before it was a repository or in a session of any directory above it,
+that container's agent can turn `.git` into a symlink to a host directory a
+moment after the checks passed, and the `mkdir` and the mounts then follow it.
+So the wrapper first removes the containers whose wrapper is gone, and refuses
+to start while a container from the same place still runs for this project or
+for a directory above it, found by the project hash in its name. A second
+session in one project is therefore refused, and so is a session of a
+repository inside a project whose session runs. A session of a directory below
+does not count, since it cannot reach this `.git`. When `ps` cannot see
+processes, or a dead session's container will not go, the container counts as
+live, and when the container listing fails the launch is refused. A wrapper's
+process id that another process has since taken also looks live, so the
+message names the container to remove.
 
 Two launches of one project in the same instant can both pass, since neither
-container exists yet. What is left between the check and `docker run` is a
-few local commands, while Pi takes seconds to start in the other container,
-so its agent cannot act in that window. That is reasoned, not measured.
+container exists yet. The window lasts until the daemon has set up the other
+container's mounts, a fraction of a second, while Pi takes seconds to start in
+it. That is reasoned, not measured. Projects are told apart by path, so the
+same directory reached through a symlink or another letter case on a
+case-insensitive disk counts as another project.
 
 ### Linked worktrees and submodules
 

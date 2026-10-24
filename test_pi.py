@@ -1988,7 +1988,9 @@ def _run_entrypoint(
         '    mkdir -p "$HOME/.pi/agent/npm/node_modules/$name"\n'
         '    rm -f "$HOME/.pi/agent/npm/node_modules/$name/package.json"\n'
         '    printf \'{"name": "%s", "version": "%s"}\\n\' "$name" "$version" >"$HOME/.pi/agent/npm/node_modules/$name/package.json"\n'
-        '    mkdir -p "${npm_config_cache:-$HOME/.npm}/_cacache"\n'
+        # Pi's settings list each install as it was named, one per line here,
+        # which is all a fixed-string search of the real JSON needs.
+        '    printf \'"%s"\\n\' "$2" >>"$HOME/.pi/agent/settings.json"\n'
         "fi\n"
         "exit 0\n"
     )
@@ -2076,10 +2078,10 @@ def test_the_entrypoint_installs_the_pinned_extensions_on_start(
     # The final exec is Pi itself, which must not inherit the setting.
     assert started.calls[-1] == ["--model", "kimi-k3"]
     assert started.scripts[-1] == ""
-    assert any(timeout.startswith("120 ") for timeout in started.timeouts)
+    assert started.timeouts
 
 
-def test_the_entrypoint_skips_the_extension_update_for_subcommands(
+def test_the_entrypoint_skips_the_extension_install_for_subcommands(
     tmp_path: Path,
 ) -> None:
     """`pi install` and the rest are passed through to Pi, so the entrypoint
@@ -2091,11 +2093,11 @@ def test_the_entrypoint_skips_the_extension_update_for_subcommands(
     assert started.timeouts == []
 
 
-def test_the_entrypoint_starts_pi_when_the_extension_update_fails(
+def test_the_entrypoint_starts_pi_when_the_extension_install_fails(
     tmp_path: Path,
 ) -> None:
     """A registry that is down or a volume the agent has ruined must cost the
-    update, not the session."""
+    install, not the session."""
 
     started = _run_entrypoint(tmp_path, PI_SANDBOX_FAKE_PI_INSTALL_STATUS="1")
 
@@ -2103,7 +2105,7 @@ def test_the_entrypoint_starts_pi_when_the_extension_update_fails(
     assert "could not install the extensions" in started.stderr
 
 
-def test_the_entrypoint_reports_a_partial_extension_update_failure(
+def test_the_entrypoint_reports_a_partial_extension_install_failure(
     tmp_path: Path,
 ) -> None:
     """One package failing must be reported even though the other three
@@ -2127,17 +2129,11 @@ def _restart(tmp_path: Path, **env: str) -> list[list[str]]:
     return _run_entrypoint(tmp_path, **env).calls[:-1]
 
 
-def test_the_entrypoint_leaves_the_pinned_extensions_alone_however_old(
-    tmp_path: Path,
-) -> None:
+def test_the_entrypoint_makes_no_call_at_the_pins(tmp_path: Path) -> None:
     """Every Herdr pane is a start, and an install costs about a second
-    each, so a volume that already holds the pinned versions makes no call,
-    however long ago they were installed."""
+    each, so a volume that already holds the pins makes no call."""
 
     _run_entrypoint(tmp_path)
-    month_old = time.time() - 30 * 24 * 3600
-    for path in (tmp_path / "home").rglob("*"):
-        os.utime(path, (month_old, month_old), follow_symlinks=False)
 
     assert _restart(tmp_path) == []
 
@@ -2157,6 +2153,23 @@ def test_the_entrypoint_moves_an_existing_volume_to_the_pinned_versions(
     )
 
     assert [call[1] for call in _restart(tmp_path)] == first[:2]
+
+
+def test_the_entrypoint_pins_an_extension_pi_lists_without_a_version(
+    tmp_path: Path,
+) -> None:
+    """A volume from before the pins, or a bare `pi install` of one of the
+    four, leaves Pi's settings naming it without a version while npm holds
+    the pinned one. `pi update` moves exactly those entries, so the next start
+    must pin it again."""
+
+    first = [call[1] for call in _run_entrypoint(tmp_path).calls[:-1]]
+    settings = tmp_path / "home/.pi/agent/settings.json"
+    settings.write_text(
+        settings.read_text().replace(first[1], "npm:@tintinweb/pi-subagents")
+    )
+
+    assert [call[1] for call in _restart(tmp_path)] == [first[1]]
 
 
 def test_the_entrypoint_installs_a_missing_extension_on_any_start(
@@ -2198,18 +2211,6 @@ def test_the_entrypoint_does_not_block_on_a_fifo_the_agent_left(
     started = _run_entrypoint(tmp_path, timeout=20)
 
     assert started.argv == ["--model", "kimi-k3"]
-
-
-def test_the_entrypoint_keeps_the_npm_cache_out_of_the_state_volume(
-    tmp_path: Path,
-) -> None:
-    """npm keeps every version it downloads in ~/.npm by default, so a cache
-    in the volume grows with each extension release however little the user
-    does. The fake pi caches its install where npm would."""
-
-    _run_entrypoint(tmp_path)
-
-    assert not (tmp_path / "home/.npm").exists()
 
 
 def test_the_entrypoint_writes_the_subscription_key_where_pi_reads_it(

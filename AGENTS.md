@@ -47,6 +47,11 @@ Notes for agents and contributors changing this repo, from the security work on
   runs as, and Pi's own stdout is reachable through `/proc`, so a tool wrote
   an OSC title that host Herdr showed (2026-09-22). Only a host-side filter
   between docker and the terminal could stop it, so it is a documented limit.
+- The container reaches the host's network. On Docker Desktop a host server
+  bound to 127.0.0.1 answered a container through `host.docker.internal` and
+  its IP 192.168.65.254 (2026-10-24). Docker has no flag that keeps the model
+  API and blocks the host, so this is a documented limit, and SECURITY.md
+  counts only reach through what pi-sandbox itself mounts, forwards or exposes.
 - Test security fixes end to end on real Docker, not only with the fake docker
   in `test_pi.py`, because the fake cannot show what a mount does. Keep its
   style: every behaviour gets a test proven to fail when the fix is reverted.

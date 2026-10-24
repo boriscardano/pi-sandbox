@@ -9,7 +9,8 @@ boundary. For example:
 - reading or writing a host file outside the project mounted at `/workspace`
 - running a command on the host, including by changing the wrapper,
   `Dockerfile.pi` or `entrypoint.sh` that a later launch runs
-- reaching a host socket, including the Docker socket or a host Herdr socket
+- reaching a host socket or service through anything pi-sandbox mounts,
+  forwards or exposes, such as the Docker socket or a host Herdr socket
 - obtaining a credential the README says the container does not receive, such
   as a host Pi OAuth token or any key other than the ones the README lists
 
@@ -20,10 +21,18 @@ The known limitations in the README are not vulnerabilities. In particular:
 - the API keys forwarded into the container are readable there, and outbound
   network is open, so anything in the container can use or send them
 - the mounted project is fully readable and writable by the agent
+- the container can reach network services on the host the way any container
+  can: on Docker Desktop including ones bound to localhost, cloud metadata on
+  a VM, and Docker's TCP socket if you enable it
+- code a session leaves in the project's state volume runs in later sessions
+  of that project, and a repository cloned at the same path gets that volume
 - the agent can leave files your host may later execute, such as a `Makefile`
   or an `.envrc`, or that your other coding agents trust, such as
-  `.claude/settings.json`
-- the agent can write escape sequences to the terminal it was launched from
+  `.claude/settings.json` or Pi's `.pi/` extensions
+- the agent can fill the host disk, and can see the project's host path
+- the agent can write escape sequences to the terminal it was launched from,
+  including OSC 52 sequences that read the clipboard where the terminal allows
+  it, and anything that reads the pane reads what it wrote
 - nested git metadata the agent creates is detected at exit, not prevented
 - a container escape defeats the boundary, and a container is not a virtual
   machine

@@ -1104,6 +1104,22 @@ def test_wrapper_does_not_report_a_directory_named_head(tmp_path: Path) -> None:
     assert "nested git metadata" not in completed.stderr
 
 
+def test_wrapper_warns_when_the_project_itself_becomes_a_bare_repository(
+    tmp_path: Path,
+) -> None:
+    """With no `.git` at launch nothing protects the root, and host git takes
+    the project itself for a bare repository once it holds HEAD, objects and
+    refs. Its HEAD is named by the project path."""
+
+    completed, _ = _run(tmp_path, agent="mkdir objects refs && touch HEAD")
+
+    lines = completed.stderr.splitlines()
+    start = lines.index(
+        "pi-sandbox: warning: the container left nested git metadata in the project:"
+    )
+    assert lines[start + 1] == str(tmp_path / "project")
+
+
 def test_wrapper_warns_about_git_metadata_named_in_another_case(
     tmp_path: Path,
 ) -> None:

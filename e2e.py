@@ -126,6 +126,27 @@ class Answer(http.server.BaseHTTPRequestHandler):
     def log_message(self, *args: object) -> None:
         pass
 
+# The extensions the volume holds, from Pi's settings and the version npm
+# installed, and a downgrade of one by hand, which the next start must undo.
+INSTALLED = r"""python3 -I -c 'import json, pathlib, re
+agent = pathlib.Path.home() / ".pi/agent"
+for spec in json.loads((agent / "settings.json").read_text())["packages"]:
+    name = re.sub(r"^npm:|@[0-9][^/]*$", "", spec)
+    package = agent / "npm/node_modules" / name / "package.json"
+    print(spec, json.loads(package.read_text())["version"])
+'"""
+DOWNGRADE = "pi install npm:pi-background-tasks@2.6.9 >/dev/null 2>&1"
+
+
+def pinned_extensions() -> list[str]:
+    """What the entrypoint pins, each as Pi's settings and npm should hold it."""
+
+    for line in (WRAPPER.parent / "entrypoint.sh").read_text().splitlines():
+        if line.strip().startswith("packages="):
+            specs = line.split("=", 1)[1].strip("'").split()
+            return [f"npm:{spec} {spec.rpartition('@')[2]}" for spec in specs]
+    raise SystemExit("no packages= line in entrypoint.sh")
+
 
 def docker(*args: str, check: bool = False) -> str:
     """docker's output. Pass check where a failed call reading as empty would
@@ -508,6 +529,15 @@ def checks(lines: list[str]) -> bool:
             f"  host service on 127.0.0.1, from the container: {reach or 'probe failed'}"
         )
 
+        pinned = pinned_extensions()
+        installed = docker("exec", session.container, "sh", "-c", INSTALLED)
+        lines.append("  extensions a fresh volume got:")
+        lines += [f"    {line}" for line in installed.splitlines()]
+        if installed.splitlines() != pinned:
+            failed = True
+            lines.append(f"    FAIL: expected {pinned}")
+        docker("exec", session.container, "sh", "-c", DOWNGRADE, check=True)
+
         before, after, *contents = docker(
             "exec", session.container, "sh", "-c", UV_SYNC, check=True
         ).splitlines()
@@ -534,6 +564,12 @@ def checks(lines: list[str]) -> bool:
             + (f"\n{reuse.stderr}" if reuse.returncode else "")
         )
         failed |= reuse.returncode != 0
+        installed = docker("exec", session.container, "sh", "-c", INSTALLED)
+        lines.append(
+            "  next start moved a hand downgrade back to the pins: "
+            f"{installed.splitlines() == pinned}"
+        )
+        failed |= installed.splitlines() != pinned
         quit_pi(session)
 
         lines.append("")

@@ -1170,6 +1170,49 @@ def test_wrapper_reports_a_git_beside_the_root_under_another_case(
     assert str(repo / ".GIT/sub/.git") in completed.stderr
 
 
+def test_wrapper_prints_the_project_path_as_it_is(tmp_path: Path) -> None:
+    """Only the part of a path the agent chose is escaped. The project path is
+    the user's own, so a letter outside ASCII or a `.git` in it prints as it
+    is and the warning still names the repository inside the project."""
+
+    repo = tmp_path / "Časopis/.git/proj"
+    repo.mkdir(parents=True)
+    subprocess.run(["git", "init", "--quiet", str(repo)], check=True)
+
+    completed, _ = _run(
+        tmp_path / "run",
+        cwd=repo,
+        agent="mkdir -p src/objects src/refs && touch src/HEAD",
+    )
+
+    assert f"{repo}/src\n" in completed.stderr
+
+
+def test_wrapper_warns_about_an_edit_to_a_nested_commondir_or_worktree_config(
+    tmp_path: Path,
+) -> None:
+    """Editing a file in place leaves its directory's ctime alone, and host
+    git follows a nested repository's commondir and reads its config.worktree
+    as it reads its config."""
+
+    project = tmp_path / "project"
+    (project / "a/.git").mkdir(parents=True)
+    (project / "b/.git").mkdir(parents=True)
+    (project / "a/.git/commondir").write_text(".\n")
+    (project / "b/.git/config.worktree").write_text("")
+
+    completed, _ = _run(
+        tmp_path,
+        agent=(
+            "printf '../../evil\\n' > a/.git/commondir && "
+            "printf '[core]\\n\\tfsmonitor = true\\n' > b/.git/config.worktree"
+        ),
+    )
+
+    assert str(project / "a/.git") in completed.stderr
+    assert str(project / "b/.git") in completed.stderr
+
+
 def test_wrapper_keeps_what_find_found_when_a_directory_is_unreadable(
     tmp_path: Path,
 ) -> None:

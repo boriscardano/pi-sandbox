@@ -260,7 +260,9 @@ that container's agent can turn `.git` into a symlink to a host directory a
 moment after the checks passed, and the `mkdir` and the mounts then follow it.
 So the wrapper first removes the containers whose wrapper is gone, and refuses
 to start while a container from the same place still runs for this project or
-for a directory above it, found by the project hash in its name. A second
+for a directory above it, found by the hash of the physical path in its name,
+so a symlink to either or another letter case on a case-insensitive disk does
+not get around it. A second
 session in one project is therefore refused, and so is a session of a
 repository inside a project whose session runs. A session of a directory below
 does not count, since it cannot reach this `.git`. When `ps` cannot see
@@ -274,9 +276,7 @@ exists yet: `e2e.py --storage` launched ten at once and all ten started
 (Docker Desktop, 2026-10-25). Each window lasts until the daemon has set up
 that launch's mounts, a fraction of a second, while Pi, and any extension an
 earlier session left in the shared state volume, takes seconds to start in
-the others. That the agents cannot act in time is reasoned, not measured. Projects are told apart by path, so the
-same directory reached through a symlink or another letter case on a
-case-insensitive disk counts as another project.
+the others. That the agents cannot act in time is reasoned, not measured.
 
 ### Linked worktrees and submodules
 

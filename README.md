@@ -498,15 +498,14 @@ directory, and a terminal left drawing black on black, kills Pi, and checks
 the exit warning names both repositories, notes the incomplete check and is
 readable. It shows that a read-only mount does not stop a write through a
 second hard link, and checks that the wrapper refuses a hook hard-linked to a
-project file, and a second launch in a project whose session is still running
-while that session's agent swaps `.git` for a symlink to a host directory. No
+project file, and a second launch in a project whose session is still running,
+from the project and from a symlink to it, while that session's agent swaps
+`.git` for a symlink to a host directory. No
 API key and no model call. `python3 e2e.py --storage` runs 30 sessions in turn
 and then launches 10 at once in one project, where launches in the same
 instant can all start, checks that any launch that did not start was refused
 as a second session, and checks that what pi-sandbox keeps on disk stays flat.
 It is not run in CI.
-not start was refused as a second session, and checks that what pi-sandbox
-keeps on disk stays flat. It is not run in CI.
 
 The tests in `test_pi.py` use a fake `docker` on `PATH`, so they neither build
 an image nor start a container. They assert the isolation properties: the expected mounts

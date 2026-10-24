@@ -104,7 +104,8 @@ project=$(CDPATH= cd -- "$project" && pwd)
 # directory carrying ~/.ssh, ~/.aws and every other project. Compare physical
 # paths, so a symlink or another case of the name cannot hide them, with
 # `env pwd -P`: bash, /bin/sh on macOS, keeps the case in its builtin.
-# `project` keeps the launch spelling, which names the state volume.
+# `project` keeps the launch spelling, which names the state volume, and the
+# physical path names the container, so a session is found under any spelling.
 physical=$(CDPATH= cd -- "$project" && env pwd -P)
 home=${HOME%/}
 if [ -d "$home" ]; then
@@ -328,7 +329,8 @@ cpus=$((cpus / 2))
 # mounts this one whole, still runs. Here, after the lookup, the build and
 # every other daemon query, so the checks and `docker run` follow at once. docs/design.md has the details.
 #
-# The name is the project's tag, where this wrapper runs and its pid. A pid
+# The name is the tag of the physical path, so a symlink or another case
+# cannot dodge the refusal, then where this wrapper runs and its pid. A pid
 # means something only where it was read, so where it runs, the machine, the
 # user and the pid namespace, is hashed into the name. Every removal by name
 # then only reaches containers started from here: another user, a container
@@ -343,7 +345,7 @@ origin=$(
         readlink /proc/self/ns/pid 2>/dev/null || true
     } | "$hash_cmd" | cut -c1-12
 )
-name=pi-sandbox-$project_tag-$origin-$$
+name=pi-sandbox-$(printf '%s' "$physical" | "$hash_cmd" | cut -c1-8)-$origin-$$
 # A dead session can have left a container under this launch's pid, which
 # would make `docker run --name` fail, and only this launch can hold it now.
 docker rm -f "$name" >/dev/null 2>&1 || true
@@ -364,7 +366,7 @@ fi
 # The tags of this project and of every directory above it, as a session
 # there would have named its container.
 tags=' '
-dir=$project
+dir=$physical
 while :; do
     tags="$tags$(printf '%s' "$dir" | "$hash_cmd" | cut -c1-8) "
     [ "$dir" != / ] || break

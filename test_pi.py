@@ -959,7 +959,8 @@ def test_wrapper_runs_a_repository_whose_objects_are_hard_links(
     tmp_path: Path,
 ) -> None:
     """`git clone` of a local path hard-links the objects, a submodule's under
-    .git/modules too. They name no command, so they do not count."""
+    .git/modules too. They name no command, so they do not count, also where
+    a directory above the project is called `hooks`."""
 
     git = ["git", "-c", "user.name=t", "-c", "user.email=t@t"]
     git += ["-c", "protocol.file.allow=always"]
@@ -977,7 +978,7 @@ def test_wrapper_runs_a_repository_whose_objects_are_hard_links(
         check=True,
     )
     subprocess.run([*git, "-C", str(source), "commit", "-qm", "x"], check=True)
-    clone = tmp_path / "clone"
+    clone = tmp_path / "hooks" / "clone"
     subprocess.run(
         [*git, "clone", "-q", "--recurse-submodules", str(source), str(clone)],
         check=True,
@@ -1933,8 +1934,9 @@ def test_wrapper_checks_the_project_after_a_dead_sessions_container_is_gone(
         containers=f"{stale}\n",
         also={
             "PI_SANDBOX_FAKE_LIVE": stale,
-            "PI_SANDBOX_FAKE_LIVE_AGENT": f"rm -rf '{project}/.git'; "
-            f"ln -s '{target}' '{project}/.git'",
+            # As late as it can: while the wrapper lists the containers.
+            "PI_SANDBOX_FAKE_LIVE_AGENT": f'[ "$1" = ps ] || exit 0; '
+            f"rm -rf '{project}/.git'; ln -s '{target}' '{project}/.git'",
         },
     )
 

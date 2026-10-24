@@ -305,7 +305,7 @@ so `git push` fails inside the sandbox by design. Push from the host after
 reviewing the diff.
 
 The wrapper refuses to start on a symlink at `.git` or at any of the
-read-only paths, a config or hook under them that is a symlink or has a second
+read-only paths, any symlink under them, a config or hook there with a second
 hard link, a `.git/config.worktree` or `.git/commondir` that is not an ordinary
 file, and a `.git/commondir` that holds anything but `.`. Replace a symlinked
 or hard-linked hook with a copy, including one you linked to a script in the

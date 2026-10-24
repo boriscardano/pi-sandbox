@@ -200,10 +200,11 @@ every later session rewrite the hook through that file while the read-only
 mounts are in place. `e2e.py` shows this for a hard link on real Docker. Inside
 a protected session it cannot make a new one, because the mounts are read-only
 and a link across mounts fails with `Invalid cross-device link`. So the wrapper
-refuses to start when a config, `config.worktree`, `commondir` or hook under
-the six read-only paths is a symlink or has a second link, and prints the
-names with control bytes replaced, since the agent chose them. Other files are
-not checked: a clone of a local path hard-links the objects, a submodule's
+refuses to start when anything under the six read-only paths is a symlink,
+which covers a submodule's git directory linked into the project, or when a
+config, `config.worktree`, `commondir` or hook there has a second link, and
+prints the names with control bytes replaced, since the agent chose them.
+Other files' links are not checked: a clone of a local path hard-links the objects, a submodule's
 under `.git/modules` too, and they name no command.
 
 This does not look at what a config says. A `core.hooksPath`, an `include.path`

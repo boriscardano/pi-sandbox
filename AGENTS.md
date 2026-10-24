@@ -32,8 +32,9 @@ Notes for agents and contributors changing this repo, from the security work on
   cross-device link` (Docker Desktop, 2026-09-23). But one made while `.git`
   was unprotected writes straight through: a project file hard-linked to
   `.git/hooks/post-checkout` changed the host hook under the read-only mount
-  (Docker Desktop, 2026-10-24). So a symlink or second link to a config or
-  hook there is refused.
+  (Docker Desktop, 2026-10-24). So any symlink there, and a second link to a
+  config or hook, is refused. A name filter applied before the type let a
+  symlinked submodule git directory through (round 2 review).
 - A check of the project is only good while no container can write it.
   Another session's container, live or left by a SIGKILLed wrapper, of this
   project or of a directory above it, could swap `.git` for a symlink between

@@ -388,17 +388,19 @@ for link in .git .git/config .git/hooks .git/modules .git/worktrees .git/config.
 done
 
 # A read-only mount protects a path, not the file behind it. A hook or config
-# that is a hard link or a symlink to a project file, which the agent can
-# make while `.git` is not protected, stays writable through that file in
-# every later session (shown on Docker by e2e.py). So refuse one under the
-# read-only paths. Only the files Git reads a command from count: a local
-# clone hard-links the objects, a submodule's too. The names are the agent's,
-# so control bytes in them are replaced before they reach the terminal.
+# that is a hard link or a symlink to a project file, or a symlinked directory
+# such as a submodule's git directory, which the agent can make while `.git`
+# is not protected, stays writable through the project in every later
+# session (shown on Docker by e2e.py). So refuse any symlink under the
+# read-only paths, and a second link to a file Git reads a command from: a
+# local clone hard-links the objects, a submodule's too. The names are the
+# agent's, so control bytes in them are replaced before they reach the
+# terminal.
 for path in config config.worktree commondir hooks modules worktrees; do
     [ -e "$project/.git/$path" ] || continue
-    if ! linked=$(find "$project/.git/$path" \
+    if ! linked=$(find "$project/.git/$path" \( -type l -o \
         \( -name config -o -name config.worktree -o -name commondir -o -path '*/hooks/*' \) \
-        \( -type l -o -type f -links +1 \) -print); then
+        -type f -links +1 \) -print); then
         printf '%s\n' "refusing to run: could not check $project/.git/$path for links, so make it readable" >&2
         exit 2
     fi

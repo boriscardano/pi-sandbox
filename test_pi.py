@@ -1131,6 +1131,39 @@ def test_wrapper_refuses_to_mount_the_home_directory(tmp_path: Path) -> None:
     assert _docker_run(inside_calls)
 
 
+def test_wrapper_refuses_a_project_that_contains_it(tmp_path: Path) -> None:
+    """The wrapper runs on the host for every project, and Dockerfile.pi and
+    entrypoint.sh build the image every project runs in. Launched on its own
+    checkout, the project mount made all three writable by the agent, so its
+    edit ran on the host at the next launch anywhere. Paths are compared
+    physically, so reaching either one through a symlink does not dodge it."""
+
+    checkout = tmp_path / "checkout"
+    (checkout / ".git").mkdir(parents=True)
+    (checkout / "sub").mkdir()
+    wrapper = _wrapper_with_inputs(checkout)
+    (tmp_path / "link").symlink_to(checkout)
+
+    launches = {
+        "root": _run(tmp_path / "a", cwd=checkout, wrapper=wrapper),
+        "subdirectory": _run(tmp_path / "b", cwd=checkout / "sub", wrapper=wrapper),
+        "wrapper by symlink": _run(
+            tmp_path / "c", cwd=checkout, wrapper=tmp_path / "link" / "pi"
+        ),
+        "project by symlink": _run(
+            tmp_path / "d",
+            cwd=tmp_path / "link",
+            wrapper=wrapper,
+            also={"PWD": str(tmp_path / "link")},
+        ),
+    }
+
+    for name, (completed, invocations) in launches.items():
+        assert completed.returncode == 2, name
+        assert "it contains this wrapper" in completed.stderr, name
+        assert invocations == [], name
+
+
 def test_wrapper_forwards_the_key_by_name_and_never_its_value(
     tmp_path: Path,
 ) -> None:

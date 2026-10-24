@@ -33,6 +33,11 @@ Notes for agents and contributors changing this repo, from the security work on
 - Never follow a project path the agent could have planted. Symlinks at the
   mounted `.git` paths are refused, because a planted `.git` symlink made a
   later launch mount a host directory read-write (round 3).
+- Never mount the wrapper's own directory. Launched on its own checkout, the
+  agent could edit `pi`, `Dockerfile.pi` or `entrypoint.sh`, and the host ran
+  the edit at the next launch in any project (2026-10-24). The wrapper now
+  refuses it by physical path, so run the sandbox on pi-sandbox from a clone
+  with another checkout's `pi`.
 - Never ask host `git` where the project is. `git rev-parse --show-toplevel`
   honours `core.worktree`, and a planted `core.worktree=/etc` made a later
   launch mount `/etc` (round 4). The wrapper walks up to the nearest `.git`.

@@ -84,6 +84,31 @@ EXPECTED_CHECKS = [
     "readonly .git/modules",
     "readonly mv .git",
 ]
+# Docker Desktop shares the host's directory into its VM, and macOS disks
+# ignore case by default. A name the read-only file mounts do not cover, like
+# `.git/CONFIG`, then went through the writable `.git` mount to the host's
+# `.git/config` (reproduced 2026-10-24). Every way found to change one of
+# those files under another name, then the directory mounts under theirs. The
+# host's copies are compared afterwards, because on a case-sensitive disk the
+# same writes only make new files. The Kelvin sign folds to k.
+PROTECTED_FILES = ("config", "config.worktree", "commondir")
+CASE_VARIANTS = r"""
+cd /workspace/.git
+k=$(printf '\342\204\252')
+for name in CONFIG Config cOnFiG CONFIG.WORKTREE Config.Worktree \
+    "config.wor${k}tree" COMMONDIR CommonDir; do
+    printf '\n[core]\n\tfsmonitor = touch /tmp/pwned\n' >> "$name"
+    printf '[core]\n\tfsmonitor = touch /tmp/pwned\n' > ../case-tmp
+    mv ../case-tmp "$name"
+done
+: > COMMONDIR
+rm -f CONFIG
+ln Config.Worktree ../case-link && printf x >> ../case-link
+printf x >> HOOKS/pre-commit
+touch HOOKS/pre-push "hoo${k}s/post-checkout" WORKTREES/x MODULES/x
+mv HOOKS ../hooks-moved
+true
+"""
 
 # What an agent does first in a Python project: install its dependencies. The
 # project asks for a recent Python without pinning one, as most do, which the
@@ -625,10 +650,35 @@ def refusals(lines: list[str], image: str) -> bool:
     return failed
 
 
+def snapshot(project: Path) -> dict[str, bytes]:
+    """The read-only parts of `.git`: the three files and everything in the
+    three directories, by path."""
+
+    git = project / ".git"
+    found = {name: (git / name).read_bytes() for name in PROTECTED_FILES}
+    for directory in ("hooks", "worktrees", "modules"):
+        for path in (git / directory).rglob("*"):
+            found[str(path.relative_to(git))] = (
+                path.read_bytes() if path.is_file() else b"<dir>"
+            )
+    return found
+
+
+def host_git_config(project: Path) -> int:
+    """The status of a host `git config` write, which has to work again once
+    a session is over."""
+
+    return subprocess.run(
+        ["git", "-C", project, "config", "e2e.written", "1"], check=False
+    ).returncode
+
+
 def checks(lines: list[str]) -> bool:
     failed = self_mount(lines)
     lines.append("")
     with throwaway_project() as project:
+        # A hook already there, for the check that it cannot be overwritten.
+        (project / ".git/hooks/pre-commit").write_text("#!/bin/sh\n")
         session = start(project)
         image = docker("inspect", "--format", "{{.Config.Image}}", session.container)
         results = docker("exec", session.container, "sh", "-c", CHECKS).splitlines()
@@ -637,6 +687,24 @@ def checks(lines: list[str]) -> bool:
         if results != EXPECTED_CHECKS:
             failed = True
             lines.append(f"  FAIL: expected {EXPECTED_CHECKS}")
+        protected = snapshot(project)
+        docker("exec", session.container, "sh", "-c", CASE_VARIANTS)
+        after = snapshot(project)
+        changed = sorted(
+            name
+            for name in protected.keys() | after.keys()
+            if protected.get(name) != after.get(name)
+        )
+        lines.append(
+            "  .git config files and directories written under other names: "
+            + (f"CHANGED {changed}" if changed else "unchanged")
+        )
+        failed |= bool(changed)
+        status = subprocess.run(
+            ["git", "-C", project, "status"], capture_output=True, check=False
+        )
+        lines.append(f"  host git status during the session: exit {status.returncode}")
+        failed |= status.returncode != 0
         # The file the container wrote belongs to the host user, so the agent
         # cannot leave root-owned files in the project.
         owner = (project / "probe-file").stat().st_uid
@@ -715,6 +783,9 @@ def checks(lines: list[str]) -> bool:
         lines += [f"  {line}" for line in contents]
         failed |= grown > VOLUME_GROWTH_KB
         quit_pi(session)
+        written = host_git_config(project)
+        lines.append(f"  host git config after /quit: exit {written}")
+        failed |= written != 0
 
         session = start(project)
         reuse = subprocess.run(
@@ -781,6 +852,9 @@ def checks(lines: list[str]) -> bool:
             lines.append(f"  {name:40} {left}{note}")
             print(lines[-1], file=sys.stderr, flush=True)
             failed |= left != "none" or bool(orphans)
+        written = host_git_config(project)
+        lines.append(f"  host git config after the last of these: exit {written}")
+        failed |= written != 0
 
         # The tag now holds an image of an older Pi, as if npm had moved on
         # since it was built, so the next launch rebuilds it. Unused Pi

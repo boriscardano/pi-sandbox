@@ -303,13 +303,20 @@ if [ "$image_exists" -eq 1 ] && [ -z "$want_version" ]; then
     printf '%s\n' "pi-sandbox: could not check the newest Pi, using the existing image" >&2
 fi
 
+# Half the daemon's CPUs, at least one, so a few spinning processes, far under
+# the pids and memory limits, cannot hold every core. Docker refuses `--cpus`
+# above its own count, so a fixed number would not start on a small machine.
+cpus=$(docker info --format '{{.NCPU}}' 2>/dev/null) || cpus=1
+cpus=$((cpus / 2))
+[ "$cpus" -ge 1 ] || cpus=1
+
 # The checks below are only good while no other container can write the
 # project: one where `.git` is not protected can turn it into a symlink to a
 # host directory a moment after they passed, and the mkdir and the mounts
 # would follow it. So first remove the containers dead sessions left, and
 # refuse while a session of this project, or of a directory above it, which
-# mounts this one whole, still runs. Here, after the lookup and the build, so
-# the checks and `docker run` follow at once. docs/design.md has the details.
+# mounts this one whole, still runs. Here, after the lookup, the build and
+# every other daemon query, so the checks and `docker run` follow at once. docs/design.md has the details.
 #
 # The name is the project's tag, where this wrapper runs and its pid. A pid
 # means something only where it was read, so where it runs, the machine, the
@@ -554,13 +561,6 @@ marker=$(mktemp)
     docker rm -f "$name" || true
 ) </dev/null >/dev/null 2>&1 &
 watcher=$!
-
-# Half the daemon's CPUs, at least one, so a few spinning processes, far under
-# the pids and memory limits, cannot hold every core. Docker refuses `--cpus`
-# above its own count, so a fixed number would not start on a small machine.
-cpus=$(docker info --format '{{.NCPU}}' 2>/dev/null) || cpus=1
-cpus=$((cpus / 2))
-[ "$cpus" -ge 1 ] || cpus=1
 
 docker_status=0
 # shellcheck disable=SC2086

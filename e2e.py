@@ -513,7 +513,7 @@ def self_mount(lines: list[str]) -> bool:
         # The refusal comes before anything slow, so a run still going after
         # a minute has got past it and is building or starting a session.
         try:
-            refused = subprocess.run(
+            attempt = subprocess.run(
                 [str(project / "pi"), "--provider", "opencode", "--model", "x"],
                 cwd=project,
                 stdin=subprocess.DEVNULL,
@@ -522,7 +522,7 @@ def self_mount(lines: list[str]) -> bool:
                 timeout=60,
                 check=False,
             )
-            status, stderr = str(refused.returncode), refused.stderr
+            status, stderr = str(attempt.returncode), attempt.stderr
         except subprocess.TimeoutExpired:
             status, stderr = "none, still running after 60 s", ""
         container = find_container(project)
@@ -914,7 +914,8 @@ def storage(lines: list[str]) -> bool:
 
         # Ten launches at once. A second session of one project is refused,
         # but launches in the same instant can all pass before any container
-        # exists, and those that start all write the key. The image is kept,
+        # exists (all ten did on Docker Desktop, 2026-10-25), and those that
+        # start all write the key. The refusal itself is proven by refusals(). The image is kept,
         # since this run deletes only what it created, so they do not race a
         # build.
         launched = [Session(project) for _ in range(10)]
@@ -923,14 +924,16 @@ def storage(lines: list[str]) -> bool:
             for session in launched:
                 session.read(0.05)
         sessions = [s for s in launched if s.up()]
-        refused = [s for s in launched if s not in sessions]
+        turned_away = [s for s in launched if s not in sessions]
         lines.append(
             f"  10 launches at once: {len(sessions)} started, "
-            f"{sum(b'still running' in s.output for s in refused)} refused "
+            f"{sum(b'still running' in s.output for s in turned_away)} refused "
             "as a second session"
         )
-        failed |= not sessions or any(b"still running" not in s.output for s in refused)
-        for session in refused:
+        failed |= not sessions or any(
+            b"still running" not in s.output for s in turned_away
+        )
+        for session in turned_away:
             session.end()
         wait_ready(sessions)
         lost = sum(KEY_LOST in s.output for s in sessions)

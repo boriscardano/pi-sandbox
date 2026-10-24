@@ -532,7 +532,17 @@ docker run \
 # write the project, so remove it before the checks below look at it.
 docker rm -f "$name" >/dev/null 2>&1 || true
 # The wrapper got here, so the watcher has nothing left to do. It ignores TERM.
+# Reaping it keeps bash, which is macOS /bin/sh, from printing `Killed: 9` and
+# the watcher's source on every exit.
 kill -KILL "$watcher" 2>/dev/null || true
+wait "$watcher" 2>/dev/null || true
+# The agent can leave the terminal drawing black on black, concealed or with
+# the default colours swapped, and kill Pi so that nothing undoes it, which
+# would hide the warnings below. DECSTR resets how text is drawn, and OSC 104,
+# 110 and 111 the palette and the default colours.
+if [ -t 2 ]; then
+    printf '\033[!p\033]104\007\033]110\007\033]111\007' >&2
+fi
 
 # Prune the project's own .git, but only when this launch protected it with a
 # mount, and look for nested git metadata the container created. Warn only,
@@ -548,23 +558,31 @@ kill -KILL "$watcher" 2>/dev/null || true
 # prune from matching the root `.git`: with `[x]` the protected root is
 # reported as nested, and with `*` a real nested one is pruned away and missed.
 # Escape those characters before building the pattern.
+#
+# Host git also takes any directory holding a HEAD, objects and refs for a
+# repository, with no `.git` in its name, so a new HEAD outside the protected
+# root is reported too, by the directory it is in.
 git_path=$(printf '%s' "$project" | sed 's/[][*?\\]/\\&/g')
 git_prune=''
 if [ -n "${protected_git:-}" ]; then
     git_prune=$git_path/.git
 fi
-nested=''
-if ! found=$(find "$project" -path "$git_prune" -prune -o \
-    \( -name .git -o -path '*/.git/config' -o -path '*/.git/hooks/*' \) \
-    -cnewer "$marker" -print 2>/dev/null); then
-    printf '%s\n' "pi-sandbox: warning: the nested-git check could not run because find failed, so the project was not scanned for nested git metadata" >&2
-else
-    # A `git init sub` writes sub/.git, its config and a hooks/*.sample for
-    # every hook, so one repository printed fifteen lines. Keep the `.git`
-    # path once and drop what is under it, matching the last `/.git` so a
-    # project path that itself contains one still names the right repository.
-    nested=$(printf '%s\n' "$found" | sed 's#\(.*\)/\.git/.*#\1/.git#' | sort -u)
-fi
+#
+# A directory the agent made unreadable makes find fail, but what it found
+# elsewhere still counts, so it is kept and the report only says it is
+# incomplete.
+find_failed=''
+found=$(find "$project" -path "$git_prune" -prune -o \
+    \( -name .git -o -name HEAD -o -path '*/.git/config' -o -path '*/.git/hooks/*' \) \
+    -cnewer "$marker" -print 2>/dev/null) || find_failed=1
+# A `git init sub` writes sub/.git, its config and a hooks/*.sample for every
+# hook, so one repository printed fifteen lines. Keep the `.git` path once and
+# drop what is under it, matching the last `/.git` so a project path that
+# itself contains one still names the right repository. The agent chose these
+# names, and an escape sequence in one could erase or rewrite the warning on
+# the terminal, so every byte that is not printable ASCII becomes a `?`.
+nested=$(printf '%s\n' "$found" | sed -e 's#\(.*\)/\.git/.*#\1/.git#' -e 's#/HEAD$##' | sort -u \
+    | LC_ALL=C tr -c '[:print:]\n' '?')
 # A rebase, merge or cherry-pick the container planted makes the host's Git
 # report an operation in progress, and `git rebase --continue` then runs the
 # `exec` lines the todo holds. The paths cannot be blocked, since an empty
@@ -583,6 +601,9 @@ if [ -n "$nested" ]; then
     printf '%s\n' "pi-sandbox: warning: the container left nested git metadata in the project:" >&2
     printf '%s\n' "$nested" >&2
     printf '%s\n' "your host git trusts it and would run the commands it names, so inspect it before running git there" >&2
+fi
+if [ -n "$find_failed" ]; then
+    printf '%s\n' "pi-sandbox: warning: the nested-git check could not run in full because find failed, so the project may hold nested git metadata not listed here" >&2
 fi
 if [ -n "$interrupted" ]; then
     printf '%s\n' "pi-sandbox: warning: the container left a git operation in progress:" >&2

@@ -868,6 +868,24 @@ def test_wrapper_releases_the_git_files_when_it_is_killed(tmp_path: Path) -> Non
 
 
 @pytest.mark.skipif(shutil.which("chflags") is None, reason="needs macOS chflags")
+def test_wrapper_locks_the_git_files_again_when_another_session_releases_them(
+    tmp_path: Path,
+) -> None:
+    """A session that ends while this one starts sees no container of the
+    project yet, so it releases the files this one has just locked. The
+    agent here does that release itself, then waits and writes."""
+
+    repo = tmp_path / "repo"
+    subprocess.run(["git", "init", "--quiet", str(repo)], check=True)
+    files = " ".join(f".git/{f}" for f in PROTECTED_GIT_FILES)
+    agent = f"chflags nouchg {files}; sleep 3; printf x >> .git/config"
+
+    _run(tmp_path, cwd=repo, agent=agent)
+
+    assert not (repo / ".git/config").read_bytes().endswith(b"x")
+
+
+@pytest.mark.skipif(shutil.which("chflags") is None, reason="needs macOS chflags")
 def test_wrapper_leaves_the_git_files_locked_for_another_session(
     tmp_path: Path,
 ) -> None:

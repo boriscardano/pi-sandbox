@@ -2296,11 +2296,11 @@ def test_wrapper_refuses_while_a_session_of_an_enclosing_directory_runs(
 def test_wrapper_refuses_a_second_session_under_another_spelling(
     tmp_path: Path,
 ) -> None:
-    """A shell keeps the path it was given in $PWD, so a second launch of a
-    running project through a symlink, to it or to a directory above it, or
-    on a case-insensitive disk through another case, hashed another name and
-    was let through while the first session's agent could swap `.git`. The
-    state volume keeps the spelling the user launched from."""
+    """While a session runs, a launch through a symlink, to the project or to
+    a directory above it, through another case on a case-insensitive disk, or
+    from a link the agent planted in the project, is refused, since the
+    session's agent could swap `.git` during its checks. The state volume
+    keeps the spelling the user launched from."""
 
     outer = tmp_path / "outer"
     project = outer / "project"
@@ -2314,6 +2314,13 @@ def test_wrapper_refuses_a_second_session_under_another_spelling(
     }
     if (outer / "PROJECT").exists():  # a case-insensitive disk, such as APFS
         spellings["another case"] = outer / "PROJECT"
+    # The session's agent can plant a link to a repository elsewhere, which
+    # the mount follows, and point it at a host directory once the checks pass.
+    elsewhere = tmp_path / "elsewhere"
+    (elsewhere / ".git").mkdir(parents=True)
+    (elsewhere / ".git/config").write_text("")
+    (project / "planted").symlink_to(elsewhere)
+    spellings["link the agent planted"] = project / "planted"
 
     for name, cwd in spellings.items():
         completed, invocations = _run(

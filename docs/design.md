@@ -266,13 +266,16 @@ and those checks, the name and the mounts all use the physical path, so a
 symlink or another letter case on a case-insensitive disk does not get around
 the refusal. A link in the launch path that a running session's agent planted
 cannot help it either: Docker is handed the resolved path, not the link, so
-pointing the link elsewhere after the checks changes nothing. The state volume
-keeps the launch path, so existing volumes keep their names. A path the
-kernel does not resolve to the same one, such as a second bind mount of the
-directory, is not caught. A second session in one project is therefore
-refused, and so is a session of a repository inside a project whose session
-runs. A session of a directory below does not count, since it cannot reach
-this `.git`. When `ps` cannot see processes, or a dead session's container
+pointing the link elsewhere after the checks changes nothing. The path is
+resolved before the lookup and the build, and the agent of a session above
+the project could replace a directory on it in that time and then end its
+session, so it is resolved again once no such session is left, and a change
+is refused. The state volume keeps the launch path, so existing volumes keep
+their names. A path the kernel does not resolve to the same one, such as a
+second bind mount of the directory, is not caught. A second session in one
+project is therefore refused, and so is a session of a repository inside a
+project whose session runs. A session of a directory below does not count,
+since it cannot reach this `.git`. When `ps` cannot see processes, or a dead session's container
 will not go, the container counts as live, and when the container listing
 fails the launch is refused. A wrapper's process id that another process has
 since taken also looks live, so the message names the container to remove.

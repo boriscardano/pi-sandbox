@@ -398,6 +398,15 @@ for stale in $containers; do
     esac
 done
 
+# The path was resolved before the lookup and the build, during which the
+# agent of a session above the project could have replaced a directory on it
+# with a symlink and then ended that session, so the loop above found none.
+# No session that could do so is left now, so resolve it again.
+if [ "$(CDPATH= cd -- "$project" && env pwd -P)" != "$project" ]; then
+    printf '%s\n' "refusing to run: $project no longer resolves to itself, so a directory on its path was replaced while this launch started, inspect it" >&2
+    exit 2
+fi
+
 # A symlink at any of these is followed by Git, by the mkdir below and by the
 # bind mounts, so the agent can point the host's Git at a config it wrote, or
 # make this script create directories outside the project. The `.git` symlink

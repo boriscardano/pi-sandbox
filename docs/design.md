@@ -210,7 +210,11 @@ still releases it, so the watcher of every live session sets it again each
 second. That leaves the files open for up to a second while the new Pi is
 still starting, before its agent can act. A launch that cannot set the flag
 stops. A session whose container ended on a signal, an out-of-memory kill
-among them, is released by the watcher a few seconds after the wrapper exits. The release also clears a flag you set on those files yourself,
+among them, is released by the watcher a few seconds after the wrapper exits.
+A SIGKILL to the whole process group takes the watcher too, so the flag then
+stays on, and host `git config` in that repository fails, until a later
+session of it ends, even when another launch's sweep has already removed the
+container. The release also clears a flag you set on those files yourself,
 and sessions on two Docker daemons do not see each other's containers.
 
 A comparison of the files at exit was the alternative, but host Git can run
@@ -260,23 +264,32 @@ that container's agent can turn `.git` into a symlink to a host directory a
 moment after the checks passed, and the `mkdir` and the mounts then follow it.
 So the wrapper first removes the containers whose wrapper is gone, and refuses
 to start while a container from the same place still runs for this project or
-for a directory above it, found by the project hash in its name. A second
-session in one project is therefore refused, and so is a session of a
-repository inside a project whose session runs. A session of a directory below
-does not count, since it cannot reach this `.git`. When `ps` cannot see
-processes, or a dead session's container will not go, the container counts as
-live, and when the container listing fails the launch is refused. A wrapper's
-process id that another process has since taken also looks live, so the
-message names the container to remove.
+for a directory above it, found by the hash of the project's physical path
+in its name. The wrapper resolves the launch path once, before its checks,
+and those checks, the name and the mounts all use the physical path, so a
+symlink or another letter case on a case-insensitive disk does not get around
+the refusal. A link in the launch path that a running session's agent planted
+cannot help it either: Docker is handed the resolved path, not the link, so
+pointing the link elsewhere after the checks changes nothing. The path is
+resolved before the lookup and the build, and the agent of a session above
+the project could replace a directory on it in that time and then end its
+session, so it is resolved again once no such session is left, and a change
+is refused. The state volume keeps the launch path, so existing volumes keep
+their names. A path the kernel does not resolve to the same one, such as a
+second bind mount of the directory, is not caught. A second session in one
+project is therefore refused, and so is a session of a repository inside a
+project whose session runs. A session of a directory below does not count,
+since it cannot reach this `.git`. When `ps` cannot see processes, or a dead session's container
+will not go, the container counts as live, and when the container listing
+fails the launch is refused. A wrapper's process id that another process has
+since taken also looks live, so the message names the container to remove.
 
 Launches of one project in the same instant can all pass, since no container
 exists yet: `e2e.py --storage` launched ten at once and all ten started
 (Docker Desktop, 2026-10-25). Each window lasts until the daemon has set up
 that launch's mounts, a fraction of a second, while Pi, and any extension an
 earlier session left in the shared state volume, takes seconds to start in
-the others. That the agents cannot act in time is reasoned, not measured. Projects are told apart by path, so the
-same directory reached through a symlink or another letter case on a
-case-insensitive disk counts as another project.
+the others. That the agents cannot act in time is reasoned, not measured.
 
 ### Linked worktrees and submodules
 

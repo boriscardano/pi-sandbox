@@ -104,17 +104,23 @@ project=$(CDPATH= cd -- "$project" && pwd)
 # directory carrying ~/.ssh, ~/.aws and every other project. Compare physical
 # paths, so a symlink or another case of the name cannot hide them, with
 # `env pwd -P`: bash, /bin/sh on macOS, keeps the case in its builtin.
-# `project` keeps the launch spelling, which names the state volume.
-physical=$(CDPATH= cd -- "$project" && env pwd -P)
+#
+# From here on `project` is that physical path, which every check, the
+# container name and the mounts use. A link in the launch path, which a
+# running session's agent may have planted, is resolved once here, so Docker
+# cannot follow it at mount time to wherever the agent has pointed it since.
+# `launch` keeps the launch spelling, which names the state volume.
+launch=$project
+project=$(CDPATH= cd -- "$launch" && env pwd -P)
 home=${HOME%/}
 if [ -d "$home" ]; then
     home=$(CDPATH= cd -- "$home" && env pwd -P)
 fi
-case "$physical" in
+case "$project" in
     /) printf '%s\n' "refusing to mount the whole filesystem" >&2; exit 2 ;;
 esac
 case "$home/" in
-    "$physical"/*)
+    "$project"/*)
         printf '%s\n' "refusing to mount $project: it contains your home directory" >&2
         exit 2
         ;;
@@ -125,15 +131,16 @@ esac
 # that holds them would let the agent rewrite what the host runs at the next
 # launch anywhere.
 case "$(CDPATH= cd -- "$script_dir" && env pwd -P)/" in
-    "$physical"/*)
+    "$project"/*)
         printf '%s\n' "refusing to mount $project: it contains this wrapper ($script_dir), which the agent could rewrite to run on your host at the next launch. Run a copy of the wrapper from outside the project" >&2
         exit 2
         ;;
 esac
 
 # Docker parses --mount as comma-separated fields, so a comma anywhere in the
-# project path would split the source and mount something else.
-case "$project" in
+# project path would split the source and mount something else. The launch
+# spelling goes into the state volume's label, so it is checked too.
+case "$launch$project" in
     *,*)
         printf '%s\n' "refusing to mount $project: the path contains a comma" >&2
         exit 2
@@ -164,8 +171,8 @@ set +f
 # One state volume per project, so sessions and `pi --resume` stay separate.
 # Inside the container every project is /workspace, which would otherwise make
 # them share one session history.
-project_tag=$(printf '%s' "$project" | "$hash_cmd" | cut -c1-8)
-state_volume=pi-sandbox-$(basename "$project" | tr -c 'A-Za-z0-9_.-' '-')-$project_tag
+volume_tag=$(printf '%s' "$launch" | "$hash_cmd" | cut -c1-8)
+state_volume=pi-sandbox-$(basename "$launch" | tr -c 'A-Za-z0-9_.-' '-')-$volume_tag
 
 # Default to a Chinese-hosted model through OpenCode, unless the caller picks
 # one. `deepseek-v4.1-flash` is on the opencode-go subscription and not on
@@ -343,7 +350,7 @@ origin=$(
         readlink /proc/self/ns/pid 2>/dev/null || true
     } | "$hash_cmd" | cut -c1-12
 )
-name=pi-sandbox-$project_tag-$origin-$$
+name=pi-sandbox-$(printf '%s' "$project" | "$hash_cmd" | cut -c1-8)-$origin-$$
 # A dead session can have left a container under this launch's pid, which
 # would make `docker run --name` fail, and only this launch can hold it now.
 docker rm -f "$name" >/dev/null 2>&1 || true
@@ -390,6 +397,15 @@ for stale in $containers; do
             ;;
     esac
 done
+
+# The path was resolved before the lookup and the build, during which the
+# agent of a session above the project could have replaced a directory on it
+# with a symlink and then ended that session, so the loop above found none.
+# No session that could do so is left now, so resolve it again.
+if [ "$(CDPATH= cd -- "$project" && env pwd -P)" != "$project" ]; then
+    printf '%s\n' "refusing to run: $project no longer resolves to itself, so a directory on its path was replaced while this launch started, inspect it" >&2
+    exit 2
+fi
 
 # A symlink at any of these is followed by Git, by the mkdir below and by the
 # bind mounts, so the agent can point the host's Git at a config it wrote, or
@@ -485,7 +501,7 @@ set -- "$image" "$@"
 # The label names the project, so the README's one-liner can remove the
 # volumes of projects that are gone. Docker sets it only when it creates the
 # volume.
-set -- --mount "type=volume,source=$state_volume,target=/home/agent,volume-label=pi-sandbox.project=$project" "$@"
+set -- --mount "type=volume,source=$state_volume,target=/home/agent,volume-label=pi-sandbox.project=$launch" "$@"
 lock_git=''
 if [ -d "$project/.git" ]; then
     # Remembered for the exit check: a root `.git` this launch protected is the
@@ -677,10 +693,9 @@ fi
 # and `head` as well, so the names match in any case. The prune stays exact,
 # since on a case-sensitive file system `.GIT` is not the protected root.
 #
-# `-H` follows the project path itself when it is a symlink, which find
-# otherwise does not enter. The agent chose the names, and an escape sequence
-# or a newline in one could erase the warning or add a line to it, so the part
-# of each under the project is printed with every byte that is not printable
+# The agent chose the names, and an escape sequence or a newline in one could
+# erase the warning or add a line to it, so the part of each under the
+# project is printed with every byte that is not printable
 # ASCII as a `?`. A directory the agent made unreadable makes find fail, but
 # what it found elsewhere is still reported, with a note that the check is
 # incomplete. A directory without its search bit fails it too, through
@@ -689,7 +704,7 @@ fi
 find_failed=''
 # `$1` and `$p` belong to the `sh -c` script, so it stays single-quoted.
 # shellcheck disable=SC2016
-found=$(LC_ALL=C find -H "$project" -path "$git_prune" -prune -o \
+found=$(LC_ALL=C find "$project" -path "$git_prune" -prune -o \
     -type d ! -perm -0100 -prune -exec false {} + -o \
     \( -iname .git -o \( -iname HEAD ! -type d \) \
     -o -ipath '*/.git/config' -o -ipath '*/.git/config.worktree' \

@@ -62,6 +62,12 @@ Notes for agents and contributors changing this repo, from the security work on
 - Never ask host `git` where the project is. `git rev-parse --show-toplevel`
   honours `core.worktree`, and a planted `core.worktree=/etc` made a later
   launch mount `/etc` (round 4). The wrapper walks up to the nearest `.git`.
+- Check the path you mount. The live-session refusal hashed the physical path
+  while Docker mounted the launch spelling, and three review rounds on #19
+  (2026-10-25) each found a link on that spelling, planted by a running
+  session's agent, that Docker followed again at mount time. The wrapper now
+  resolves the project once and uses that path for every check and mount, and
+  only the state volume keeps the launch spelling.
 - Opening a FIFO for writing blocks, and `set -C` does not prevent it. Refuse
   non-regular files before writing, and wrap FIFO experiments in `timeout`.
 - The agent reaches the host terminal. `/dev/pts/0` is owned by the user Pi

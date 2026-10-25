@@ -272,6 +272,9 @@ class Session:
                         os.tcsetpgrp(0, os.getpgrp())
                         signal.signal(signal.SIGTTOU, signal.SIG_DFL)
                         os.chdir(project)
+                        # As a shell does, so a launch through a symlink keeps
+                        # that spelling.
+                        os.environ["PWD"] = str(project)
                         # Python ignores SIGPIPE, and a shell would not.
                         signal.signal(signal.SIGPIPE, signal.SIG_DFL)
                         os.execv(
@@ -639,14 +642,24 @@ def refusals(lines: list[str], image: str) -> bool:
                 + [SWAP_GIT.format(canary)],
                 check=True,
             )
-            output = refused(project)
-            left = sorted(path.name for path in canary.iterdir())
-            refusal = "still running" in output
-            lines.append(
-                "a second launch while a session swaps .git for a symlink: "
-                f"refused {refusal}, host directory holds {left}"
-            )
-            failed |= not refusal or left != ["keep"]
+            # Under the project's own name, so a launch wrongly let through
+            # leaves a volume the cleanup still finds.
+            alias = canary.parent / f"{canary.name}-alias" / project.name
+            alias.parent.mkdir()
+            alias.symlink_to(project)
+            try:
+                for label, spelling in (("itself", project), ("a symlink", alias)):
+                    output = refused(spelling)
+                    left = sorted(path.name for path in canary.iterdir())
+                    refusal = "still running" in output
+                    lines.append(
+                        "a second launch while a session swaps .git for a "
+                        f"symlink, from {label}: "
+                        f"refused {refusal}, host directory holds {left}"
+                    )
+                    failed |= not refusal or left != ["keep"]
+            finally:
+                shutil.rmtree(alias.parent)
             quit_pi(session)
     finally:
         shutil.rmtree(canary, ignore_errors=True)
@@ -825,11 +838,17 @@ def checks(lines: list[str]) -> bool:
             end_session(session)
             session.read(2)
             left = container_left(project)
-            if name == GROUP_KILL and left == "running":
-                stale = find_container(project)
+            # Nothing is left to release the lock on .git/config, so a later
+            # session of the project does, whichever launch removed the
+            # container: any launch on this machine sweeps it, and another
+            # project's did during a run on 2026-10-25.
+            if name == GROUP_KILL:
+                stale = find_container(project) if left == "running" else ""
                 session.end()
                 session = start(project)
-                if not docker("ps", "-aq", "--filter", f"id={stale}", check=True):
+                if left == "running" and not docker(
+                    "ps", "-aq", "--filter", f"id={stale}", check=True
+                ):
                     left = "none"
                     name = f"{name}, then a new launch"
                 quit_pi(session)

@@ -2321,6 +2321,7 @@ def test_wrapper_refuses_a_second_session_under_another_spelling(
     (elsewhere / ".git/config").write_text("")
     (project / "planted").symlink_to(elsewhere)
     spellings["link the agent planted"] = project / "planted"
+    spellings["planted link through a symlink"] = tmp_path / "to-project" / "planted"
 
     for name, cwd in spellings.items():
         completed, invocations = _run(

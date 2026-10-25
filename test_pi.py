@@ -2297,10 +2297,11 @@ def test_wrapper_refuses_a_second_session_under_another_spelling(
     tmp_path: Path,
 ) -> None:
     """While a session runs, a launch through a symlink, to the project or to
-    a directory above it, through another case on a case-insensitive disk, or
-    from a link the agent planted in the project, is refused, since the
-    session's agent could swap `.git` during its checks. The state volume
-    keeps the spelling the user launched from."""
+    a directory above it, or through another case on a case-insensitive disk,
+    is refused, since the session's agent could swap `.git` during its checks.
+    A link in the launch path, which that agent may have planted, is resolved
+    once, so the mount cannot follow it wherever the agent points it after the
+    checks. The state volume keeps the spelling the user launched from."""
 
     outer = tmp_path / "outer"
     project = outer / "project"
@@ -2314,14 +2315,6 @@ def test_wrapper_refuses_a_second_session_under_another_spelling(
     }
     if (outer / "PROJECT").exists():  # a case-insensitive disk, such as APFS
         spellings["another case"] = outer / "PROJECT"
-    # The session's agent can plant a link to a repository elsewhere, which
-    # the mount follows, and point it at a host directory once the checks pass.
-    elsewhere = tmp_path / "elsewhere"
-    (elsewhere / ".git").mkdir(parents=True)
-    (elsewhere / ".git/config").write_text("")
-    (project / "planted").symlink_to(elsewhere)
-    spellings["link the agent planted"] = project / "planted"
-    spellings["planted link through a symlink"] = tmp_path / "to-project" / "planted"
 
     for name, cwd in spellings.items():
         completed, invocations = _run(
@@ -2334,10 +2327,29 @@ def test_wrapper_refuses_a_second_session_under_another_spelling(
         assert live in completed.stderr, name
         assert not any(argv[0] == "run" for argv in invocations), name
 
+    elsewhere = tmp_path / "elsewhere"
+    (elsewhere / ".git").mkdir(parents=True)
+    (elsewhere / ".git/config").write_text("")
+    (project / "planted").symlink_to(elsewhere)
+    (tmp_path / "to-planted").symlink_to(project / "planted")
+    planted = [project / "planted", tmp_path / "to-project" / "planted"]
+    for index, cwd in enumerate([*planted, tmp_path / "to-planted"]):
+        started, invocations = _run(
+            tmp_path / f"planted-{index}",
+            cwd=cwd,
+            containers=f"{live}\n",
+            also={"PWD": str(cwd)},
+        )
+        assert started.returncode == 0, cwd
+        mounts = [arg for arg in _docker_run(invocations) if "type=bind" in arg]
+        assert all(f"source={elsewhere}" in mount for mount in mounts), cwd
+
     link = tmp_path / "to-project"
     started, invocations = _run(tmp_path / "alone", cwd=link, also={"PWD": str(link)})
     assert started.returncode == 0, started.stderr
-    assert f"pi-sandbox.project={link}" in " ".join(_docker_run(invocations))
+    run = " ".join(_docker_run(invocations))
+    assert f"type=bind,source={project},target=/workspace" in run
+    assert "source=pi-sandbox-to-project-" in run
 
 
 def test_wrapper_refuses_when_a_dead_sessions_container_will_not_go(

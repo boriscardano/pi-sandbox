@@ -838,11 +838,17 @@ def checks(lines: list[str]) -> bool:
             end_session(session)
             session.read(2)
             left = container_left(project)
-            if name == GROUP_KILL and left == "running":
-                stale = find_container(project)
+            # Nothing is left to release the lock on .git/config, so a later
+            # session of the project does, whichever launch removed the
+            # container: any launch on this machine sweeps it, and another
+            # project's did during a run on 2026-10-25.
+            if name == GROUP_KILL:
+                stale = find_container(project) if left == "running" else ""
                 session.end()
                 session = start(project)
-                if not docker("ps", "-aq", "--filter", f"id={stale}", check=True):
+                if left == "running" and not docker(
+                    "ps", "-aq", "--filter", f"id={stale}", check=True
+                ):
                     left = "none"
                     name = f"{name}, then a new launch"
                 quit_pi(session)

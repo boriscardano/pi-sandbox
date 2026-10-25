@@ -210,7 +210,11 @@ still releases it, so the watcher of every live session sets it again each
 second. That leaves the files open for up to a second while the new Pi is
 still starting, before its agent can act. A launch that cannot set the flag
 stops. A session whose container ended on a signal, an out-of-memory kill
-among them, is released by the watcher a few seconds after the wrapper exits. The release also clears a flag you set on those files yourself,
+among them, is released by the watcher a few seconds after the wrapper exits.
+A SIGKILL to the whole process group takes the watcher too, so the flag then
+stays on, and host `git config` in that repository fails, until a later
+session of it ends, even when another launch's sweep has already removed the
+container. The release also clears a flag you set on those files yourself,
 and sessions on two Docker daemons do not see each other's containers.
 
 A comparison of the files at exit was the alternative, but host Git can run

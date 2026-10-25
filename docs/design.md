@@ -261,20 +261,20 @@ moment after the checks passed, and the `mkdir` and the mounts then follow it.
 So the wrapper first removes the containers whose wrapper is gone, and refuses
 to start while a container from the same place still runs for this project or
 for a directory above it. A container is named by the hash of the project's
-physical path, and the launch looks for the hash of every directory up both
-its physical path and the path it was launched from. A symlink or another
-letter case on a case-insensitive disk therefore does not get around it, and
-neither does a launch from a link the agent planted in its project to a
-repository elsewhere, which the mount would follow. The state volume keeps the
-launch path, so existing volumes keep their names. A path the kernel does not
-resolve to the same one, such as a second bind mount of the directory, is not
-caught. A second session in one project is therefore refused, and so is a
-session of a repository inside a project whose session runs. A session of a directory below
-does not count, since it cannot reach this `.git`. When `ps` cannot see
-processes, or a dead session's container will not go, the container counts as
-live, and when the container listing fails the launch is refused. A wrapper's
-process id that another process has since taken also looks live, so the
-message names the container to remove.
+physical path, and the launch resolves every directory up the path it was
+launched from and looks for the hash of each physical directory above those.
+A symlink or another letter case on a case-insensitive disk therefore does
+not get around it, and neither does a launch from a link the agent planted in
+its project to a repository elsewhere, which the mount would follow. The state
+volume keeps the launch path, so existing volumes keep their names. A path the
+kernel does not resolve to the same one, such as a second bind mount of the
+directory, is not caught. A second session in one project is therefore
+refused, and so is a session of a repository inside a project whose session
+runs. A session of a directory below does not count, since it cannot reach
+this `.git`. When `ps` cannot see processes, or a dead session's container
+will not go, the container counts as live, and when the container listing
+fails the launch is refused. A wrapper's process id that another process has
+since taken also looks live, so the message names the container to remove.
 
 Launches of one project in the same instant can all pass, since no container
 exists yet: `e2e.py --storage` launched ten at once and all ten started

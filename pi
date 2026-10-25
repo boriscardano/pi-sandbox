@@ -363,17 +363,25 @@ if ps -p $$ >/dev/null 2>&1; then
     ps_works=1
 fi
 # The tags of this project and of every directory above it, as a session
-# there would have named its container. Both spellings are walked: a link the
-# agent planted in its project to a repository elsewhere has a physical path
-# outside that project, while the mount follows the link, which the agent can
-# point at a host directory once the checks pass.
+# there would have named its container from their physical paths. Each
+# directory up the launch spelling is resolved, not only the project: a link
+# the agent planted in its project to a repository elsewhere resolves outside
+# that project, while the mount follows the link, which the agent can point at
+# a host directory once the checks pass. A chain already seen is not walked
+# again.
 tags=' '
-for dir in "$physical" "$project"; do
+dir=$project
+while :; do
+    up=$(CDPATH= cd -- "$dir" && env pwd -P)
     while :; do
-        tags="$tags$(printf '%s' "$dir" | "$hash_cmd" | cut -c1-8) "
-        [ "$dir" != / ] || break
-        dir=$(dirname -- "$dir")
+        tag=$(printf '%s' "$up" | "$hash_cmd" | cut -c1-8)
+        case "$tags" in *" $tag "*) break ;; esac
+        tags="$tags$tag "
+        [ "$up" != / ] || break
+        up=$(dirname -- "$up")
     done
+    [ "$dir" != / ] || break
+    dir=$(dirname -- "$dir")
 done
 for stale in $containers; do
     case "$stale" in

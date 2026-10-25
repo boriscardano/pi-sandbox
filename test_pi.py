@@ -2403,6 +2403,37 @@ def test_wrapper_checks_the_project_after_the_image_build(tmp_path: Path) -> Non
     assert sorted(path.name for path in target.iterdir()) == ["keep"]
 
 
+def test_wrapper_refuses_a_project_path_replaced_during_the_build(
+    tmp_path: Path,
+) -> None:
+    """The path is resolved before a build that can take minutes, during
+    which the agent of a session above the project can replace the project's
+    directory with a symlink to a host directory and then end its session,
+    so the check for live sessions finds none. The mkdir and the mounts would
+    follow the symlink."""
+
+    project = tmp_path / "project"
+    (project / ".git").mkdir(parents=True)
+    target = tmp_path / "target"
+    (target / ".git").mkdir(parents=True)
+
+    completed, invocations = _run(
+        tmp_path / "run",
+        cwd=project,
+        inspect_status="1",
+        also={
+            "PI_SANDBOX_FAKE_LIVE": "never-removed",
+            "PI_SANDBOX_FAKE_LIVE_AGENT": f'[ "$1" = build ] || exit 0; '
+            f"mv '{project}' '{tmp_path}/moved'; ln -s '{target}' '{project}'",
+        },
+    )
+
+    assert any(argv[0] == "build" for argv in invocations)
+    assert completed.returncode == 2, completed.stderr
+    assert not any(argv[0] == "run" for argv in invocations)
+    assert list((target / ".git").iterdir()) == []
+
+
 def test_wrapper_names_each_container_apart(tmp_path: Path) -> None:
     """A session's watcher removes its container by name for seconds after
     the session ends, so a name shared between sessions of one project would

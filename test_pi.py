@@ -1522,9 +1522,10 @@ def test_wrapper_warns_about_git_metadata_named_in_another_case(
 def test_wrapper_scans_a_project_reached_through_a_symlink(
     tmp_path: Path,
 ) -> None:
-    """The project path keeps a symlink it was reached through, and find does
-    not follow one named on its command line, so it scanned nothing and the
-    repository the agent planted went unreported."""
+    """find does not follow a symlink named on its command line, so a
+    project path that kept the symlink it was reached through scanned nothing
+    and the repository the agent planted went unreported. The warning names
+    the physical path, which the wrapper mounted."""
 
     real = tmp_path / "real"
     real.mkdir()
@@ -1536,7 +1537,7 @@ def test_wrapper_scans_a_project_reached_through_a_symlink(
         tmp_path / "run", cwd=link, agent=NESTED_GIT, also={"PWD": str(link)}
     )
 
-    assert f"{link}/sub/.git" in completed.stderr
+    assert f"{real}/sub/.git" in completed.stderr
 
 
 def test_wrapper_reports_a_git_beside_the_root_under_another_case(
@@ -1859,7 +1860,7 @@ def test_wrapper_refuses_home_and_root_under_another_spelling(tmp_path: Path) ->
     symlink to the home directory, to one of its ancestors or to /, with HOME
     itself a symlink, or on a case-insensitive disk from another case of the
     home path, passed the refusals and mounted it. They compare physical
-    paths. The mount keeps the spelling the user launched from."""
+    paths, and the mount is the physical path."""
 
     home = tmp_path / "users" / "me"
     (home / "work" / "repo").mkdir(parents=True)
@@ -1889,9 +1890,9 @@ def test_wrapper_refuses_home_and_root_under_another_spelling(tmp_path: Path) ->
         assert reason in completed.stderr, name
         assert calls == [], name
 
-    repo = tmp_path / "home" / "work" / "repo"
-    inside, calls = launch("inside", repo)
+    inside, calls = launch("inside", tmp_path / "home" / "work" / "repo")
     assert inside.returncode == 0
+    repo = home / "work" / "repo"
     assert f"type=bind,source={repo},target=/workspace" in _docker_run(calls)
 
 

@@ -104,8 +104,7 @@ project=$(CDPATH= cd -- "$project" && pwd)
 # directory carrying ~/.ssh, ~/.aws and every other project. Compare physical
 # paths, so a symlink or another case of the name cannot hide them, with
 # `env pwd -P`: bash, /bin/sh on macOS, keeps the case in its builtin.
-# `project` keeps the launch spelling, which names the state volume, and the
-# physical path names the container, so a session is found under any spelling.
+# `project` keeps the launch spelling, which names the state volume.
 physical=$(CDPATH= cd -- "$project" && env pwd -P)
 home=${HOME%/}
 if [ -d "$home" ]; then
@@ -330,7 +329,7 @@ cpus=$((cpus / 2))
 # every other daemon query, so the checks and `docker run` follow at once. docs/design.md has the details.
 #
 # The name is the tag of the physical path, so a symlink or another case
-# cannot dodge the refusal, then where this wrapper runs and its pid. A pid
+# cannot dodge the refusal, then the origin and the pid. A pid
 # means something only where it was read, so where it runs, the machine, the
 # user and the pid namespace, is hashed into the name. Every removal by name
 # then only reaches containers started from here: another user, a container
@@ -364,13 +363,17 @@ if ps -p $$ >/dev/null 2>&1; then
     ps_works=1
 fi
 # The tags of this project and of every directory above it, as a session
-# there would have named its container.
+# there would have named its container. Both spellings are walked: a link the
+# agent planted in its project to a repository elsewhere has a physical path
+# outside that project, while the mount follows the link, which the agent can
+# point at a host directory once the checks pass.
 tags=' '
-dir=$physical
-while :; do
-    tags="$tags$(printf '%s' "$dir" | "$hash_cmd" | cut -c1-8) "
-    [ "$dir" != / ] || break
-    dir=$(dirname -- "$dir")
+for dir in "$physical" "$project"; do
+    while :; do
+        tags="$tags$(printf '%s' "$dir" | "$hash_cmd" | cut -c1-8) "
+        [ "$dir" != / ] || break
+        dir=$(dirname -- "$dir")
+    done
 done
 for stale in $containers; do
     case "$stale" in

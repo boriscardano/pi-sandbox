@@ -648,13 +648,13 @@ def refusals(lines: list[str], image: str) -> bool:
             alias.parent.mkdir()
             alias.symlink_to(project)
             try:
-                for spelling in (project, alias):
+                for label, spelling in (("itself", project), ("a symlink", alias)):
                     output = refused(spelling)
                     left = sorted(path.name for path in canary.iterdir())
                     refusal = "still running" in output
                     lines.append(
                         "a second launch while a session swaps .git for a "
-                        f"symlink, from {'a symlink' if spelling == alias else 'it'}: "
+                        f"symlink, from {label}: "
                         f"refused {refusal}, host directory holds {left}"
                     )
                     failed |= not refusal or left != ["keep"]

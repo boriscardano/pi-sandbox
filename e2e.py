@@ -33,6 +33,8 @@ sessions building. The report is printed and written to the file (default
 e2e-report.txt or e2e-storage.txt).
 """
 
+from __future__ import annotations
+
 import contextlib
 import http.server
 import json
@@ -249,7 +251,7 @@ SCRIPT_ALIVE, _SCRIPT_ALIVE_WRITE = os.pipe()
 class Session:
     """One wrapper launch in a pseudo-terminal, as a Herdr pane runs it."""
 
-    def __init__(self, project: Path) -> None:
+    def __init__(self, project: Path, env: dict[str, str] | None = None) -> None:
         self.project = project
         # The terminal's session leader stands in for the pane's shell, and
         # runs the wrapper as its foreground job in a process group of its
@@ -275,6 +277,7 @@ class Session:
                         # As a shell does, so a launch through a symlink keeps
                         # that spelling.
                         os.environ["PWD"] = str(project)
+                        os.environ.update(env or {})
                         # Python ignores SIGPIPE, and a shell would not.
                         signal.signal(signal.SIGPIPE, signal.SIG_DFL)
                         os.execv(
@@ -472,8 +475,8 @@ EXITS: dict[str, Callable[[Session], object]] = {
 GROUP_KILL = "SIGKILL to the whole process group"
 
 
-def start(project: Path) -> Session:
-    session = Session(project)
+def start(project: Path, env: dict[str, str] | None = None) -> Session:
+    session = Session(project, env)
     wait_ready([session])
     return session
 
@@ -762,6 +765,11 @@ def checks(lines: list[str]) -> bool:
         lines.append(
             f"  host service on 127.0.0.1, from the container: {reach or 'probe failed'}"
         )
+        networks = docker(
+            "inspect", "--format", NETWORKS, session.container, check=True
+        )
+        lines.append(f"  networks without PI_SANDBOX_NETWORK: {networks}")
+        failed |= networks != "bridge"
         pinned = pinned_extensions()
         installed = docker("exec", session.container, "sh", "-c", INSTALLED)
         lines.append("  extensions a fresh volume got:")
@@ -911,7 +919,78 @@ def checks(lines: list[str]) -> bool:
             f"old image kept {kept}, Pi install build cache left unused {len(left)}"
         )
         failed |= version in ("", OLDER_PI) or kept or bool(left)
+    failed |= network(lines, image)
     failed |= refusals(lines, image)
+    return failed
+
+
+NETWORKS = "{{range $name, $_ := .NetworkSettings.Networks}}{{$name}} {{end}}"
+
+
+def network(lines: list[str], image: str) -> bool:
+    """PI_SANDBOX_NETWORK puts the session on that network alone. On an
+    internal network whose other container answers as host.docker.internal,
+    the name reaches that container, and a server on the host's 127.0.0.1,
+    which a default session reaches on Docker Desktop, is out of reach."""
+
+    name = f"pi-e2e-net-{os.getpid()}"
+    relay = f"{name}-relay"
+    failed = False
+    docker("network", "create", "--internal", name, check=True)
+    try:
+        docker(
+            "run",
+            "-d",
+            "--rm",
+            "--name",
+            relay,
+            "--network",
+            name,
+            "--network-alias",
+            "host.docker.internal",
+            "--entrypoint",
+            "python3",
+            image,
+            "-m",
+            "http.server",
+            "8000",
+            check=True,
+        )
+        with (
+            throwaway_project() as project,
+            http.server.ThreadingHTTPServer(("127.0.0.1", 0), Answer) as server,
+        ):
+            threading.Thread(target=server.serve_forever, daemon=True).start()
+            try:
+                session = start(project, {"PI_SANDBOX_NETWORK": name})
+                networks = docker(
+                    "inspect", "--format", NETWORKS, session.container, check=True
+                )
+                relayed, host = (
+                    docker(
+                        "exec",
+                        session.container,
+                        "timeout",
+                        "30",
+                        "python3",
+                        "-c",
+                        HOST_PROBE,
+                        str(port),
+                    )
+                    for port in (8000, server.server_address[1])
+                )
+                quit_pi(session)
+            finally:
+                server.shutdown()
+        lines.append("")
+        lines.append(f"PI_SANDBOX_NETWORK={name} (internal):")
+        lines.append(f"  networks: {networks}")
+        lines.append(f"  host.docker.internal:8000, the network's relay: {relayed}")
+        lines.append(f"  host service on 127.0.0.1: {host}")
+        failed = networks != name or relayed != "reached" or host == "reached"
+    finally:
+        docker("rm", "-f", relay)
+        docker("network", "rm", name)
     return failed
 
 

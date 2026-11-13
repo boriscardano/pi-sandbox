@@ -242,7 +242,7 @@ def children(parent: int, name: str = "") -> list[str]:
 
 
 # Every session not yet ended, so a failed run still closes them all.
-OPEN_SESSIONS: list["Session"] = []
+OPEN_SESSIONS: list[Session] = []
 # Its write end is held only by this script, so a read of it returns when the
 # script dies, however it dies.
 SCRIPT_ALIVE, _SCRIPT_ALIVE_WRITE = os.pipe()

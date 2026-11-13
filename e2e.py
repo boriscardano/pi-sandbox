@@ -8,7 +8,7 @@ that uv still picks Debian's Python for a project that accepts it, syncs a
 Python project and checks that the state volume grows by little more than
 the venv, which the next session imports from offline, and records whether
 the container reaches a host service on 127.0.0.1, and checks that on an
-internal network named in PI_SANDBOX_NETWORK it reaches neither that nor a
+internal network it creates and names in PI_SANDBOX_NETWORK it reaches neither that nor a
 public address the default session reaches. It plays a hostile session that
 tries to keep its git metadata out of the exit warnings or make them
 unreadable, and checks they still name it.

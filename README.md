@@ -513,7 +513,7 @@ install build cache is left unused. It writes its findings to
 that uv picks Debian's Python 3.11 for a project that accepts it, syncs a
 Python project and fails if the state volume grows more than 30 MB, and
 records whether the container reaches a host service bound to 127.0.0.1 (it
-does on Docker Desktop). On an internal network named in
+does on Docker Desktop). On an internal network it creates and names in
 `PI_SANDBOX_NETWORK`, it checks that the session is on that network alone and
 reaches neither a public address the default session reaches nor, on Docker
 Desktop, that host service. It plays a hostile session that leaves a bare

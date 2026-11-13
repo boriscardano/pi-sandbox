@@ -17,6 +17,8 @@
 # Forward further host variables by naming them in PI_SANDBOX_ENV, for example
 # PI_SANDBOX_ENV='TYPESAFE_API_KEY OTHER_TOKEN'. Every variable you add is
 # readable by whatever runs in the container, so add only what it needs.
+# PI_SANDBOX_NETWORK names a Docker network to run on instead of the default
+# bridge, for a fence you build (README, Choosing the network).
 #
 # The script is named `pi` on purpose: Herdr identifies a pane's agent from the
 # launched program's name, so this shows up as a real Pi agent in Herdr.
@@ -167,6 +169,20 @@ for name in $(printf '%s' "${PI_SANDBOX_ENV:-}" | tr ',' ' '); do
     extra_env="$extra_env --env $name"
 done
 set +f
+
+# An opt-in Docker network instead of the default bridge: a plain network
+# name only, never `host`, `container:<name>` or a value carrying another
+# docker flag. Set but empty is refused, so a fence meant to be on is never off.
+network_flags=''
+if [ -n "${PI_SANDBOX_NETWORK+set}" ]; then
+    case "$PI_SANDBOX_NETWORK" in
+        '' | host | [!A-Za-z0-9]* | *[!A-Za-z0-9_.-]*)
+            printf '%s\n' "PI_SANDBOX_NETWORK: not a network name, or one that shares a namespace: $PI_SANDBOX_NETWORK" >&2
+            exit 2
+            ;;
+    esac
+    network_flags="--network $PI_SANDBOX_NETWORK"
+fi
 
 # One state volume per project, so sessions and `pi --resume` stay separate.
 # Inside the container every project is /workspace, which would otherwise make
@@ -642,6 +658,7 @@ docker run \
     --env OPENCODE_GO_API_KEY \
     --env OPENCODE_API_KEY \
     $extra_env \
+    $network_flags \
     --env TERM=xterm-256color \
     --env COLORTERM=truecolor \
     --mount "type=bind,source=$project,target=/workspace" \

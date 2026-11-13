@@ -166,6 +166,25 @@ smuggle in another `docker` flag. Every variable you add is readable by whatever
 runs in the container, which has open outbound network, so add only what the
 agent genuinely needs and use credentials you are willing to rotate.
 
+### Choosing the network
+
+By default the container is on Docker's default bridge, with open outbound
+network. `PI_SANDBOX_NETWORK` names another Docker network to run on instead,
+for example `PI_SANDBOX_NETWORK=my-fence pi`. The wrapper only passes the name
+on, so the fence is yours to build. A network made with `docker network create
+--internal` has no route out, and a relay container attached to it and to an
+ordinary network can forward only what you choose: for Pi's model API, an HTTP
+proxy in `HTTPS_PROXY` plus `NODE_USE_ENV_PROXY=1`, both named in
+`PI_SANDBOX_ENV`. Attached with `--alias host.docker.internal`, the relay is
+what that name resolves to on the network. Without npm through the relay, a new
+project's first session runs without the extensions. A set but empty value,
+`host` and `container:<name>` are refused.
+
+Docker Engine before 26.0 forwarded outside DNS lookups from internal networks,
+and on Linux the host may answer on the network's gateway address. So probe
+what your network reaches from inside before relying on it: the host by name
+and by address, `gateway.docker.internal`, public addresses and outside names.
+
 ## State and reset
 
 Pi's config and sessions live in a Docker volume named
@@ -399,6 +418,8 @@ pane run` through that socket would execute on the host.
   run unauthenticated local services while a session runs
   (`lsof -iTCP -sTCP:LISTEN -P` lists what is listening), and never enable
   Docker's TCP socket.
+  `PI_SANDBOX_NETWORK`, under Choosing the network, can put the container on a
+  network you have fenced instead.
 - The mounted project is fully readable and writable by the agent. Only launch
   it from a project whose contents you are willing to send to the model
   provider, and keep a remote you can restore from.
@@ -492,7 +513,10 @@ install build cache is left unused. It writes its findings to
 that uv picks Debian's Python 3.11 for a project that accepts it, syncs a
 Python project and fails if the state volume grows more than 30 MB, and
 records whether the container reaches a host service bound to 127.0.0.1 (it
-does on Docker Desktop). It plays a hostile session that leaves a bare
+does on Docker Desktop). On an internal network it creates and names in
+`PI_SANDBOX_NETWORK`, it checks that the session is on that network alone and
+reaches neither a public address the default session reaches nor, on Docker
+Desktop, that host service. It plays a hostile session that leaves a bare
 repository, a nested one whose name holds escape sequences, an unreadable
 directory, and a terminal left drawing black on black, kills Pi, and checks
 the exit warning names both repositories, notes the incomplete check and is

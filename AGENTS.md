@@ -76,9 +76,14 @@ Notes for agents and contributors changing this repo, from the security work on
   between docker and the terminal could stop it, so it is a documented limit.
 - The container reaches the host's network. On Docker Desktop a host server
   bound to 127.0.0.1 answered a container through `host.docker.internal` and
-  its IP 192.168.65.254 (2026-10-24). Docker has no flag that keeps the model
-  API and blocks the host, so this is a documented limit, and SECURITY.md
+  its IP 192.168.65.254 (2026-10-24). Docker has no single flag that keeps the
+  model API and blocks the host, so this is a documented limit, and SECURITY.md
   counts only reach through what pi-sandbox itself mounts, forwards or exposes.
+  `PI_SANDBOX_NETWORK` lets the user supply the fence. Measured on Docker
+  Desktop 29.9 (2026-11-13): an `--internal` network had no route to
+  192.168.65.254 or the internet, its DNS answered SERVFAIL for outside names,
+  a container attached with the alias `host.docker.internal` took over that
+  name, and `--network <id of the host network>` was refused by the daemon.
 - macOS file systems ignore case, and host Git opens `.GIT` for `.git` and
   `head` for `HEAD`, so any check of a Git name the agent can choose must
   ignore case. Docker Desktop also resolves a case variant through a writable

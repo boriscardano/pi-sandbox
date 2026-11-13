@@ -1979,6 +1979,32 @@ def test_wrapper_rejects_a_bogus_variable_name(tmp_path: Path) -> None:
     assert spaced_calls == []
 
 
+def test_wrapper_joins_only_the_network_named(tmp_path: Path) -> None:
+    """PI_SANDBOX_NETWORK puts the container on that network instead of the
+    default bridge, and is absent when unset."""
+
+    _, invocations = _run(tmp_path, also={"PI_SANDBOX_NETWORK": "fence_1.internal"})
+    _, default = _run(tmp_path / "b")
+    argv = _docker_run(invocations)
+
+    assert argv[argv.index("--network") + 1] == "fence_1.internal"
+    assert argv.count("--network") == 1
+    assert "--network" not in _docker_run(default)
+
+
+def test_wrapper_refuses_a_network_that_widens_reach(tmp_path: Path) -> None:
+    """The value must name one network, never the host's or another
+    container's namespace, and never smuggle in another docker flag. Set but
+    empty is refused, so a fence meant to be on is never silently off."""
+
+    for i, value in enumerate(("host", "container:pi", "--privileged", "a b", "")):
+        completed, calls = _run(tmp_path / str(i), also={"PI_SANDBOX_NETWORK": value})
+
+        assert completed.returncode == 2, value
+        assert "PI_SANDBOX_NETWORK" in completed.stderr, value
+        assert not any(argv[0] in ("run", "build") for argv in calls), value
+
+
 def test_wrapper_does_not_glob_the_variable_names_it_forwards(
     tmp_path: Path,
 ) -> None:

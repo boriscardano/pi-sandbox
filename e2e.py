@@ -7,8 +7,10 @@ not. It checks that a copy of the wrapper refuses the project it sits in,
 that uv still picks Debian's Python for a project that accepts it, syncs a
 Python project and checks that the state volume grows by little more than
 the venv, which the next session imports from offline, and records whether
-the container reaches a host service on 127.0.0.1. It plays a hostile session
-that tries to keep its git metadata out of the exit warnings or make them
+the container reaches a host service on 127.0.0.1, and checks that on an
+internal network it creates and names in PI_SANDBOX_NETWORK it reaches
+neither that nor a public address the default session reaches. It plays a
+hostile session that tries to keep its git metadata out of the exit warnings or make them
 unreadable, and checks they still name it.
 Then it ends sessions every way one can end and checks that no container
 is left behind, and rebuilds the image for a new Pi release and checks that
@@ -32,6 +34,8 @@ Both modes count build cache across the whole host, so run them without other
 sessions building. The report is printed and written to the file (default
 e2e-report.txt or e2e-storage.txt).
 """
+
+from __future__ import annotations
 
 import contextlib
 import http.server
@@ -240,7 +244,7 @@ def children(parent: int, name: str = "") -> list[str]:
 
 
 # Every session not yet ended, so a failed run still closes them all.
-OPEN_SESSIONS: list["Session"] = []
+OPEN_SESSIONS: list[Session] = []
 # Its write end is held only by this script, so a read of it returns when the
 # script dies, however it dies.
 SCRIPT_ALIVE, _SCRIPT_ALIVE_WRITE = os.pipe()
@@ -249,7 +253,7 @@ SCRIPT_ALIVE, _SCRIPT_ALIVE_WRITE = os.pipe()
 class Session:
     """One wrapper launch in a pseudo-terminal, as a Herdr pane runs it."""
 
-    def __init__(self, project: Path) -> None:
+    def __init__(self, project: Path, env: dict[str, str] | None = None) -> None:
         self.project = project
         # The terminal's session leader stands in for the pane's shell, and
         # runs the wrapper as its foreground job in a process group of its
@@ -275,6 +279,10 @@ class Session:
                         # As a shell does, so a launch through a symlink keeps
                         # that spelling.
                         os.environ["PWD"] = str(project)
+                        # The caller's own fence must not decide where the
+                        # other checks run.
+                        os.environ.pop("PI_SANDBOX_NETWORK", None)
+                        os.environ.update(env or {})
                         # Python ignores SIGPIPE, and a shell would not.
                         signal.signal(signal.SIGPIPE, signal.SIG_DFL)
                         os.execv(
@@ -472,8 +480,8 @@ EXITS: dict[str, Callable[[Session], object]] = {
 GROUP_KILL = "SIGKILL to the whole process group"
 
 
-def start(project: Path) -> Session:
-    session = Session(project)
+def start(project: Path, env: dict[str, str] | None = None) -> Session:
+    session = Session(project, env)
     wait_ready([session])
     return session
 
@@ -762,6 +770,18 @@ def checks(lines: list[str]) -> bool:
         lines.append(
             f"  host service on 127.0.0.1, from the container: {reach or 'probe failed'}"
         )
+        networks = docker(
+            "inspect", "--format", NETWORKS, session.container, check=True
+        )
+        lines.append(f"  networks without PI_SANDBOX_NETWORK: {networks}")
+        failed |= networks != "bridge"
+        # The control for the internal network's check below: this host can
+        # reach the public address at all.
+        outside = docker(
+            "exec", session.container, "timeout", "30", "python3", "-c", OUTSIDE_PROBE
+        )
+        lines.append(f"  1.1.1.1:443, from the container: {outside}")
+        failed |= outside != "reached"
         pinned = pinned_extensions()
         installed = docker("exec", session.container, "sh", "-c", INSTALLED)
         lines.append("  extensions a fresh volume got:")
@@ -911,8 +931,82 @@ def checks(lines: list[str]) -> bool:
             f"old image kept {kept}, Pi install build cache left unused {len(left)}"
         )
         failed |= version in ("", OLDER_PI) or kept or bool(left)
+    failed |= network(lines)
     failed |= refusals(lines, image)
     return failed
+
+
+NETWORKS = "{{range $name, $_ := .NetworkSettings.Networks}}{{$name}} {{end}}"
+
+
+# A public address, which an internal network has no route to.
+OUTSIDE_PROBE = """
+import socket
+try:
+    socket.create_connection(("1.1.1.1", 443), timeout=5).close()
+    print("reached")
+except OSError as error:
+    print(f"not reached ({type(error).__name__})")
+"""
+
+
+def network(lines: list[str]) -> bool:
+    """PI_SANDBOX_NETWORK puts the session on that network alone. On an
+    internal one it does not reach the public address a default session
+    reaches, nor, on Docker Desktop, a server on the host's 127.0.0.1 (Linux
+    has no host.docker.internal, so there that probe shows nothing)."""
+
+    name = f"pi-e2e-net-{os.getpid()}-{int(time.time())}"
+    docker("network", "create", "--internal", name, check=True)
+    try:
+        with (
+            throwaway_project() as project,
+            http.server.ThreadingHTTPServer(("127.0.0.1", 0), Answer) as server,
+        ):
+            threading.Thread(target=server.serve_forever, daemon=True).start()
+            try:
+                session = start(project, {"PI_SANDBOX_NETWORK": name})
+                networks = docker(
+                    "inspect", "--format", NETWORKS, session.container, check=True
+                )
+                outside = docker(
+                    "exec",
+                    session.container,
+                    "timeout",
+                    "30",
+                    "python3",
+                    "-c",
+                    OUTSIDE_PROBE,
+                )
+                host = docker(
+                    "exec",
+                    session.container,
+                    "timeout",
+                    "30",
+                    "python3",
+                    "-c",
+                    HOST_PROBE,
+                    str(server.server_address[1]),
+                )
+                quit_pi(session)
+            finally:
+                server.shutdown()
+    finally:
+        docker("network", "rm", name)
+    left = docker("network", "ls", "-q", "--filter", f"name=^{name}$")
+    lines.append("")
+    lines.append(f"PI_SANDBOX_NETWORK={name} (internal):")
+    lines.append(f"  networks: {networks}")
+    lines.append(f"  1.1.1.1:443: {outside}")
+    lines.append(f"  host service on 127.0.0.1: {host}")
+    lines.append(f"  network left behind: {bool(left)}")
+    # A probe that did not run prints nothing, which must not pass.
+    return (
+        networks != name
+        or not outside.startswith("not reached")
+        or not host.startswith("not reached")
+        or bool(left)
+    )
 
 
 def exit_report(project: Path, lines: list[str]) -> bool:

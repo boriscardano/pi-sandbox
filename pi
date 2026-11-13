@@ -17,6 +17,8 @@
 # Forward further host variables by naming them in PI_SANDBOX_ENV, for example
 # PI_SANDBOX_ENV='TYPESAFE_API_KEY OTHER_TOKEN'. Every variable you add is
 # readable by whatever runs in the container, so add only what it needs.
+# PI_SANDBOX_NETWORK names a Docker network to run on instead of the default
+# bridge, for a fence you build (README, Choosing the network).
 #
 # The script is named `pi` on purpose: Herdr identifies a pane's agent from the
 # launched program's name, so this shows up as a real Pi agent in Herdr.

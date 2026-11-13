@@ -7,7 +7,9 @@ not. It checks that a copy of the wrapper refuses the project it sits in,
 that uv still picks Debian's Python for a project that accepts it, syncs a
 Python project and checks that the state volume grows by little more than
 the venv, which the next session imports from offline, and records whether
-the container reaches a host service on 127.0.0.1. It plays a hostile session
+the container reaches a host service on 127.0.0.1, and that on an internal
+network named in PI_SANDBOX_NETWORK it reaches only that network's relay. It
+plays a hostile session
 that tries to keep its git metadata out of the exit warnings or make them
 unreadable, and checks they still name it.
 Then it ends sessions every way one can end and checks that no container

@@ -8,9 +8,8 @@ that uv still picks Debian's Python for a project that accepts it, syncs a
 Python project and checks that the state volume grows by little more than
 the venv, which the next session imports from offline, and records whether
 the container reaches a host service on 127.0.0.1, and that on an internal
-network named in PI_SANDBOX_NETWORK it reaches only that network's relay. It
-plays a hostile session
-that tries to keep its git metadata out of the exit warnings or make them
+network named in PI_SANDBOX_NETWORK it reaches neither that nor the internet.
+It plays a hostile session that tries to keep its git metadata out of the exit warnings or make them
 unreadable, and checks they still name it.
 Then it ends sessions every way one can end and checks that no container
 is left behind, and rebuilds the image for a new Pi release and checks that
@@ -279,6 +278,9 @@ class Session:
                         # As a shell does, so a launch through a symlink keeps
                         # that spelling.
                         os.environ["PWD"] = str(project)
+                        # The caller's own fence must not decide where the
+                        # other checks run.
+                        os.environ.pop("PI_SANDBOX_NETWORK", None)
                         os.environ.update(env or {})
                         # Python ignores SIGPIPE, and a shell would not.
                         signal.signal(signal.SIGPIPE, signal.SIG_DFL)
@@ -921,7 +923,7 @@ def checks(lines: list[str]) -> bool:
             f"old image kept {kept}, Pi install build cache left unused {len(left)}"
         )
         failed |= version in ("", OLDER_PI) or kept or bool(left)
-    failed |= network(lines, image)
+    failed |= network(lines)
     failed |= refusals(lines, image)
     return failed
 
@@ -929,35 +931,25 @@ def checks(lines: list[str]) -> bool:
 NETWORKS = "{{range $name, $_ := .NetworkSettings.Networks}}{{$name}} {{end}}"
 
 
-def network(lines: list[str], image: str) -> bool:
+# A public address, which an internal network has no route to.
+OUTSIDE_PROBE = """
+import socket
+try:
+    socket.create_connection(("1.1.1.1", 443), timeout=5).close()
+    print("reached")
+except OSError as error:
+    print(f"not reached ({type(error).__name__})")
+"""
+
+
+def network(lines: list[str]) -> bool:
     """PI_SANDBOX_NETWORK puts the session on that network alone. On an
-    internal network whose other container answers as host.docker.internal,
-    the name reaches that container, and a server on the host's 127.0.0.1,
-    which a default session reaches on Docker Desktop, is out of reach."""
+    internal one it reaches neither a public address nor a server on the
+    host's 127.0.0.1, which a default session reaches on Docker Desktop."""
 
     name = f"pi-e2e-net-{os.getpid()}"
-    relay = f"{name}-relay"
-    failed = False
     docker("network", "create", "--internal", name, check=True)
     try:
-        docker(
-            "run",
-            "-d",
-            "--rm",
-            "--name",
-            relay,
-            "--network",
-            name,
-            "--network-alias",
-            "host.docker.internal",
-            "--entrypoint",
-            "python3",
-            image,
-            "-m",
-            "http.server",
-            "8000",
-            check=True,
-        )
         with (
             throwaway_project() as project,
             http.server.ThreadingHTTPServer(("127.0.0.1", 0), Answer) as server,
@@ -968,32 +960,28 @@ def network(lines: list[str], image: str) -> bool:
                 networks = docker(
                     "inspect", "--format", NETWORKS, session.container, check=True
                 )
-                relayed, host = (
-                    docker(
-                        "exec",
-                        session.container,
-                        "timeout",
-                        "30",
-                        "python3",
-                        "-c",
-                        HOST_PROBE,
-                        str(port),
-                    )
-                    for port in (8000, server.server_address[1])
+                probe = ("exec", session.container, "timeout", "30")
+                outside = docker(*probe, "python3", "-c", OUTSIDE_PROBE)
+                host = docker(
+                    *probe,
+                    "python3",
+                    "-c",
+                    HOST_PROBE,
+                    str(server.server_address[1]),
                 )
                 quit_pi(session)
             finally:
                 server.shutdown()
-        lines.append("")
-        lines.append(f"PI_SANDBOX_NETWORK={name} (internal):")
-        lines.append(f"  networks: {networks}")
-        lines.append(f"  host.docker.internal:8000, the network's relay: {relayed}")
-        lines.append(f"  host service on 127.0.0.1: {host}")
-        failed = networks != name or relayed != "reached" or host == "reached"
     finally:
-        docker("rm", "-f", relay)
         docker("network", "rm", name)
-    return failed
+    left = docker("network", "ls", "-q", "--filter", f"name=^{name}$")
+    lines.append("")
+    lines.append(f"PI_SANDBOX_NETWORK={name} (internal):")
+    lines.append(f"  networks: {networks}")
+    lines.append(f"  1.1.1.1:443: {outside}")
+    lines.append(f"  host service on 127.0.0.1: {host}")
+    lines.append(f"  network left behind: {bool(left)}")
+    return networks != name or outside == "reached" or host == "reached" or bool(left)
 
 
 def exit_report(project: Path, lines: list[str]) -> bool:

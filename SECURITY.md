@@ -38,6 +38,9 @@ The known limitations in the README are not vulnerabilities. In particular:
   it, and anything that reads the pane reads what it wrote
 - nested git metadata the agent creates is only warned about at exit, in the
   forms the README lists
+- whatever the network named in `PI_SANDBOX_NETWORK` lets the container
+  reach, since that network is the user's own. A value the wrapper accepts
+  that joins another namespace or adds a docker flag does count
 - a container escape defeats the boundary, and a container is not a virtual
   machine
 

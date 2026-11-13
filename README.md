@@ -169,25 +169,19 @@ agent genuinely needs and use credentials you are willing to rotate.
 ### Choosing the network
 
 By default the container is on Docker's default bridge, with open outbound
-network. `PI_SANDBOX_NETWORK` names another Docker network to run on instead:
-
-```sh
-PI_SANDBOX_NETWORK=my-fence pi
-```
-
-The wrapper only passes the name on. What the container can reach is then what
-that network allows, so the fence is yours to build. For example, a network
-created with `docker network create --internal my-fence` has no route out and
-resolves no outside names, and a relay container you attach to it and to an
-ordinary network can forward only what you choose: the model API through an
-HTTP proxy named in `HTTPS_PROXY` (forwarded with `PI_SANDBOX_ENV`, plus
-`NODE_USE_ENV_PROXY=1` for Pi), and selected host ports. Attached with
-`--alias host.docker.internal`, the relay is what that name resolves to inside
-the network. Measured on Docker Desktop on 2026-11-13: on such a network the
-host's own address `192.168.65.254` and public addresses were unreachable, and
-outside names failed to resolve. Check yours the same way before relying on it.
-The value must be a plain network name. `host` and `container:<name>` are
-refused, since they would share a namespace the sandbox never grants.
+network. `PI_SANDBOX_NETWORK` names another Docker network to run on instead,
+for example `PI_SANDBOX_NETWORK=my-fence pi`. The wrapper only passes the name
+on, so the fence is yours to build. A network made with
+`docker network create --internal` has no route out, and a relay container
+attached to it and to an ordinary network can forward only what you choose:
+for Pi's model API, an HTTP proxy in `HTTPS_PROXY` plus `NODE_USE_ENV_PROXY=1`,
+both named in `PI_SANDBOX_ENV`. Attached with `--alias host.docker.internal`,
+the relay is what that name resolves to on the network. Docker Engine before
+26.0 forwarded outside DNS lookups from internal networks, and on Linux the
+host may answer on the network's gateway address, so probe what your network
+reaches from inside before relying on it: the host by name and by address,
+`gateway.docker.internal`, public addresses and outside names. A set but
+empty value, `host` and `container:<name>` are refused.
 
 ## State and reset
 
@@ -517,9 +511,9 @@ install build cache is left unused. It writes its findings to
 that uv picks Debian's Python 3.11 for a project that accepts it, syncs a
 Python project and fails if the state volume grows more than 30 MB, and
 records whether the container reaches a host service bound to 127.0.0.1 (it
-does on Docker Desktop). On an internal network named in `PI_SANDBOX_NETWORK`, it
-checks that the session is on that network alone, reaches the network's relay
-as `host.docker.internal` and does not reach that host service. It plays a hostile session that leaves a bare
+does on Docker Desktop). On an internal network named in
+`PI_SANDBOX_NETWORK`, it checks that the session is on that network alone and
+reaches neither that host service nor a public address. It plays a hostile session that leaves a bare
 repository, a nested one whose name holds escape sequences, an unreadable
 directory, and a terminal left drawing black on black, kills Pi, and checks
 the exit warning names both repositories, notes the incomplete check and is

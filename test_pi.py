@@ -1994,11 +1994,10 @@ def test_wrapper_joins_only_the_network_named(tmp_path: Path) -> None:
 
 def test_wrapper_refuses_a_network_that_widens_reach(tmp_path: Path) -> None:
     """The value must name one network, never the host's or another
-    container's namespace, and never smuggle in another docker flag."""
+    container's namespace, and never smuggle in another docker flag. Set but
+    empty is refused, so a fence meant to be on is never silently off."""
 
-    for i, value in enumerate(
-        ("host", "HOST", "container:pi", "--privileged", "a b", "a,b", "-x")
-    ):
+    for i, value in enumerate(("host", "container:pi", "--privileged", "a b", "")):
         completed, calls = _run(tmp_path / str(i), also={"PI_SANDBOX_NETWORK": value})
 
         assert completed.returncode == 2, value

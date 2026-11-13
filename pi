@@ -170,16 +170,16 @@ for name in $(printf '%s' "${PI_SANDBOX_ENV:-}" | tr ',' ' '); do
 done
 set +f
 
-# An opt-in network to run on instead of Docker's default bridge, such as an
-# internal one whose only way out is a relay the user runs. Only a network's
-# name is taken: `host` and `container:<name>` would share a namespace the
-# sandbox never grants, and anything else could smuggle in another docker
-# flag. Docker's own predefined names are lower case, the refusal of `host`
-# ignores case anyway.
+# An opt-in Docker network to run on instead of the default bridge. Only a
+# network name is taken (Docker's own rule), never `host`, which shares the
+# host's namespace, nor `container:<name>`, nor anything that could carry
+# another docker flag. Docker itself refuses the host network by its id. Set
+# but empty is refused too, so a fence the user meant to set is never
+# silently dropped.
 network_flags=''
-if [ -n "${PI_SANDBOX_NETWORK:-}" ]; then
+if [ -n "${PI_SANDBOX_NETWORK+set}" ]; then
     case "$PI_SANDBOX_NETWORK" in
-        [Hh][Oo][Ss][Tt] | [!A-Za-z0-9]* | *[!A-Za-z0-9_.-]*)
+        '' | host | [!A-Za-z0-9]* | *[!A-Za-z0-9_.-]*)
             printf '%s\n' "PI_SANDBOX_NETWORK: not a network name, or one that shares a namespace: $PI_SANDBOX_NETWORK" >&2
             exit 2
             ;;

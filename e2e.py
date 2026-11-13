@@ -7,9 +7,10 @@ not. It checks that a copy of the wrapper refuses the project it sits in,
 that uv still picks Debian's Python for a project that accepts it, syncs a
 Python project and checks that the state volume grows by little more than
 the venv, which the next session imports from offline, and records whether
-the container reaches a host service on 127.0.0.1, and that on an internal
-network named in PI_SANDBOX_NETWORK it reaches neither that nor the internet.
-It plays a hostile session that tries to keep its git metadata out of the exit warnings or make them
+the container reaches a host service on 127.0.0.1, and checks that on an
+internal network named in PI_SANDBOX_NETWORK it reaches neither that nor a
+public address the default session reaches. It plays a hostile session that
+tries to keep its git metadata out of the exit warnings or make them
 unreadable, and checks they still name it.
 Then it ends sessions every way one can end and checks that no container
 is left behind, and rebuilds the image for a new Pi release and checks that
@@ -774,6 +775,13 @@ def checks(lines: list[str]) -> bool:
         )
         lines.append(f"  networks without PI_SANDBOX_NETWORK: {networks}")
         failed |= networks != "bridge"
+        # The control for the internal network's check below: this host can
+        # reach the public address at all.
+        outside = docker(
+            "exec", session.container, "timeout", "30", "python3", "-c", OUTSIDE_PROBE
+        )
+        lines.append(f"  1.1.1.1:443, from the container: {outside}")
+        failed |= outside != "reached"
         pinned = pinned_extensions()
         installed = docker("exec", session.container, "sh", "-c", INSTALLED)
         lines.append("  extensions a fresh volume got:")
@@ -944,10 +952,11 @@ except OSError as error:
 
 def network(lines: list[str]) -> bool:
     """PI_SANDBOX_NETWORK puts the session on that network alone. On an
-    internal one it reaches neither a public address nor a server on the
-    host's 127.0.0.1, which a default session reaches on Docker Desktop."""
+    internal one it does not reach the public address a default session
+    reaches, nor, on Docker Desktop, a server on the host's 127.0.0.1 (Linux
+    has no host.docker.internal, so there that probe shows nothing)."""
 
-    name = f"pi-e2e-net-{os.getpid()}"
+    name = f"pi-e2e-net-{os.getpid()}-{int(time.time())}"
     docker("network", "create", "--internal", name, check=True)
     try:
         with (
@@ -960,10 +969,20 @@ def network(lines: list[str]) -> bool:
                 networks = docker(
                     "inspect", "--format", NETWORKS, session.container, check=True
                 )
-                probe = ("exec", session.container, "timeout", "30")
-                outside = docker(*probe, "python3", "-c", OUTSIDE_PROBE)
+                outside = docker(
+                    "exec",
+                    session.container,
+                    "timeout",
+                    "30",
+                    "python3",
+                    "-c",
+                    OUTSIDE_PROBE,
+                )
                 host = docker(
-                    *probe,
+                    "exec",
+                    session.container,
+                    "timeout",
+                    "30",
                     "python3",
                     "-c",
                     HOST_PROBE,
@@ -981,7 +1000,13 @@ def network(lines: list[str]) -> bool:
     lines.append(f"  1.1.1.1:443: {outside}")
     lines.append(f"  host service on 127.0.0.1: {host}")
     lines.append(f"  network left behind: {bool(left)}")
-    return networks != name or outside == "reached" or host == "reached" or bool(left)
+    # A probe that did not run prints nothing, which must not pass.
+    return (
+        networks != name
+        or not outside.startswith("not reached")
+        or not host.startswith("not reached")
+        or bool(left)
+    )
 
 
 def exit_report(project: Path, lines: list[str]) -> bool:

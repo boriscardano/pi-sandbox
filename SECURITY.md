@@ -13,6 +13,9 @@ boundary. For example:
   forwards or exposes, such as the Docker socket or a host Herdr socket
 - obtaining a credential the README says the container does not receive, such
   as a host Pi OAuth token or any key other than the ones the README lists
+- a `PI_SANDBOX_NETWORK` value the wrapper accepts that puts the container in
+  the host's or another container's network namespace, or passes docker
+  another flag
 
 ## What does not count
 
@@ -39,8 +42,7 @@ The known limitations in the README are not vulnerabilities. In particular:
 - nested git metadata the agent creates is only warned about at exit, in the
   forms the README lists
 - whatever the network named in `PI_SANDBOX_NETWORK` lets the container
-  reach, since that network is the user's own. A value the wrapper accepts
-  that joins another namespace or adds a docker flag does count
+  reach, since that network is the user's own
 - a container escape defeats the boundary, and a container is not a virtual
   machine
 
